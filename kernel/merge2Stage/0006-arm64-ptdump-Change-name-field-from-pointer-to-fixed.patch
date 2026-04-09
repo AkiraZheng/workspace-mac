@@ -1,0 +1,57 @@
+From 53d4cfb92bf50966f0783bd5d0a4b993788af001 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sat, 4 Apr 2026 04:21:51 +0000
+Subject: [PATCH 6/6] arm64: ptdump: Change name field from pointer to
+ fixed-size array
+
+Use char name[4] instead of const char *name to avoid pointer indirection
+and improve cache locality.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/ptdump.h |  2 +-
+ arch/arm64/mm/ptdump.c          | 12 ++++++++++--
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/include/asm/ptdump.h b/arch/arm64/include/asm/ptdump.h
+index c67e235e5a59..d5b6fb71b88c 100644
+--- a/arch/arm64/include/asm/ptdump.h
++++ b/arch/arm64/include/asm/ptdump.h
+@@ -34,7 +34,7 @@ struct ptdump_prot_bits {
+ 
+ struct ptdump_pg_level {
+ 	const struct ptdump_prot_bits *bits;
+-	const char *name;
++	char name[4];
+ 	size_t num;
+ 	u64 mask;
+ };
+diff --git a/arch/arm64/mm/ptdump.c b/arch/arm64/mm/ptdump.c
+index bb97ab8405b1..6b9a05a2a4a4 100644
+--- a/arch/arm64/mm/ptdump.c
++++ b/arch/arm64/mm/ptdump.c
+@@ -155,11 +155,19 @@ static struct ptdump_pg_level kernel_pg_levels[] = {
+ 		.bits	= pte_bits,
+ 		.num	= ARRAY_SIZE(pte_bits),
+ 	}, { /* pud */
+-		.name	= (CONFIG_PGTABLE_LEVELS > 3) ? "PUD" : "PGD",
++#if CONFIG_PGTABLE_LEVELS > 3
++		.name	= "PUD",
++#else
++		.name	= "PGD",
++#endif
+ 		.bits	= pte_bits,
+ 		.num	= ARRAY_SIZE(pte_bits),
+ 	}, { /* pmd */
+-		.name	= (CONFIG_PGTABLE_LEVELS > 2) ? "PMD" : "PGD",
++#if CONFIG_PGTABLE_LEVELS > 2
++		.name	= "PMD",
++#else
++		.name	= "PGD",
++#endif
+ 		.bits	= pte_bits,
+ 		.num	= ARRAY_SIZE(pte_bits),
+ 	}, { /* pte */
+-- 
+2.43.0
+

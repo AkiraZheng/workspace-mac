@@ -1,0 +1,39 @@
+From 5b2c030db0eb66ec17b729b60b8cef29b0166b70 Mon Sep 17 00:00:00 2001
+From: root <root@localhost>
+Date: Thu, 2 Apr 2026 01:29:24 +0000
+Subject: [PATCH 4/6] arm64: ptdump: Don't override the level when operating on
+ the stage-2 tables
+
+Ptdump uses the init_mm structure directly to dump the kernel
+pagetables. When ptdump is called on the stage-2 pagetables, this mm
+argument is not used. Prevent the level from being overwritten by
+checking the argument against NULL.
+
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Acked-by: Will Deacon <will@kernel.org>
+Link: https://lore.kernel.org/r/20240909124721.1672199-5-sebastianene@google.com
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ arch/arm64/mm/ptdump.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/arm64/mm/ptdump.c b/arch/arm64/mm/ptdump.c
+index dad93756723d..bb97ab8405b1 100644
+--- a/arch/arm64/mm/ptdump.c
++++ b/arch/arm64/mm/ptdump.c
+@@ -224,6 +224,11 @@ void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
+ 	static const char units[] = "KMGTPE";
+ 	u64 prot = 0;
+ 
++	/* check if the current level has been folded dynamically */
++	if (st->mm && ((level == 1 && mm_p4d_folded(st->mm)) ||
++	    (level == 2 && mm_pud_folded(st->mm))))
++		level = 0;
++
+ 	if (level >= 0)
+ 		prot = val & pg_level[level].mask;
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,627 @@
+#!/bin/bash
+#==============================================================================
+# OpenEuler Kernel Build Script for Virtualization Support
+# 适用于: openEuler 24.03 (LTS) aarch64
+#
+# 支持两种编译模式:
+#   - native:  编译原生openEuler内核
+#   - stage2: 编译包含stage2页表dump功能的内核（用于KVM调试）
+#==============================================================================
+
+set -e
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# 默认编译模式
+BUILD_MODE="native"
+
+# 是否执行 make mrproper（清理编译环境）
+# 默认 false，改动代码后增量编译会更快
+# 加上 --clean 参数才会执行
+CLEAN_BUILD=false
+
+# 源码目录
+KERNEL_SOURCE_DIR="/root/openeuler_code/kernel"
+
+# Stage2 patch 目录
+STAGE2_PATCH_DIR="/mnt/kernel/merge2Stage"
+
+# 日志函数
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+log_stage2() {
+    echo -e "${BLUE}[STAGE2]${NC} $1"
+}
+
+# 检查是否为 root 用户
+check_root() {
+    if [[ $EUID -eq 0 ]]; then
+        log_warn "Running as root. Some operations may not need sudo."
+    fi
+}
+
+# 检查系统环境
+check_env() {
+    log_info "Checking system environment..."
+
+    # 检查 OS 版本
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
+        log_info "OS: $PRETTY_NAME"
+    fi
+
+    # 检查架构
+    ARCH=$(arch)
+    if [[ "$ARCH" != "aarch64" ]]; then
+        log_warn "Architecture is $ARCH, but this script is optimized for aarch64"
+    fi
+
+    # 检查 CPU 核心数
+    NPROC=$(nproc)
+    log_info "CPU cores: $NPROC"
+
+    # 检查当前内核版本
+    CURRENT_KERNEL=$(uname -r)
+    log_info "Current kernel: $CURRENT_KERNEL"
+}
+
+# 恢复被修改的文件
+restore_modified_files() {
+    log_info "Checking for modified files..."
+
+    # 检查 KVM 相关文件是否被修改
+    MODIFIED_FILES=$(git status --short 2>/dev/null | grep -E "arch/arm64/(kvm|include/asm/kvm|mm/ptdump)" || true)
+
+    if [[ -n "$MODIFIED_FILES" ]]; then
+        log_warn "Found modified files:"
+        echo "$MODIFIED_FILES"
+        log_info "Restoring modified files..."
+
+        git checkout arch/arm64/kvm/Kconfig \
+                    arch/arm64/include/asm/kvm_mmu.h \
+                    arch/arm64/include/asm/kvm_pgtable.h \
+                    arch/arm64/include/asm/ptdump.h \
+                    arch/arm64/kvm/Makefile \
+                    arch/arm64/kvm/arm.c \
+                    arch/arm64/kvm/hyp/pgtable.c \
+                    arch/arm64/mm/ptdump.c \
+                    arch/arm64/configs/openeuler_defconfig 2>/dev/null || true
+        log_info "Files restored"
+    else
+        log_info "No modified files found"
+    fi
+}
+
+# 检查stage2 patch是否已应用
+check_stage2_applied() {
+    # 检查最新的commit是否是stage2 dump的commit
+    if git log --oneline -1 2>/dev/null | grep -q "630d20bac47f"; then
+        return 0  # 已应用
+    fi
+    return 1  # 未应用
+}
+
+# 应用stage2 patch
+apply_stage2_patches() {
+    log_stage2 "Checking stage2 patches..."
+
+    if check_stage2_applied; then
+        log_stage2 "Stage2 patches already applied (commit 630d20bac47f found)"
+        return 0
+    fi
+
+    log_stage2 "Stage2 patches not found, need to checkout from clean repo"
+
+    # 检查是否有备份的openeuler_defconfig
+    if [[ -f "${STAGE2_PATCH_DIR}/openeuler_defconfig.backup" ]]; then
+        log_stage2 "Restoring openeuler_defconfig from backup"
+        cp "${STAGE2_PATCH_DIR}/openeuler_defconfig.backup" arch/arm64/configs/openeuler_defconfig
+    fi
+
+    return 0
+}
+
+# 配置内核
+configure_kernel() {
+    log_info "Configuring kernel..."
+
+    # 根据编译模式选择配置
+    if [[ "$BUILD_MODE" == "stage2" ]]; then
+        configure_kernel_stage2
+    else
+        configure_kernel_native
+    fi
+
+    log_info "Kernel configuration complete"
+}
+
+# 原生欧拉配置
+configure_kernel_native() {
+    log_info "Configuring native OpenEuler kernel..."
+
+    if [[ -f .config ]]; then
+        # 增量构建：复用现有 .config，在末尾追加配置项
+        log_info "Incremental build - appending to existing .config"
+        cat >> .config << EOF
+
+# Added by build_repo.sh (native mode)
+CONFIG_VIRTUALIZATION=y
+CONFIG_KVM=y
+CONFIG_VIRT_DRIVERS=y
+CONFIG_SYSTEM_TRUSTED_KEYS=""
+CONFIG_SYSTEM_EXTRA_CERTIFICATE=n
+EOF
+        log_info "Native kernel configuration updated (incremental)"
+    else
+        # 完整构建：需要先生成 .config
+        if [[ "$CLEAN_BUILD" != "true" ]]; then
+            log_error ".config not found! Run with --clean first, or touch .config and run again"
+            exit 1
+        fi
+
+        log_info "Performing clean build (make mrproper)..."
+        make mrproper
+
+        CONFIG_FILE="/boot/config-${CURRENT_KERNEL}"
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            AVAILABLE_CONFIG=$(ls -1 /boot/config-* 2>/dev/null | head -1)
+            if [[ -n "$AVAILABLE_CONFIG" ]]; then
+                CONFIG_FILE="$AVAILABLE_CONFIG"
+                log_warn "Current kernel config not found, using: $CONFIG_FILE"
+            else
+                log_error "No config file found in /boot"
+                exit 1
+            fi
+        fi
+        cp "$CONFIG_FILE" .config
+
+        scripts/config --enable CONFIG_VIRTUALIZATION
+        scripts/config --enable CONFIG_KVM
+        scripts/config --enable CONFIG_VIRT_DRIVERS
+        scripts/config --disable CONFIG_SYSTEM_TRUSTED_KEYS
+        scripts/config --disable CONFIG_SYSTEM_EXTRA_CERTIFICATE
+
+        make olddefconfig
+        log_info "Native kernel configuration complete"
+    fi
+}
+
+# Stage2欧拉配置
+configure_kernel_stage2() {
+    log_stage2 "Configuring Stage2 dump kernel..."
+
+    # 注意: 假设 stage2 patch 已经合入到 kernel 代码中
+    # (检查 commit 630d20bac47f 是否存在来确认)
+
+    if [[ -f .config ]]; then
+        # 增量构建：复用现有 .config，在末尾追加配置项
+        log_stage2 "Incremental build - appending to existing .config"
+        cat >> .config << EOF
+
+# Added by build_repo.sh (stage2 mode)
+CONFIG_PTDUMP_CORE=y
+CONFIG_PTDUMP_DEBUGFS=y
+CONFIG_PTDUMP_STAGE2_DEBUGFS=y
+CONFIG_VIRTUALIZATION=y
+CONFIG_KVM=y
+CONFIG_SYSTEM_TRUSTED_KEYS=""
+CONFIG_SYSTEM_EXTRA_CERTIFICATE=n
+EOF
+        log_stage2 "Stage2 kernel configuration updated (incremental)"
+    else
+        # 完整构建：需要先生成 .config
+        if [[ "$CLEAN_BUILD" != "true" ]]; then
+            log_error ".config not found! Run with --clean first, or touch .config and run again"
+            exit 1
+        fi
+
+        log_stage2 "Performing clean build (make mrproper)..."
+        make mrproper
+
+        AVAILABLE_CONFIG=$(ls -1 /boot/config-* 2>/dev/null | head -1)
+        if [[ -n "$AVAILABLE_CONFIG" ]]; then
+            log_stage2 "Using base config from: $AVAILABLE_CONFIG"
+            cp "$AVAILABLE_CONFIG" .config
+            make olddefconfig
+        else
+            log_stage2 "No base config found, using defconfig"
+            make defconfig
+        fi
+
+        make virt.config
+
+        scripts/config --disable CONFIG_SYSTEM_TRUSTED_KEYS
+        scripts/config --disable CONFIG_SYSTEM_EXTRA_CERTIFICATE
+        scripts/config --enable CONFIG_PTDUMP_CORE
+        scripts/config --enable CONFIG_PTDUMP_DEBUGFS
+        scripts/config --enable CONFIG_PTDUMP_STAGE2_DEBUGFS
+        scripts/config --enable CONFIG_VIRTUALIZATION
+        scripts/config --enable CONFIG_KVM
+
+        make olddefconfig
+        log_stage2 "Stage2 kernel configuration complete"
+    fi
+
+    # 验证关键配置项
+    log_stage2 "Verifying configurations..."
+
+    local missing=0
+
+    check_config "CONFIG_PTDUMP_CORE" || missing=1
+    check_config "CONFIG_PTDUMP_STAGE2_DEBUGFS" || missing=1
+    check_config "CONFIG_DEBUG_FS" || missing=1
+    check_config "CONFIG_DEBUG_KERNEL" || missing=1
+    check_config "CONFIG_KVM" || missing=1
+
+    if [[ $missing -eq 1 ]]; then
+        log_error "Some configurations are missing! Please check .config"
+        exit 1
+    fi
+
+    log_stage2 "All required configurations are enabled"
+}
+
+# 检查配置项是否启用
+check_config() {
+    local config_name="$1"
+    if grep -q "^${config_name}=y" .config 2>/dev/null; then
+        log_stage2 "  ${config_name}=y"
+        return 0
+    else
+        log_error "  ${config_name} is NOT enabled!"
+        return 1
+    fi
+}
+
+# 清理旧内核（避免生成 .old 镜像）
+clean_old_kernel() {
+    log_info "Cleaning up old kernel installations..."
+
+    # 获取当前安装的内核版本列表
+    local current_version=$(uname -r)
+    log_info "Current running kernel: $current_version"
+
+    # 列出已安装的内核（排除当前运行的内核）
+    if [[ -d /lib/modules ]]; then
+        for kver in /lib/modules/*; do
+            local ver=$(basename "$kver")
+            # 跳过正在运行的内核
+            if [[ "$ver" == "$current_version" ]]; then
+                continue
+            fi
+            # 跳过我们的目标内核版本（避免误删）
+            if [[ "$ver" == "6.6.0+stage2" ]] || [[ "$ver" == "6.6.0+" ]]; then
+                continue
+            fi
+
+            log_info "Removing old kernel: $ver"
+            rm -rf "$kver"
+        done
+    fi
+
+    # 清理 /boot 下的旧内核文件（排除当前和目标版本）
+    if [[ -d /boot ]]; then
+        for f in /boot/vmlinuz-* /boot/initramfs-* /boot/System.map-* /boot/config-*; do
+            [[ -f "$f" ]] || continue
+            local fname=$(basename "$f")
+            # 跳过当前运行内核
+            [[ "$fname" == *"-$current_version"* ]] && continue
+            # 跳过目标内核版本
+            [[ "$fname" == *"-6.6.0+stage2"* ]] && continue
+            [[ "$fname" == *"-6.6.0+"* ]] && continue
+            log_info "Removing old boot file: $fname"
+            rm -f "$f"
+        done
+    fi
+
+    log_info "Old kernel cleanup complete"
+}
+
+# 编译内核（支持断点续编译）
+build_kernel() {
+    log_info "Building kernel with make -j$(nproc)..."
+
+    # 检查是否已经编译过（支持断点续编译）
+    if [[ -f arch/arm64/boot/Image ]] && [[ -f .config ]]; then
+        log_info "Kernel image already exists, checking if rebuild needed..."
+        # 比较时间戳，如果 .config 比 Image 新则重新编译
+        if [[ arch/arm64/boot/Image -nt .config ]]; then
+            log_info "Kernel image is up to date, skipping build"
+            return 0
+        else
+            log_info "Kernel image is outdated, rebuilding..."
+        fi
+    fi
+
+    # 编译内核镜像
+    make -j$(nproc) Image
+
+    if [[ -f arch/arm64/boot/Image ]]; then
+        log_info "Kernel image built successfully: arch/arm64/boot/Image"
+        ls -lh arch/arm64/boot/Image
+    else
+        log_error "Kernel image build failed"
+        exit 1
+    fi
+}
+
+# 编译内核模块（支持断点续编译）
+build_modules() {
+    log_info "Building kernel modules with make -j$(nproc)..."
+
+    # 检查是否已经编译过
+    if [[ -f Module.symvers ]] && [[ -f .config ]]; then
+        if [[ Module.symvers -nt .config ]]; then
+            log_info "Modules appear up to date, skipping..."
+            return 0
+        fi
+    fi
+
+    make -j$(nproc) modules
+
+    log_info "Kernel modules built successfully"
+}
+
+# 安装内核
+install_kernel() {
+    log_info "Installing kernel with make modules_install && make install..."
+
+    # 清理旧内核（避免生成 .old 镜像）
+    clean_old_kernel
+
+    # 安装模块
+    make modules_install
+
+    # 安装内核（make install 会自动处理 vmlinuz、initramfs 等）
+    make install
+
+    log_info "Kernel installed via make install"
+
+    # 验证安装结果
+    ls -lh /boot/vmlinuz-* /boot/initramfs-* /boot/System.map-* 2>/dev/null | tail -10
+}
+
+# 更新 grub
+update_grub() {
+    log_info "Updating grub configuration..."
+
+    # 更新 BIOS/MBR 模式 grub 配置
+    grub2-mkconfig -o /boot/grub2/grub.cfg
+
+    # 更新 UEFI 模式 grub 配置（如果存在）
+    if [[ -f /boot/efi/EFI/openeuler/grub.cfg ]]; then
+        log_info "Updating UEFI grub configuration..."
+        grub2-mkconfig -o /boot/efi/EFI/openeuler/grub.cfg
+    fi
+
+    log_info "Grub updated. You can reboot to use the new kernel."
+}
+
+# 验证配置
+verify_config() {
+    log_info "Verifying kernel configuration..."
+
+    echo ""
+    echo "=== Virtualization Configuration ==="
+    grep -E "^CONFIG_VIRTUALIZATION=" .config || echo "Not set"
+    grep -E "^CONFIG_KVM=" .config || echo "Not set"
+    grep -E "^CONFIG_VIRT_DRIVERS=" .config || echo "Not set"
+
+    echo ""
+    echo "=== PTDUMP Configuration ==="
+    grep -E "^CONFIG_PTDUMP_CORE=" .config || echo "Not set"
+    grep -E "^CONFIG_PTDUMP_DEBUGFS=" .config || echo "Not set"
+    grep -E "^CONFIG_PTDUMP_STAGE2_DEBUGFS=" .config || echo "Not set"
+    grep -E "^CONFIG_GENERIC_PTDUMP=" .config || echo "Not set"
+
+    echo ""
+    echo "=== Debug FS ==="
+    grep -E "^CONFIG_DEBUG_FS=" .config || echo "Not set"
+
+    echo ""
+    echo "=== KVM modules ==="
+    grep -E "CONFIG_KVM_" .config | head -10
+
+    # 对于stage2模式，额外验证关键依赖
+    if [[ "$BUILD_MODE" == "stage2" ]]; then
+        echo ""
+        log_stage2 "Stage2 Configuration Status:"
+        local stage2_ok=true
+
+        for cfg in CONFIG_PTDUMP_CORE CONFIG_PTDUMP_STAGE2_DEBUGFS CONFIG_DEBUG_FS CONFIG_DEBUG_KERNEL CONFIG_KVM; do
+            if ! grep -q "^${cfg}=y" .config 2>/dev/null; then
+                log_error "  ${cfg} is NOT enabled!"
+                stage2_ok=false
+            else
+                log_stage2 "  ${cfg}=y"
+            fi
+        done
+
+        if [[ "$stage2_ok" == "true" ]]; then
+            echo ""
+            log_stage2 "Stage2 configuration is complete! Ready to build."
+        else
+            echo ""
+            log_error "Stage2 configuration is incomplete! Please check .config"
+        fi
+    fi
+}
+
+# 显示帮助
+show_help() {
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --check-env       Check system environment only"
+    echo "  --restore         Restore modified files only"
+    echo "  --configure       Configure kernel only"
+    echo "  --build           Build kernel and modules"
+    echo "  --install         Install kernel to /boot"
+    echo "  --grub            Update grub"
+    echo "  --verify          Verify configuration"
+    echo "  --all             Run all steps (default)"
+    echo "  --clean           Perform clean build (make mrproper before configure)"
+    echo "  --mode MODE       Set build mode: 'native' or 'stage2' (default: native)"
+    echo "  --help            Show this help message"
+    echo ""
+    echo "Build Modes:"
+    echo "  native            Build native OpenEuler kernel with virtualization"
+    echo "  stage2            Build OpenEuler kernel with Stage-2 page table dump (for KVM debugging)"
+    echo ""
+    echo "Examples:"
+    echo "  $0 --mode stage2 --all    # Build Stage2 dump kernel (full workflow)"
+    echo "  $0 --mode native --build  # Build native kernel only (incremental)"
+    echo "  $0 --all --clean         # Clean build from scratch (full rebuild)"
+    echo ""
+}
+
+# 主函数
+main() {
+    local RUN_ALL=true
+    local CHECK_ENV=false
+    local RESTORE=false
+    local CONFIGURE=false
+    local BUILD=false
+    local INSTALL=false
+    local UPDATE_GRUB=false
+    local VERIFY=false
+
+    # 解析参数
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --check-env)
+                CHECK_ENV=true
+                RUN_ALL=false
+                ;;
+            --restore)
+                RESTORE=true
+                RUN_ALL=false
+                ;;
+            --configure)
+                CONFIGURE=true
+                RUN_ALL=false
+                ;;
+            --build)
+                BUILD=true
+                RUN_ALL=false
+                ;;
+            --install)
+                INSTALL=true
+                RUN_ALL=false
+                ;;
+            --grub)
+                UPDATE_GRUB=true
+                RUN_ALL=false
+                ;;
+            --verify)
+                VERIFY=true
+                RUN_ALL=false
+                ;;
+            --all)
+                RUN_ALL=true
+                ;;
+            --clean)
+                CLEAN_BUILD=true
+                log_info "Clean build enabled (will run make mrproper)"
+                ;;
+            --mode)
+                if [[ -n "$2" ]]; then
+                    BUILD_MODE="$2"
+                    if [[ "$BUILD_MODE" != "native" && "$BUILD_MODE" != "stage2" ]]; then
+                        log_error "Invalid build mode: $BUILD_MODE. Must be 'native' or 'stage2'"
+                        exit 1
+                    fi
+                    shift
+                else
+                    log_error "--mode requires an argument (native or stage2)"
+                    exit 1
+                fi
+                ;;
+            --help)
+                show_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    echo "============================================"
+    echo "  OpenEuler Kernel Build Script"
+    echo "  Version: 2.0 (with Stage2 support)"
+    echo "  Build Mode: $BUILD_MODE"
+    echo "============================================"
+    echo ""
+
+    check_root
+
+    # 切换到源码目录（如果指定）
+    if [[ -n "$KERNEL_SOURCE_DIR" && -d "$KERNEL_SOURCE_DIR" ]]; then
+        if [[ "$PWD" != "$KERNEL_SOURCE_DIR" ]]; then
+            log_info "Switching to kernel source directory: $KERNEL_SOURCE_DIR"
+            cd "$KERNEL_SOURCE_DIR"
+        fi
+    fi
+
+    if [[ "$RUN_ALL" == "true" ]]; then
+        check_env
+        restore_modified_files
+        configure_kernel
+        build_kernel
+        build_modules
+        install_kernel
+        update_grub
+        verify_config
+
+        echo ""
+        echo "============================================"
+        if [[ "$BUILD_MODE" == "stage2" ]]; then
+            log_stage2 "Stage2 build complete!"
+        else
+            log_info "Build complete!"
+        fi
+        echo "============================================"
+        echo ""
+        log_info "Next steps:"
+        echo "  1. Reboot: reboot"
+        if [[ "$BUILD_MODE" == "stage2" ]]; then
+            echo "  2. Select 'openEuler (6.6.0+stage2)' from grub menu"
+            echo "  3. Verify: uname -r && ls /dev/kvm"
+            echo "  4. Test lkvm: lkvm run --kernel /path/to/guest Image"
+        else
+            echo "  2. Select 'openEuler (6.6.0+)' from grub menu"
+            echo "  3. Verify: uname -r && lsmod | grep kvm"
+        fi
+        echo ""
+    else
+        [[ "$CHECK_ENV" == "true" ]] && check_env
+        [[ "$RESTORE" == "true" ]] && restore_modified_files
+        [[ "$CONFIGURE" == "true" ]] && configure_kernel
+        [[ "$BUILD" == "true" ]] && build_kernel && build_modules
+        [[ "$INSTALL" == "true" ]] && install_kernel
+        [[ "$UPDATE_GRUB" == "true" ]] && update_grub
+        [[ "$VERIFY" == "true" ]] && verify_config
+    fi
+}
+
+# 运行主函数
+main "$@"

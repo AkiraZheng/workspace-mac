@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//root/openeuler/kernel/**)",
+      "Bash(make -j1)",
+      "Bash(ls:*)",
+      "Bash(aarch64-linux-gnu-gcc --version)",
+      "Bash(gzip -dc initramfs.cpio.gz)",
+      "Bash(cpio -tv)",
+      "Bash(cpio -iv)",
+      "Bash(./lkvm run:*)"
+    ]
+  }
+}

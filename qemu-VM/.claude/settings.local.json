@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sysctl -a)",
+      "Bash(qemu-system-aarch64:*)",
+      "Bash(tee console-output.log)",
+      "Bash(Run VM:*)",
+      "Bash(ssh:*)"
+    ]
+  }
+}

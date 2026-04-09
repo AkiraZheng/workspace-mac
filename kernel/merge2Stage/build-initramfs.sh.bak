@@ -1,0 +1,45 @@
+#!/bin/bash
+set -e
+
+# Output directory (current working directory by default)
+OUTPUT_DIR="${1:-$(pwd)}"
+WORK_DIR="$OUTPUT_DIR/initramfs"
+
+echo "Building initramfs in $OUTPUT_DIR..."
+
+# 1. Create directory structure
+mkdir -p "$WORK_DIR"/{bin,sbin,etc,proc,sys,dev,lib,lib64}
+
+# 2. Copy basic binaries
+cp /usr/bin/ls "$WORK_DIR/bin/ls"
+cp /usr/bin/cat "$WORK_DIR/bin/cat"
+cp /usr/bin/echo "$WORK_DIR/bin/echo"
+cp /usr/bin/mkdir "$WORK_DIR/bin/mkdir"
+cp /usr/sbin/switch_root "$WORK_DIR/sbin/switch_root"
+cp /bin/bash "$WORK_DIR/bin/bash"
+cp /bin/sh "$WORK_DIR/bin/sh"
+
+# 3. Copy shared libraries for bash
+cp /lib64/libtinfo.so.6 "$WORK_DIR/lib64/"
+cp /lib64/libc.so.6 "$WORK_DIR/lib64/"
+cp /lib64/libc.so.6 "$WORK_DIR/lib/"
+cp /lib/ld-linux-aarch64.so.1 "$WORK_DIR/lib/"
+cp /lib64/ld-linux-aarch64.so.1 "$WORK_DIR/lib64/"
+
+# 4. Create init script
+cat > "$WORK_DIR/init" << 'EOF'
+#!/bin/sh
+echo "initramfs booting..."
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+echo "Welcome to LKVM!"
+/bin/sh
+EOF
+chmod +x "$WORK_DIR/init"
+
+# 5. Package initramfs
+cd "$WORK_DIR"
+find . | cpio -o -H newc | gzip > "$OUTPUT_DIR/initramfs.cpio.gz"
+
+echo "Done! initramfs.cpio.gz created: $(ls -lh "$OUTPUT_DIR/initramfs.cpio.gz" | awk '{print $5}')"
