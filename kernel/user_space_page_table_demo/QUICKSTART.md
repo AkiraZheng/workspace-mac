@@ -3,20 +3,31 @@
 ## 一键运行演示
 
 ```bash
-cd /mnt/kernel/user_space_page_table_demo
+cd /mnt/kernel/user_space_page_table_demo/
+
+# 1. 编译 show_addr 测试程序（普通 C 程序）
+gcc -o show_addr show_addr.c
+
+# 2. 编译内核模块（需要 kernel-devel 包）
+make
+
+# 3. 运行演示
 bash demo.sh
 ```
 
 ## 文件结构
 
 ```
-/mnt/user_space_page_table_demo/
+/mnt/kernel/user_space_page_table_demo/
 ├── README.md                # 项目概述
 ├── SUMMARY.md               # 完整技术文档和流程说明
 ├── QUICKSTART.md            # 本文件 - 快速开始
+├── PTE_QUERY_README.md      # 内核模块使用说明
 ├── show_addr.c             # 测试程序（C 代码）
 ├── demo.sh                  # 主测试脚本
-└── page-types              # 页表分析工具（从内核编译）
+├── usr_pte_query.c         # 内核模块源码
+├── usr_pte_query.ko        # 编译后的内核模块
+└── Makefile                # 内核模块编译脚本
 ```
 
 ## 演示流程图
@@ -123,7 +134,7 @@ echo "0x<地址>" | xxd
 ### 测试 1: 只运行程序，不查询
 
 ```bash
-cd /mnt/user_space_page_table_demo
+cd /mnt/kernel/user_space_page_table_demo
 gcc -o show_addr show_addr.c
 ./show_addr  # 然后查看输出的地址
 ```

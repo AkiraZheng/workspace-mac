@@ -42,77 +42,43 @@ if (prot == PTE_ATTRINDX(MT_NORMAL))
 
 ```bash
 # 安装内核开发包（需要匹配当前运行的内核版本）
-# CentOS/RHEL/openEuler:
-sudo yum install kernel-devel
-
-# Debian/Ubuntu:
-sudo apt install linux-headers-$(uname -r)
+yum install kernel-devel-$(uname -r) kernel-headers-$(uname -r)
 
 cd /mnt/kernel/user_space_page_table_demo/
 make
 ```
 
-### 方式二：使用自定义内核构建目录
+如果还是不行的话就用临时解决办法：
 
-如果在其他机器上编译了内核（如 `/root/openeuler/kernel/`），可以将 Makefile 指向该目录：
+```shell
+# 检查 /usr/src/kernels/ 目录
+ls -la /usr/src/kernels/
 
-```bash
-cd /mnt/kernel/user_space_page_table_demo/
+# 应该会看到类似 6.6.0-98.0.0.103.oe2403sp2.aarch64 的目录
+# 然后创建链接：
+ln -sf /usr/src/kernels/$(ls /usr/src/kernels/ | head -1) /lib/modules/6.6.0+/build
 
-# 方法 A：直接指定 KDIR（推荐）
-make KDIR=/path/to/kernel/build
-
-# 方法 B：修改 Makefile
-# 将 KDIR 行改为：
-# KDIR ?= /path/to/you/kernel/build
+# 验证
+ls -la /lib/modules/6.6.0+/build
 ```
 
-### 方式三：使用 openEuler 内核源码目录编译
-
-如果在 `/root/openeuler/kernel/` 目录下有已配置的内核源码：
-
-```bash
-cd /mnt/kernel/user_space_page_table_demo/
-
-# 直接指向内核源码目录（该目录下有 .config 和 Makefile）
-make KDIR=/root/openeuler/kernel
-```
 
 ### 编译产物
 
 编译成功后生成：`usr_pte_query.ko`
 
-## 常见问题
+### 方式二：编译 show_addr 测试程序
 
-### 错误：No such file or directory
+show_addr 是一个简单的测试程序，用于输出进程地址（供内核模块查询）。
 
-```
-make: *** /lib/modules/$(shell uname -r)/build: No such file or directory
-```
-
-**原因**：未安装内核开发包，或者 `KDIR` 路径不正确。
-
-**解决**：
-
-1. 检查当前内核版本和已安装的内核包：
 ```bash
-uname -r
-ls /lib/modules/
-rpm -qa | grep kernel-devel
-```
+cd /mnt/kernel/user_space_page_table_demo/
 
-2. 安装内核开发包：
-```bash
-# CentOS/RHEL/openEuler
-sudo yum install kernel-devel
+# 编译 show_addr（普通 C 程序，不需要内核开发包）
+gcc -o show_addr show_addr.c
 
-# 如果版本不匹配，先更新内核或指定版本
-sudo yum install kernel-devel-$(uname -r)
-```
-
-3. 或者使用已有的内核源码目录：
-```bash
-make KDIR=/path/to/your/kernel/source
+# 运行 show_addr（后台运行，输出进程 PID 和地址）
+./show_addr &
 ```
 
 ## 使用方法
@@ -143,8 +109,33 @@ insmod usr_pte_query.ko target_pid=12345 target_va=0x420000
 
 ### 3. 查看输出
 
+内核模块的输出通过 `printk()` 发送到内核环形缓冲区，查看方式：
+
 ```bash
-dmesg | tail -15
+# 方式一：查看最后 20 行（推荐）
+dmesg | tail -20
+
+# 方式二：实时跟踪（打开新终端执行）
+watch -n 1 "dmesg | tail -5"
+
+# 方式三：查看完整 dmesg
+dmesg
+
+# 方式四：只查看包含 usr_pte_query 的行
+dmesg | grep usr_pte_query
+```
+
+**注意**：`dmesg` 输出可能包含之前的日志，建议在加载模块后立即查看：
+
+```bash
+# 先清空 dmesg（需要 root）
+dmesg -c
+
+# 加载模块
+insmod usr_pte_query.ko target_pid=12345 target_va=0x421000
+
+# 立即查看输出（只有本次加载的日志）
+dmesg
 ```
 
 ### 4. 卸载模块
@@ -152,6 +143,8 @@ dmesg | tail -15
 ```bash
 rmmod usr_pte_query
 ```
+
+### 5. 查看输出
 
 ## 输出示例
 
