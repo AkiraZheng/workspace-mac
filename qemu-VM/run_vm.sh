@@ -15,6 +15,28 @@
 
 set -e
 
+# ========== QEMU 镜像工作原理 ==========
+#
+# 差异镜像（qcow2 with backing file）:
+#
+#   base.qcow2 (36GB)     ← 完整系统镜像，只读基础
+#   current.qcow2 (KB级)   ← 差异镜像，只记录对base的变更
+#
+#   虚拟机运行时 = base.qcow2 + current.qcow2 的叠加
+#
+#   ┌─────────────────────────────────────────────────────────┐
+#   │  虚拟机看到的文件系统                        │
+#   │  = base镜像数据 + current差异数据              │
+#   └─────────────────────────────────────────────────────────┘
+#              ↑                      ↑
+#         (只读引用)           (写入变更)
+#
+# 注意事项:
+#   1. current.qcow2 内部有 base.qcow2 的路径引用
+#   2. 单独移动 current.qcow2 到其他机器无法使用
+#   3. base.qcow2 保持不变，可以随时重置回原始状态
+#   4. commit 后，base.qcow2 被修改，变成完整独立镜像
+#
 # ========== 配置 ==========
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_IMG="${BASE_IMG:-${SCRIPT_DIR}/openEuler-24.03-LTS-aarch64.qcow2}"
@@ -224,6 +246,99 @@ delete_all_snapshots() {
     fi
 }
 
+commit_changes() {
+    echo "================================================================================"
+    echo "  COMMIT 警告和说明"
+    echo "================================================================================"
+    echo ""
+    echo "  [操作] 将 current.qcow2 的变更合并到 base.qcow2"
+    echo ""
+    echo "  [原理]"
+    echo "    当前结构："
+    echo "      base.qcow2 (36GB)     ← 原始系统镜像（只读基础）"
+    echo "      current.qcow2 (KB级)   ← 差异镜像（只记录变更）"
+    echo "    虚拟机运行时 = base.qcow2 + current.qcow2 的叠加"
+    echo ""
+    echo "    commit 后："
+    echo "      base.qcow2             ← 变成完整独立镜像（包含所有变更）"
+    echo "      current.qcow2           ← 仍是差异镜像（内容不变）"
+    echo ""
+    echo "  [影响]"
+    echo "    1. base.qcow2 可移动到其他机器独立使用"
+    echo "    2. 所有旧快照将失效（restore 可能无法正常工作）"
+    echo "    3. 无法回滚到 commit 前的状态"
+    echo ""
+    echo "  [建议]"
+    echo "    1. 先备份当前 base.qcow2（重要！）"
+    echo "    2. commit 后验证虚拟机能正常启动"
+    echo "    3. 验证通过后执行: $0 reset 刷新 current.qcow2"
+    echo ""
+    echo "================================================================================"
+    echo ""
+
+    if [ ! -f "$CURRENT_IMG" ]; then
+        echo "[!] 当前镜像不存在: $CURRENT_IMG"
+        exit 1
+    fi
+
+    if [ ! -f "$BASE_IMG" ]; then
+        echo "[!] 基础镜像不存在: $BASE_IMG"
+        exit 1
+    fi
+
+    # 显示快照信息
+    if [ -d "$SNAPSHOT_DIR" ] && [ -n "$(ls -A "$SNAPSHOT_DIR" 2>/dev/null)" ]; then
+        echo "[*] 检测到快照文件，commit 后将失效："
+        ls -1t "$SNAPSHOT_DIR"/*.qcow2 2>/dev/null | while read f; do
+            echo "    $f"
+        done
+        echo ""
+    else
+        echo "[*] 没有检测到快照文件"
+        echo ""
+    fi
+
+    # 用户确认
+    read -p "[?] 确认执行 commit？输入 y 继续: " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo "[*] 已取消"
+        exit 0
+    fi
+
+    echo ""
+    echo "[*] 正在执行 commit..."
+    echo ""
+
+    # 删除失效的快照
+    if [ -d "$SNAPSHOT_DIR" ] && [ -n "$(ls -A "$SNAPSHOT_DIR" 2>/dev/null)" ]; then
+        echo "[!] 删除失效的快照..."
+        rm -f "$SNAPSHOT_DIR"/*.qcow2
+        echo "[+] 已删除所有快照"
+        echo ""
+    fi
+
+    # 执行 commit
+    qemu-img commit "$CURRENT_IMG"
+
+    echo "================================================================================"
+    echo "  COMMIT 完成"
+    echo "================================================================================"
+    echo ""
+    echo "  [状态]"
+    echo "    base.qcow2     ← 已更新为完整独立镜像"
+    echo "    current.qcow2   ← 仍是差异镜像（可继续使用）"
+    echo ""
+    echo "  [下一步]"
+    echo "    1. 启动虚拟机验证: $0 start"
+    echo "    2. 验证通过后刷新: $0 reset"
+    echo ""
+    echo "  [说明]"
+    echo "    base.qcow2 现在是完整镜像，可安全移动到其他机器"
+    echo "    current.qcow2 基于 base.qcow2，reset 后将基于新 base"
+    echo "================================================================================"
+}
+
+
 show_status() {
     echo "[*] 状态信息:"
     echo "    基础镜像: $BASE_IMG"
@@ -263,6 +378,11 @@ show_help() {
     echo "  backup      手动创建快照备份"
     echo "               [镜像] 基于 current.qcow2"
     echo "               [快照] 立即创建快照"
+    echo ""
+    echo "  commit      将当前变更合并到 base.qcow2"
+    echo "               [原理] 把差异数据写入 base，base 变成完整独立镜像"
+    echo "               [警告] commit 后无法回滚到旧快照，快照将失效"
+    echo "                       合并后 base 可移动到其他机器独立使用"
     echo ""
     echo "  list        列出可用快照"
     echo "               [镜像] 无影响"
@@ -316,6 +436,9 @@ case "$CMD" in
         ;;
     restore)
         restore_vm "$@"
+        ;;
+    commit)
+        commit_changes
         ;;
     delete)
         delete_snapshot "$@"
