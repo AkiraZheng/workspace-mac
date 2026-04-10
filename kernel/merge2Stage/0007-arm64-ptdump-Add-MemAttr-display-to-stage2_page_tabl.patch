@@ -1,0 +1,65 @@
+From f1bc837794cb3d4fa2524c92ff8d02acef212163 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Thu, 9 Apr 2026 14:27:14 +0000
+Subject: [PATCH] arm64: ptdump: Add MemAttr and SH display to
+ stage2_page_tables output
+
+Add support to display Stage-2 Memory Type attributes (MemAttr) and
+Shareability attributes (SH) in the stage2_page_tables debugfs output.
+This helps identify performance differences between host and guest MMIO mappings.
+
+Supported MemAttr types:
+- NORMAL (MT_S2_NORMAL = 0xf): Normal cacheable memory
+- DEVnGnRE (MT_S2_DEVICE_nGnRE = 0x1): Device memory, no write combine
+- NORMAL_FWB (MT_S2_FWB_NORMAL = 6): Normal with Forwarding Blocker
+
+Supported SH types:
+- IS (Inner Shareable): Memory is inner shareable
+
+This is useful for debugging MMIO performance issues where guest may have
+device-type mapping (slow) vs host normal-type mapping (fast).
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/ptdump.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index 32a2e160c818..69720c730f82 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -12,6 +12,8 @@
+ 
+ #include <asm/kvm_mmu.h>
+ #include <asm/kvm_pgtable.h>
++#include <asm/memory.h>
++#include <asm/pgtable-hwdef.h>
+ #include <asm/ptdump.h>
+ 
+ #define MARKERS_LEN		2
+@@ -55,6 +57,22 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+ 		.val	= PTE_VALID,
+ 		.set	= "BLK",
+ 		.clear	= "   ",
++	}, {
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR,
++		.val	= PTE_S2_MEMATTR(MT_S2_NORMAL),
++		.set	= "NORMAL",
++	}, {
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR,
++		.val	= PTE_S2_MEMATTR(MT_S2_DEVICE_nGnRE),
++		.set	= "DEVnGnRE",
++	}, {
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR,
++		.val	= PTE_S2_MEMATTR(MT_S2_FWB_NORMAL),
++		.set	= "NORMAL_FWB",
++	}, {
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_SH,
++		.val	= KVM_PTE_LEAF_ATTR_LO_S2_SH_IS,
++		.set	= "IS",
+ 	},
+ };
+ 
+-- 
+2.43.0
+
