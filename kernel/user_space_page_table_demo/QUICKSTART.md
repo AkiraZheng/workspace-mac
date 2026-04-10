@@ -3,7 +3,7 @@
 ## 一键运行演示
 
 ```bash
-cd /mnt/user_space_page_table_demo
+cd /mnt/kernel/user_space_page_table_demo
 bash demo.sh
 ```
 

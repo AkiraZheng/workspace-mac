@@ -38,12 +38,82 @@ if (prot == PTE_ATTRINDX(MT_NORMAL))
 
 ## 编译
 
+### 方式一：使用本机已安装的内核头文件（推荐）
+
 ```bash
+# 安装内核开发包（需要匹配当前运行的内核版本）
+# CentOS/RHEL/openEuler:
+sudo yum install kernel-devel
+
+# Debian/Ubuntu:
+sudo apt install linux-headers-$(uname -r)
+
 cd /mnt/kernel/user_space_page_table_demo/
 make
 ```
 
-编译产物：`usr_pte_query.ko`
+### 方式二：使用自定义内核构建目录
+
+如果在其他机器上编译了内核（如 `/root/openeuler/kernel/`），可以将 Makefile 指向该目录：
+
+```bash
+cd /mnt/kernel/user_space_page_table_demo/
+
+# 方法 A：直接指定 KDIR（推荐）
+make KDIR=/path/to/kernel/build
+
+# 方法 B：修改 Makefile
+# 将 KDIR 行改为：
+# KDIR ?= /path/to/you/kernel/build
+```
+
+### 方式三：使用 openEuler 内核源码目录编译
+
+如果在 `/root/openeuler/kernel/` 目录下有已配置的内核源码：
+
+```bash
+cd /mnt/kernel/user_space_page_table_demo/
+
+# 直接指向内核源码目录（该目录下有 .config 和 Makefile）
+make KDIR=/root/openeuler/kernel
+```
+
+### 编译产物
+
+编译成功后生成：`usr_pte_query.ko`
+
+## 常见问题
+
+### 错误：No such file or directory
+
+```
+make: *** /lib/modules/$(shell uname -r)/build: No such file or directory
+```
+
+**原因**：未安装内核开发包，或者 `KDIR` 路径不正确。
+
+**解决**：
+
+1. 检查当前内核版本和已安装的内核包：
+```bash
+uname -r
+ls /lib/modules/
+rpm -qa | grep kernel-devel
+```
+
+2. 安装内核开发包：
+```bash
+# CentOS/RHEL/openEuler
+sudo yum install kernel-devel
+
+# 如果版本不匹配，先更新内核或指定版本
+sudo yum install kernel-devel-$(uname -r)
+```
+
+3. 或者使用已有的内核源码目录：
+```bash
+make KDIR=/path/to/your/kernel/source
+```
 
 ## 使用方法
 
