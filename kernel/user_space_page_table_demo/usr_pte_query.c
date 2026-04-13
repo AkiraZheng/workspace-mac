@@ -3,24 +3,30 @@
  * User space page table query module
  *
  * This module allows querying PTE attributes for a user space virtual address
- * by walking the process's page tables using the generic kernel page walk
- * framework (walk_page_range). It supports both 4KB pages and 2MB huge
- * pages (section mappings).
+ * by walking the process's page tables. It supports both 4KB pages
+ * and 2MB huge pages (section mappings).
  */
 
 #include <linux/module.h>
 #include <linux/mm.h>
-#include <linux/pagewalk.h>
 #include <linux/sched.h>
 #include <linux/printk.h>
 #include <linux/pid.h>
+#include <linux/slab.h>
+#include <linux/io.h>
 
 /* Module parameters */
 static unsigned long target_va = 0x0UL;
 static int target_pid = 0;
 
+/* Page size for ARM64 4KB pages */
+#define PAGE_SIZE_4K 4096UL
+
 /*
  * ARM64 Memory Type definitions - Same logic as stage1 ptdump in kernel
+ *
+ * PTE_ATTRINDX(t) = (t << 2), stored in PTE bits [4:2]
+ * So the actual value in PTE is: prot = raw_pte & PTE_ATTRINDX_MASK
  *
  * prot values match PTE_ATTRINDX(MT_*):
  *   PTE_ATTRINDX(MT_DEVICE_nGnRnE) = (3 << 2) = 12 = 0xc
@@ -28,12 +34,16 @@ static int target_pid = 0;
  *   PTE_ATTRINDX(MT_NORMAL_NC)      = (2 << 2) =  8 = 0x8
  *   PTE_ATTRINDX(MT_NORMAL)         = (0 << 2) =  0 = 0x0
  *   PTE_ATTRINDX(MT_NORMAL_TAGGED)  = (1 << 2) =  4 = 0x4
- *
- * Note: PTE_ATTRINDX_MASK and PTE_ATTRINDX are defined in asm/pgtable-hwdef.h
- * MT_* values are defined in asm/memory.h
  */
+#define PTE_ATTRINDX_MASK     GENMASK(4, 2)
+#define PTE_ATTRINDX(n)      ((n) << 2)
 
-/* SH bits are bits [9:8] of the PTE */
+/* MT_* values from memory.h */
+#define MT_DEVICE_nGnRnE      3
+#define MT_DEVICE_nGnRE       4
+#define MT_NORMAL_NC           2
+#define MT_NORMAL              0
+#define MT_NORMAL_TAGGED      1
 
 /*
  * Shareability (SH) bits are bits [9:8] of the PTE
@@ -42,19 +52,8 @@ static int target_pid = 0;
  * SH = 10: Outer Shareable
  * SH = 11: Inner Shareable
  */
+#define SH_MASK GENMASK(9, 8)
 #define SH_SHIFT 8
-
-/* Result structure to collect PTE info during walk */
-struct pte_query_result {
-	unsigned long target_va;
-	unsigned long raw_pte;
-	unsigned long phys_addr;
-	unsigned long prot;
-	u8 sh;
-	bool found;
-	bool is_huge_page;  /* true if PMD section mapping */
-	bool is_special;    /* true if special mapping (vmalloc/mmio/ioremap) */
-};
 
 /*
  * Same logic as dump_prot() in arch/arm64/mm/ptdump.c:
@@ -92,87 +91,19 @@ static const char *sh_to_string(u8 sh)
 	}
 }
 
-/* PMD entry callback - check for 2MB huge page (section mapping) */
-static int pmd_callback(pmd_t *pmd, unsigned long addr,
-			unsigned long next, struct mm_walk *walk)
-{
-	struct pte_query_result *result = walk->private;
-
-	if (pmd_none(*pmd) || pmd_bad(*pmd))
-		return -EFAULT;
-
-	if (pmd_sect(*pmd)) {
-		/* 2MB HugePage (section mapping) */
-		result->found = true;
-		result->is_huge_page = true;
-		result->is_special = false;
-		result->raw_pte = pmd_val(*pmd);
-		/* PMD section: bits [51:21] for 2MB aligned address */
-		result->phys_addr = (result->raw_pte & GENMASK_ULL(51, 21)) |
-				     (result->target_va & (SZ_2M - 1));
-		result->prot = result->raw_pte & PTE_ATTRINDX_MASK;
-		result->sh = (result->raw_pte >> SH_SHIFT) & 0x3;
-		return 1;  /* stop walking */
-	}
-
-	return 0;  /* continue to PTE level */
-}
-
-/* PTE entry callback - handle 4KB page mapping */
-static int pte_callback(pte_t *pte, unsigned long addr,
-			unsigned long next, struct mm_walk *walk)
-{
-	struct pte_query_result *result = walk->private;
-	pte_t pte_entry;
-
-	/* Only process the target address */
-	if (addr != result->target_va)
-		return 0;
-
-	pte_entry = ptep_get_lockless(pte);
-
-	if (pte_none(pte_entry)) {
-		result->found = false;
-		return -EFAULT;
-	}
-
-	result->found = true;
-	result->is_huge_page = false;
-
-	if (pte_special(pte_entry)) {
-		/*
-		 * Special mapping (vmalloc/mmio/ioremap).
-		 * The PFN in this PTE is an I/O remap address, NOT a RAM
-		 * physical address. Do NOT use it for stage-2 lookup.
-		 */
-		pr_info("Detected special mapping (vmalloc/mmio/ioremap)\n");
-		result->is_special = true;
-		result->phys_addr = 0;
-		result->raw_pte = pte_val(pte_entry);
-	} else {
-		result->is_special = false;
-		result->raw_pte = pte_val(pte_entry);
-		result->phys_addr = (result->raw_pte & GENMASK_ULL(51, 12)) |
-				     (result->target_va & (PAGE_SIZE - 1));
-	}
-
-	result->prot = result->raw_pte & PTE_ATTRINDX_MASK;
-	result->sh = (result->raw_pte >> SH_SHIFT) & 0x3;
-
-	return 1;  /* stop walking */
-}
-
-static const struct mm_walk_ops query_walk_ops = {
-	.pmd_entry = pmd_callback,
-	.pte_entry = pte_callback,
-};
-
 static int __init usr_pte_query_init(void)
 {
 	struct task_struct *task;
 	struct mm_struct *mm;
-	struct pte_query_result result;
-	int err;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *ptep, pte;
+	unsigned long raw_hw_pte;
+	unsigned long phys_addr;
+	unsigned long prot;
+	u8 sh;
 
 	/* Find the target task */
 	task = pid_task(find_vpid(target_pid), PIDTYPE_PID);
@@ -192,51 +123,126 @@ static int __init usr_pte_query_init(void)
 	pr_info("usr_pte_query: PID=%d, VA=0x%lx\n", target_pid, target_va);
 	pr_info("=========================================\n");
 
-	/* Initialize result */
-	result.target_va = target_va;
-	result.found = false;
-	result.is_huge_page = false;
-	result.is_special = false;
-
-	/*
-	 * Use walk_page_range() - the generic kernel page table walk framework.
-	 * This handles:
-	 *   - Proper locking (mmap_read_lock)
-	 *   - Correct PTE address calculation (pte_offset_map with kmap_local_page if needed)
-	 *   - RCU protection
-	 *   - Walking through all page table levels
-	 */
-	err = walk_page_range(mm, target_va, target_va + PAGE_SIZE,
-			     &query_walk_ops, &result);
-
-	if (err < 0) {
-		pr_err("usr_pte_query: page table walk failed: %d\n", err);
+	/* Start page table walk from PGD */
+	pgd = pgd_offset(mm, target_va);
+	if (pgd_none(*pgd) || pgd_bad(*pgd)) {
+		pr_err("usr_pte_query: PGD entry is invalid at VA 0x%lx\n", target_va);
 		goto out_mmput;
 	}
 
-	if (!result.found) {
-		pr_err("usr_pte_query: PTE not found at VA 0x%lx\n", target_va);
+	/* Walk to P4D */
+	p4d = p4d_offset(pgd, target_va);
+	if (p4d_none(*p4d) || p4d_bad(*p4d)) {
+		pr_err("usr_pte_query: P4D entry is invalid at VA 0x%lx\n", target_va);
 		goto out_mmput;
 	}
 
-	/* Output the result */
-	pr_info("-----------------------------------------\n");
-	if (result.is_huge_page) {
+	/* Walk to PUD */
+	pud = pud_offset(p4d, target_va);
+	if (pud_none(*pud) || pud_bad(*pud)) {
+		pr_err("usr_pte_query: PUD entry is invalid at VA 0x%lx\n", target_va);
+		goto out_mmput;
+	}
+
+	/* Walk to PMD */
+	pmd = pmd_offset(pud, target_va);
+	if (pmd_none(*pmd)) {
+		pr_err("usr_pte_query: PMD entry is unmapped at VA 0x%lx\n", target_va);
+		goto out_mmput;
+	}
+
+	/* Check for 2MB huge page (section mapping in ARM64) */
+	if (pmd_sect(*pmd)) {
+		pr_info("Detected 2MB HugePage (PMD Section mapping)\n");
+
+		raw_hw_pte = pmd_val(*pmd);
+
+		/* Extract physical address from PMD */
+		phys_addr = (raw_hw_pte & GENMASK_ULL(51, 12)) | (target_va & (PAGE_SIZE_4K - 1));
+
+		/* Extract prot = bits [4:2] AttrIdx */
+		prot = raw_hw_pte & PTE_ATTRINDX_MASK;
+
+		/* Extract Shareability [9:8] */
+		sh = (raw_hw_pte >> SH_SHIFT) & 0x3;
+
+		pr_info("-----------------------------------------\n");
 		pr_info("PMD Level (2MB Block Mapping):\n");
-	} else if (result.is_special) {
-		pr_info("PTE Level (Special Mapping - mmio/vmalloc/ioremap):\n");
-	} else {
+		pr_info("  Raw PMD:        0x%016lx\n", raw_hw_pte);
+		pr_info("  Physical Addr:  0x%016lx\n", phys_addr);
+		pr_info("  AttrIdx:        %s\n", memattr_to_string(prot));
+		pr_info("  SH [9:8]:      %u (%s)\n", sh,
+			sh_to_string(sh));
+		pr_info("-----------------------------------------\n");
+
+		goto out_mmput;
+	}
+
+	if (pmd_bad(*pmd)) {
+		pr_err("usr_pte_query: PMD entry is bad at VA 0x%lx\n", target_va);
+		goto out_mmput;
+	}
+
+	/* Walk to PTE (4KB page) using physical address calculation */
+	{
+		unsigned long pte_phys;
+
+		/* Calculate PTE physical address from PMD */
+		pte_phys = pmd_page_paddr(*pmd) + pte_index(target_va) * sizeof(pte_t);
+
+		/* Convert physical address to virtual address */
+		ptep = (pte_t *)phys_to_virt(pte_phys);
+		if (!ptep) {
+			pr_err("usr_pte_query: Failed to map PTE at VA 0x%lx\n", target_va);
+			goto out_mmput;
+		}
+
+		pte = *ptep;
+
+		if (pte_none(pte)) {
+			pr_err("usr_pte_query: PTE is not mapped (page fault) at VA 0x%lx\n", target_va);
+			goto out_mmput;
+		}
+
+		if (pte_special(pte)) {
+			pr_info("Detected special mapping (vmalloc/etc.)\n");
+			raw_hw_pte = pte_val(pte);
+			phys_addr = 0; /* Special mappings don't have physical addresses */
+			prot = raw_hw_pte & PTE_ATTRINDX_MASK;
+			sh = (raw_hw_pte >> SH_SHIFT) & 0x3;
+
+			pr_info("-----------------------------------------\n");
+			pr_info("PTE Level (Special Mapping):\n");
+			pr_info("  Raw PTE:        0x%016lx\n", raw_hw_pte);
+			pr_info("  Physical Addr:   N/A (special mapping)\n");
+			pr_info("  AttrIdx:        %s\n", memattr_to_string(prot));
+			pr_info("  SH [9:8]:       %u (%s)\n", sh,
+				sh_to_string(sh));
+			pr_info("-----------------------------------------\n");
+
+			goto out_mmput;
+		}
+
+		raw_hw_pte = pte_val(pte);
+
+		/* Extract physical address from PTE */
+		phys_addr = (raw_hw_pte & GENMASK_ULL(51, 12)) | (target_va & (PAGE_SIZE_4K - 1));
+
+		/* Extract prot = bits [4:2] AttrIdx */
+		prot = raw_hw_pte & PTE_ATTRINDX_MASK;
+
+		/* Extract Shareability [9:8] */
+		sh = (raw_hw_pte >> SH_SHIFT) & 0x3;
+
+		pr_info("-----------------------------------------\n");
 		pr_info("PTE Level (4KB Page Mapping):\n");
+		pr_info("  Raw PTE:        0x%016lx\n", raw_hw_pte);
+		pr_info("  Physical Addr:  0x%016lx\n", phys_addr);
+		pr_info("  AttrIdx:        %s\n", memattr_to_string(prot));
+		pr_info("  SH [9:8]:      %u (%s)\n", sh,
+				sh_to_string(sh));
+		pr_info("-----------------------------------------\n");
 	}
-	pr_info("  Raw PTE:        0x%016lx\n", result.raw_pte);
-	if (result.is_special) {
-		pr_info("  Physical Addr:   N/A (special mapping - I/O remap PFN)\n");
-	} else {
-		pr_info("  Physical Addr:  0x%016lx\n", result.phys_addr);
-	}
-	pr_info("  AttrIdx:        %s\n", memattr_to_string(result.prot));
-	pr_info("  SH [9:8]:      %u (%s)\n", result.sh, sh_to_string(result.sh));
-	pr_info("-----------------------------------------\n");
 
 out_mmput:
 	mmput(mm);
@@ -257,7 +263,7 @@ MODULE_PARM_DESC(target_pid, "PID of the process to query");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Claude");
 MODULE_DESCRIPTION("Query user space PTE attributes for debugging");
-MODULE_VERSION("2.0");
+MODULE_VERSION("1.0");
 
 module_init(usr_pte_query_init);
 module_exit(usr_pte_query_exit);
