@@ -123,6 +123,17 @@ static int __init usr_pte_query_init(void)
 	pr_info("usr_pte_query: PID=%d, VA=0x%lx\n", target_pid, target_va);
 	pr_info("=========================================\n");
 
+	/* Check VMA first to verify this is a valid userspace mapping */
+	{
+		struct vm_area_struct *vma = find_vma(mm, target_va);
+		if (!vma || target_va < vma->vm_start) {
+			pr_err("No VMA found for VA 0x%lx\n", target_va);
+			goto out_mmput;
+		}
+		pr_info("VMA: 0x%lx-0x%lx flags=0x%lx\n",
+			vma->vm_start, vma->vm_end, vma->vm_flags);
+	}
+
 	/* Start page table walk from PGD */
 	pgd = pgd_offset(mm, target_va);
 	if (pgd_none(*pgd) || pgd_bad(*pgd)) {
@@ -157,8 +168,9 @@ static int __init usr_pte_query_init(void)
 
 		raw_hw_pte = pmd_val(*pmd);
 
-		/* Extract physical address from PMD */
-		phys_addr = (raw_hw_pte & GENMASK_ULL(51, 12)) | (target_va & (PAGE_SIZE_4K - 1));
+		/* Extract physical address from PMD (2MB block: bits [51:21]) */
+		phys_addr = (raw_hw_pte & GENMASK_ULL(51, 21)) |
+			    (target_va & (SZ_2M - 1));
 
 		/* Extract prot = bits [4:2] AttrIdx */
 		prot = raw_hw_pte & PTE_ATTRINDX_MASK;
@@ -185,17 +197,12 @@ static int __init usr_pte_query_init(void)
 
 	/* Walk to PTE (4KB page) using physical address calculation */
 	{
-		unsigned long pte_phys;
-
-		/* Calculate PTE physical address from PMD */
-		pte_phys = pmd_page_paddr(*pmd) + pte_index(target_va) * sizeof(pte_t);
-
-		/* Convert physical address to virtual address */
-		ptep = (pte_t *)phys_to_virt(pte_phys);
-		if (!ptep) {
-			pr_err("usr_pte_query: Failed to map PTE at VA 0x%lx\n", target_va);
-			goto out_mmput;
-		}
+		/*
+		 * Use pte_offset_kernel() instead of phys_to_virt().
+		 * Reason: phys_to_virt() assumes the PTE page is in the linear
+		 * mapping region. pte_offset_kernel() is the correct kernel API.
+		 */
+		ptep = pte_offset_kernel(pmd, target_va);
 
 		pte = *ptep;
 
@@ -205,21 +212,20 @@ static int __init usr_pte_query_init(void)
 		}
 
 		if (pte_special(pte)) {
-			pr_info("Detected special mapping (vmalloc/etc.)\n");
+			pr_info("Detected special mapping (vmalloc/mmio/ioremap)\n");
 			raw_hw_pte = pte_val(pte);
-			phys_addr = 0; /* Special mappings don't have physical addresses */
+			phys_addr = 0; /* Special mappings don't have RAM physical addresses */
 			prot = raw_hw_pte & PTE_ATTRINDX_MASK;
 			sh = (raw_hw_pte >> SH_SHIFT) & 0x3;
 
 			pr_info("-----------------------------------------\n");
 			pr_info("PTE Level (Special Mapping):\n");
 			pr_info("  Raw PTE:        0x%016lx\n", raw_hw_pte);
-			pr_info("  Physical Addr:   N/A (special mapping)\n");
+			pr_info("  Physical Addr:   N/A (special mapping - I/O remap PFN)\n");
 			pr_info("  AttrIdx:        %s\n", memattr_to_string(prot));
 			pr_info("  SH [9:8]:       %u (%s)\n", sh,
 				sh_to_string(sh));
 			pr_info("-----------------------------------------\n");
-
 			goto out_mmput;
 		}
 
