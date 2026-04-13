@@ -207,14 +207,14 @@ static int __init usr_pte_query_init(void)
 		if (pte_special(pte)) {
 			pr_info("Detected special mapping (vmalloc/etc.)\n");
 			raw_hw_pte = pte_val(pte);
-			phys_addr = (raw_hw_pte & GENMASK_ULL(51, 12)) | (target_va & (PAGE_SIZE_4K - 1));
+			phys_addr = 0; /* Special mappings don't have physical addresses */
 			prot = raw_hw_pte & PTE_ATTRINDX_MASK;
 			sh = (raw_hw_pte >> SH_SHIFT) & 0x3;
 
 			pr_info("-----------------------------------------\n");
 			pr_info("PTE Level (Special Mapping):\n");
 			pr_info("  Raw PTE:        0x%016lx\n", raw_hw_pte);
-			pr_info("  Physical Addr:  0x%016lx\n", phys_addr);
+			pr_info("  Physical Addr:   N/A (special mapping)\n");
 			pr_info("  AttrIdx:        %s\n", memattr_to_string(prot));
 			pr_info("  SH [9:8]:       %u (%s)\n", sh,
 				sh_to_string(sh));
