@@ -51,6 +51,108 @@ Linux 为每个 CPU 启动一个最高优先级的 FIFO 实时内核线程 `watc
 | hrtimer | 喂狗后设置，**2 倍 watchdog_thresh**（默认 20 秒）后到期 |
 | `is_softlockup()` | 检测 `now > touch_ts + 2 * watchdog_thresh`，即触发 soft lockup |
 
+### Watchdog 到底测的是什么？
+
+**Watchdog 测量的是："watchdog/X 线程有没有在这个 vCPU 上成功运行并喂狗"**，而不是"vCPU 有没有在跑代码"。
+
+`watchdog/X` 是**内核线程**（不是用户态进程），每 4 秒需要在对应的 vCPU 上被调度运行一次：
+
+```
+watchdog/X 线程的使命：
+  每 4 秒在 vCPU X 上运行一次
+    → 执行 update_touch_ts()，更新时间戳 touch_ts = now
+    → 说明"vCPU X 可以被 guest scheduler 调度，调度器正常"
+
+如果 20 秒内 watchdog/X 都没有在 vCPU X 上运行：
+  → touch_ts 没有更新
+  → hrtimer 到期检查时发现 now - touch_ts > 20s
+  → 说明：vCPU X 长期没有发生调度
+  → 打印 "soft lockup - CPU#X stuck for Ys!"
+```
+
+**不是测 vCPU 有没有代码在跑，而是测 watchdog/X 有没有被 guest scheduler 调度到**。
+
+#### NMI：不受调度器支配的"查岗机制"
+
+**watchdog/X 是普通内核线程**，受制于调度器；**NMI 是硬件中断**，不走调度器，超脱于调度之外。
+
+```
+角色分工：
+  watchdog/X（干活的人/打卡机）：
+    - 普通内核线程，被调度器管理
+    - 每 4 秒运行一次，更新 touch_ts（喂狗）
+    - 如果被持锁阻塞，调度器无法切换它上来
+
+  NMI 中断处理函数（查岗的/包工头）：
+    - 硬件触发的不可屏蔽中断
+    - 不走调度器，直接打断任何执行流
+    - 每隔几秒查岗一次，检查 touch_ts 有没有更新
+```
+
+**时间线**：
+
+```
+T=0:   vCPU 1 执行 enable_irq → VMEXIT → 持锁卡在 KVM 里
+T=1s:  NMI 来查岗 → 看一眼 touch_ts → "才 1 秒，没到 20 秒，继续睡"
+T=5s:  NMI 来查岗 → 看一眼 touch_ts → "才 5 秒，继续睡"
+T=20s: NMI 来查岗 → 看一眼 touch_ts → "20 秒都没更新！喂狗线程死哪去了？"
+        → 直接在当前执行流（vCPU 1 或 KVM 栈上）打印 soft lockup
+```
+
+**核心逻辑**：NMI 通过监控"受制于调度器的 watchdog 线程有没有被调度"，反向推导"当前 CPU 是否被某个进程霸占"。
+
+**为什么 spin_lock + VMEXIT 防不住 NMI**：
+- 持锁关闭抢占 → 调度器无法切换 watchdog/X 上 CPU
+- NMI 不走调度器 → 直接打断任何执行流
+- 20 秒沙漏漏完 → 硬件自动触发 NMI → 无论 vCPU 卡在哪，都会被抓现行
+
+#### 为什么 vCPU 一直跑内核代码，watchdog 就不会被触发？
+
+关键在于 `watchdog/X` 和 `ifconfig` 是**同一个 vCPU 上竞争调度**的两个执行流：
+
+```
+vCPU 1 上（同一时刻只能有一个任务在跑）：
+
+情况 A：正常情况
+  ifconfig 在跑
+  时钟中断来了 → scheduler_tick() → ifconfig 时间片耗尽
+  → schedule() 切换到 watchdog/1
+  → watchdog/1 喂狗，更新 touch_ts
+  → schedule() 切换回 ifconfig
+  ✓ watchdog 每 4 秒能被调度到
+
+情况 B：本问题场景
+  ifconfig 在跑 → enable_irq → VMEXIT
+  ↑ vCPU 1 从 guest 的视角消失了，不在任何物理 CPU 上
+
+  VMEXIT 返回后：
+    → ifconfig 继续跑（还没耗尽时间片）
+    → 时钟中断来了 → vCPU 1 不在物理 CPU 上，无法处理
+    → watchdog/1 也挤不进来（vCPU 1 根本不在 pCPU 上）
+
+  ifconfig 继续 → enable_irq → VMEXIT → 又消失
+
+  **watchdog/1 从未实际获得 vCPU 1 的执行机会**
+```
+
+**watchdog/X 不是独立于 vCPU 的守护进程**，它需要 vCPU 有物理 CPU 时间片才能跑。VMEXIT 导致 vCPU 1 不在物理 CPU 上时，watchdog/1 连挤进来的机会都没有。
+
+#### VMEXIT 期间物理核在跑什么？
+
+**VMEXIT = vCPU "让出" 物理核，KVM "接过" 物理核跑 host 代码**：
+
+```
+正常情况（vCPU 在物理核上跑 guest 代码）
+  → 物理核跑：guest kernel 代码
+
+VMEXIT 发生（vCPU 被挂起）
+  → 物理核跑：KVM/host 代码（处理 GIC 命令）
+  → vCPU 状态：暂停，不在物理核上
+
+VMEXIT 返回（vCPU 恢复）
+  → 物理核跑：guest kernel 代码
+```
+
 ### 触发条件
 
 ```
@@ -132,6 +234,63 @@ VMEXIT 阻塞情况（320 次串行 VMEXIT）：
 ```
 
 **watchdog 线程只有在物理 CPU 上运行时才能喂狗**，VMEXIT 期间 vCPU 1 不在物理 CPU 上，watchdog/1 只能等其他物理 CPU 空闲时被 CFS 调度。但 vCPU 1 频繁 VMEXIT 又返回，guest scheduler 以为 vCPU 1 一直在跑，所以 watchdog/1 始终得不到机会。
+
+#### VMEXIT 返回后的间隙为什么不够 watchdog 跑？
+
+**VMEXIT 返回后确实有执行间隙，但这些间隙太短**：
+
+```
+vCPU 1 执行 enable_irq:
+  VMEXIT #1 返回 → vCPU 1 在物理核心上跑
+                   ↓
+                   这段间隙有多长？可能只有 0.5-1ms
+                   ↓
+                   watchdog 还没来得及被 schedule
+                   ↓
+                   下一次 enable_irq → VMEXIT #2 → 又被踢出
+```
+
+**关键数据**：320 次串行 VMEXIT：
+
+| 时间类型 | vCPU 1 的情况 |
+|---------|--------------|
+| 总墙钟时间 (wall clock) | 16-32 秒 |
+| 实际 physical CPU 时间 | ~320ms（320 次 × ~1ms）|
+| VMEXIT 等待时间 | 15.68-31.68 秒 |
+
+**vCPU 1 在 16-32 秒内，只消耗了约 320ms 的物理 CPU 时间**。这 320ms 被分散在 320 次 VMEXIT 之间，每次 VMEXIT 返回后只获得约 0.5-1ms 的执行窗口。
+
+**为什么 watchdog 仍然跑不了？**
+
+```
+每次 VMEXIT 返回后的执行窗口：~0.5-1ms
+  → vCPU 1 需要执行 enable_irq 代码
+  → 访问 GIC 寄存器 → 再次 VMEXIT
+  → 这 0.5-1ms 内，时钟中断可能没来
+  → 没有 scheduler_tick → 不会触发 schedule
+  → watchdog/1 没有机会跑
+
+HZ = 1000 时，时钟中断每 1ms 来一次
+HZ = 250 时，时钟中断每 4ms 来一次
+
+如果每次执行窗口 < 1ms，时钟中断可能错过这个窗口
+→ schedule() 永远不会被调用
+→ watchdog/1 永远没有机会
+```
+
+**20 秒是墙钟时间，不是 CPU 时间**：
+
+```
+t=0:    vCPU 1 开始 for 循环
+t=20s:  watchdog hrtimer 到期，检查 touch_ts
+
+在这 20 秒墙钟时间内：
+  - vCPU 1 只获得了 ~320ms 的物理 CPU 时间
+  - watchdog/1 从未获得足够的连续时间来喂狗
+  - watchdog hrtimer 到期 → soft lockup
+```
+
+**简单说**：不是"一直不调度"，而是"**每次调度窗口太短（约 0.5-1ms），watchdog 挤不进去**"。320 次 VMEXIT 累积 16-32 秒墙钟时间后，watchdog 从未成功完成一次完整的喂狗操作。
 
 ### 内核抢占的影响
 
@@ -880,7 +1039,82 @@ raw_spin_unlock_irqrestore(&desc->lock, flags);
 - [Linux 内核为什么会发生 soft lockup？](https://zhuanlan.zhihu.com/p/530637414) — 零声教育，详解 soft lockup 机制、watchdog 原理及常见触发场景
 - `kernel/watchdog.c` — Linux 内核 watchdog 实现源码
 
-## todo
+## 一句话总结（直白版）
 
-- 打出几种场景下的耗时，从而确认就是 VMEXIT 过长导致的
-- 在单p上测试开SMT + cpuidle + 不绑核看是否复现
+**准确说法**：ifconfig 执行 `enable_irq` 时，每次都会触发 VMEXIT，vCPU 1 被踢出到 host 侧等待处理。320 次 VMEXIT 串行叠加耗时 16-32 秒，期间 vCPU 1 完全不在任何物理 CPU 上跑，guest 的 watchdog/1 线程没有机会在 vCPU 1 上被调度喂狗，20 秒后 watchdog 超时触发 soft lockup。
+
+**更直白的说法**：ifconfig 执行 `enable_irq` → VMEXIT → vCPU 1 "消失" → watchdog/1 挤不进来 → 20 秒后报 soft lockup。
+
+**注意**：不是 "ifconfig 一直占着 vCPU" 那么简单，而是 vCPU 在 VMEXIT 期间**根本不在物理 CPU 上**，guest scheduler 看不到它，watchdog 也找不到它。
+
+---
+
+## 验证计划（TODO）
+
+### TODO 1：打出几种场景下的耗时，确认 VMEXIT 延迟
+
+**目标**：通过 trace 数据验证各场景下单次 `enable_irq` 的实际耗时，确认就是 VMEXIT 过长导致的 soft lockup。
+
+**方案**：
+```bash
+# 在各场景下执行 ifconfig up，记录耗时
+echo 1 > /sys/kernel/debug/tracing/tracing_on
+echo function > /sys/kernel/debug/tracing/current_tracer
+
+# 场景 1: SMT ON + 不绑核 + cpuidle 开
+ifconfig eth0 192.168.111.111 up
+
+# 查看 ftrace 中 enable_irq / hns3_irq_enable / hns3_enable_irqs_and_tqps 的耗时
+cat /sys/kernel/debug/tracing/trace
+
+# 清理
+echo nop > /sys/kernel/debug/tracing/current_tracer
+echo 0 > /sys/kernel/debug/tracing/tracing_on
+```
+
+**预期结果**：
+| 场景 | 单次 enable_irq 耗时 | 320 次总耗时 |
+|------|---------------------|--------------|
+| SMT ON + 不绑核 + cpuidle 开 | 50-100ms | 16-32s |
+| SMT ON + 不绑核 + cpuidle 关 | 1-2ms | ~640ms |
+| SMT ON + 绑核 + cpuidle 开 | 1-2ms | ~640ms |
+| SMT OFF + 不绑核 + cpuidle 开 | 2-5ms | ~640ms |
+
+### TODO 2：在单物理 CPU 上测试 SMT ON + cpuidle + 不绑核
+
+**目标**：排除多物理核心的干扰，确认单物理核心上 SMT sibling 竞争也会导致 VMEXIT 延迟增加。
+
+**方案**：
+```bash
+# 查看当前物理核心数
+lscpu | grep "^CPU(s):"
+
+# 创建一个 4 vCPU 的 VM，绑定到单个物理核心（2 cores × 2 SMT）
+# VM 配置：
+#   - vCPU: 4
+#   - 绑核: taskset -c 0,1  (绑定到物理核心 0 的两个 sibling thread)
+#   - 开启 SMT
+#   - cpuidle 开启
+
+# 在 VM 内执行 ifconfig up
+ifconfig eth0 192.168.111.111 up
+
+# 观察是否复现 soft lockup
+dmesg | grep "soft lockup"
+```
+
+**预期结果**：
+- 如果在单物理核心（2 vCPU SMT）上也能复现 soft lockup → 确认是 SMT sibling 竞争导致的
+- 如果单物理核心不复现 → 说明需要多核心 oversubscription 才能触发
+
+**简化测试**：也可以直接在物理机上用 `isolcpus` + `taskset` 模拟单核心多线程场景。
+
+### TODO 3：对比测试验证根因
+
+| 测试 | 验证点 | 预期 |
+|------|--------|------|
+| trace enable_irq 耗时 | 确认单次 50-100ms | ✓ |
+| trace VMEXIT 次数 | 确认 320 × 2 = 640 次 | ✓ |
+| 单物理核心测试 | 确认 SMT sibling 竞争影响 | 待验证 |
+| 关闭 cpuidle 后测试 | 确认延迟降至 1-2ms | ✓ |
+| 绑核后测试 | 确认延迟降至 1-2ms | ✓ |
