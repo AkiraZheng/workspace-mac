@@ -221,6 +221,24 @@ printf("uar_type = %s\n", context->shut_up_bf ? "NC" : "REGULAR");
 
 # 路径自验证
 
+一般 SMMU 设备的操作流程是这样的：
+
+```
+  CPU写命令到内存队列
+          │                                                                     
+          ▼
+  写Doorbell寄存器 -- 此时还是 mmu 操作(通知SMMU)                                                   
+          │       
+          ▼
+  SMMU读取命令
+          │                                                                     
+          ▼
+  SMMU执行命令 (如TLB invalidate)                                               
+          │       
+          ▼
+  写回Sync响应 (如果需要)
+```
+
 ## 用户态
 
 在用户态mlx5中`./rdma-core/providers/mlx5/mlx5.c`，是通过`env = getenv("MLX5_SHUT_UP_BF");`环境变量来确定使用什么类型属性。

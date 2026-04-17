@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kextstat)",
+      "Bash(awk '{print $6,$7}')",
+      "Bash(networksetup *)",
+      "Bash(awk '{print $6}')",
+      "Bash(ioreg -l)",
+      "Bash(system_profiler SPNetworkDataType *)",
+      "Bash(ioreg -rn IONetworkInterface)",
+      "Bash(kextfind -b -i -regex '.*[Nn]et.*|.*[Ee]ther.*|.*[Ww]ifi.*|.*[Aa]irport.*')",
+      "Bash(awk '{print $6, $7}')",
+      "Bash(ifconfig -a)"
+    ]
+  }
+}
