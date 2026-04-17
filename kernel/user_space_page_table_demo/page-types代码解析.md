@@ -116,3 +116,4 @@ struct mm_struct {
     AttrIdx [4:2]:   1 (DEVICE/nGnRE)                                           
   -----------------------------------------
 ```
+
