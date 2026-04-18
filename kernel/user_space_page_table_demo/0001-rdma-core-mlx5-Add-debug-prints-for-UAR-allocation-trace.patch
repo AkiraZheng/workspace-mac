@@ -1,0 +1,83 @@
+From 34b902e623709432433d8ba122e3ed2a7dd3aa63 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Wed, 15 Apr 2026 12:38:48 +0000
+Subject: [PATCH] providers/mlx5: Add debug prints for UAR allocation tracing
+
+This patch adds debug prints in mlx5_set_context() and mlx5_get_qp_uar()
+to trace UAR (User Access Region) allocation path and determine whether
+the BF (BlueFlame) UAR or NC (Non-Cached) UAR is being used.
+
+Debug prints added:
+- mlx5_set_context(): prints bf_reg_size from kernel resp and
+  MLX5_SHUT_UP_BF environment variable value
+- mlx5_get_qp_uar(): prints shut_up_bf, bf_reg_size, nc_uar address,
+  and whether returned bf is nc_uar or BF UAR
+
+Usage:
+  After applying this patch and rebuilding rdma-core library, run the
+  test workload (e.g., ib_read_lat) and check stderr for prints like:
+
+    DEBUG mlx5_set_context: bf_reg_size=0 from kernel resp
+    DEBUG mlx5_set_context: shut_up_bf=0 (MLX5_SHUT_UP_BF env)
+    DEBUG mlx5_get_qp_uar: shut_up_bf=0, bf_reg_size=0, returning nc_uar=0x...
+    DEBUG mlx5_get_qp_uar: Will try to allocate BF UAR (not NC)
+
+  Key indicators:
+  - If bf_reg_size=0 and shut_up_bf=1: VFIO mode, WC disabled
+  - If returning nc_uar: doorbell uses DEVICE_nGnRnE attribute
+  - If returning BF UAR: doorbell uses NORMAL-NC (write-combining)
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ providers/mlx5/mlx5.c  | 2 ++
+ providers/mlx5/verbs.c | 4 ++++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/providers/mlx5/mlx5.c b/providers/mlx5/mlx5.c
+index 857f7adb4..7c26ff9c0 100644
+--- a/providers/mlx5/mlx5.c
++++ b/providers/mlx5/mlx5.c
+@@ -2432,6 +2432,7 @@ static int mlx5_set_context(struct mlx5_context *context,
+ 
+ 	context->max_num_qps = resp->qp_tab_size;
+ 	context->bf_reg_size = resp->bf_reg_size;
++	fprintf(stderr, "DEBUG mlx5_set_context: bf_reg_size=%zu from kernel resp\n", context->bf_reg_size);
+ 	context->cache_line_size = resp->cache_line_size;
+ 	context->max_sq_desc_sz = resp->max_sq_desc_sz;
+ 	context->max_rq_desc_sz = resp->max_rq_desc_sz;
+@@ -2504,6 +2505,7 @@ static int mlx5_set_context(struct mlx5_context *context,
+ 
+ 	context->prefer_bf = get_always_bf();
+ 	context->shut_up_bf = get_shut_up_bf();
++	fprintf(stderr, "DEBUG mlx5_set_context: shut_up_bf=%d (MLX5_SHUT_UP_BF env)\n", context->shut_up_bf);
+ 
+ 	if (resp->tot_bfregs) {
+ 		if (is_import) {
+diff --git a/providers/mlx5/verbs.c b/providers/mlx5/verbs.c
+index 805a25e8e..1358d48fa 100644
+--- a/providers/mlx5/verbs.c
++++ b/providers/mlx5/verbs.c
+@@ -387,9 +387,12 @@ static struct mlx5_bf *mlx5_get_qp_uar(struct ibv_context *context)
+ 	struct mlx5_context *ctx = to_mctx(context);
+ 	struct mlx5_bf *bf = NULL, *bf_entry;
+ 
++	fprintf(stderr, "DEBUG mlx5_get_qp_uar: shut_up_bf=%d, bf_reg_size=%zu, returning nc_uar=%p\n",
++	       ctx->shut_up_bf, ctx->bf_reg_size, (void *)ctx->nc_uar);
+ 	if (ctx->shut_up_bf || !ctx->bf_reg_size)
+ 		return ctx->nc_uar;
+ 
++	fprintf(stderr, "DEBUG mlx5_get_qp_uar: Will try to allocate BF UAR (not NC)\n");
+ 	pthread_mutex_lock(&ctx->dyn_bfregs_mutex);
+ 	do {
+ 		bf = list_pop(&ctx->dyn_uar_qp_dedicated_list, struct mlx5_bf, uar_entry);
+@@ -420,6 +423,7 @@ static struct mlx5_bf *mlx5_get_qp_uar(struct ibv_context *context)
+ 	} while (!bf);
+ 
+ 	pthread_mutex_unlock(&ctx->dyn_bfregs_mutex);
++	fprintf(stderr, "DEBUG mlx5_get_qp_uar: returning bf=%p (BF UAR, NOT nc_uar)\n", (void *)bf);
+ 	return bf;
+ }
+ 
+-- 
+2.43.0
+

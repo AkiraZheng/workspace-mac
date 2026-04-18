@@ -104,6 +104,16 @@ mmap 命令: MLX5_MMAP_GET_REGULAR_PAGES_CMD = 0
 文件: `drivers/infiniband/hw/mlx5/main.c`
 
 ```c
+alloc_uar_entry(..., enum mlx5_ib_uapi_uar_alloc_type alloc_type)             
+{                                                                             
+    ...                                                                       
+    if (alloc_type == MLX5_IB_UAPI_UAR_ALLOC_TYPE_BF)
+        entry->mmap_flag = MLX5_IB_MMAP_TYPE_UAR_WC;    // flag = 3: MEM/NORMAL-NC
+    else                                                                      
+        entry->mmap_flag = MLX5_IB_MMAP_TYPE_UAR_NC;   // flag = 4: DEVICE/nGnRnE
+    ...                                                                       
+}  
+
 // 第 2213 行
 switch (cmd) {
 case MLX5_IB_MMAP_WC_PAGE:
@@ -735,3 +745,888 @@ erform_warm_up --use_new_io 192.168.10.101 -D 30
  4             5420437            2.95           338778.01
 ---------------------------------------------------------------------------------------
 ```
+
+| 场景 | doorbell 类型 | 延迟 |
+|------|-------------|------|
+| host（正常） | WC / BF | ~2.45us |
+| host（强制 DEVICE） | 非 BF | ~2.94us |
+| guest（VFIO） | 非 BF | ~2.95us |
+
+
+这正好说明了原因了，之前host-host收发包测得结果是2.45us，现在第二次offset强制写成DEVICE后，就跟guest的时延持平了，说明这新增的一次offset很关键，如果能在guest上也多加这一次offset配置成NORMEL-NC，说不定guest就会有大幅度的性能提升。
+
+## 用户态 mlx5 属性配置
+
+用户态 mlx5 整体流程：
+
+```mermaid
+flowchart TB
+    subgraph APP["应用层"]
+        IBV["ibv_open_device()"]
+    end
+
+    subgraph LIB["libmlx5.so"]
+        UC["mlx5_alloc_ucontext()"]
+        SC["mlx5_set_context()"]
+        MMAP["mlx5_mmap()"]
+    end
+
+    subgraph KERNEL["内核层"]
+        DEV["mlx5_core"]
+        UVERBS["uverbs"]
+        MM["mmap 处理"]
+    end
+
+    subgraph HARDWARE["硬件"]
+        BAR["PCIe BAR空间"]
+        UAR_PAGE["UAR 页面"]
+        BF_REG["BF 寄存器"]
+    end
+
+    IBV --> UC
+    UC --> SC
+    SC --> MMAP
+    MMAP -->|ioctl| UVERBS
+    UVERBS --> DEV
+    MMAP -->|mmap syscall| MM
+    MM -->|映射| BAR
+    BAR --> UAR_PAGE
+    UAR_PAGE --> BF_REG
+```
+
+现在先暂时猜测 VFIO 限制了 guest 的配置，`rdma-core/providers/mlx5/mlx5_vfio.c`代码中有针对 VFIO 分配 uar 的代码：
+
+```c
+static struct mlx5dv_devx_uar *
+vfio_devx_alloc_uar(struct ibv_context *ibctx, uint32_t flags)
+{
+	struct mlx5_vfio_context *ctx = to_mvfio_ctx(ibctx);
+	struct mlx5_devx_uar *uar;
+
+	if (flags != MLX5_IB_UAPI_UAR_ALLOC_TYPE_NC) {
+		errno = EOPNOTSUPP;
+		return NULL;
+	}//只支持 NC，不支持 BF！，rdma的vfio配置不是主动去决定的，而是被动去配置的，关键在于关键在 bf_reg_size 和 shut_up_bf
+
+	uar = calloc(1, sizeof(*uar));
+	if (!uar) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	uar->dv_devx_uar.page_id = ctx->eqs_uar.uarn;
+	uar->dv_devx_uar.base_addr = (void *)(uintptr_t)ctx->eqs_uar.iova;
+	uar->dv_devx_uar.reg_addr = uar->dv_devx_uar.base_addr + MLX5_BF_OFFSET;
+	uar->context = ibctx;
+
+	return &uar->dv_devx_uar;
+}
+```
+
+这是因为：
+1. VFIO 下的设备能力是 QEMU 模拟或透传的
+2. 某些设备能力（如 Burst-Fire）在 VFIO 模式下可能无法安全支持                
+3. 所以 VFIO 代码被动拒绝了 BF UAR 请求
+
+根据Mellanox/NVIDIA的驱动规范，一个UAR（User Access Region，用户访问区域）内部固定包含4个BF寄存器（BlueFlame寄存器），它们共同协作来完成硬件通信：
+
+| 概念 | 全称 / 别名 | 核心作用 | 本质与范围 |
+|------|-----------|---------|----------|
+| UAR | User Access Region | 通信"大门"：提供用户态程序直接访问硬件的内存区域，是BF寄存器的容器。一个UAR页面包含4个BF寄存器。 | 一片内存区域 |
+| BF | BlueFlame Register / BFREG / UUAR | 通信"通道"：负责向硬件发送门铃（Doorbell），以通知硬件处理任务队列。主要用于发送队列（SQ）的触发。 | UAR内部的4个寄存器之一 |
+
+
+Mellanox (NVIDIA) InfiniBand/RoCE 驱动 中用于动态分配 UAR (User Access Region) 门铃页面的代码中，`mlx5_get_qp_uar()` 为 Queue Pair (QP) 分配一个 UAR（BlueFlame 门铃页面），用于下发 doorbell 通知硬件：
+
+```c
+static struct mlx5_bf *mlx5_get_qp_uar(struct ibv_context *context)
+{
+	struct mlx5_context *ctx = to_mctx(context);
+	struct mlx5_bf *bf = NULL, *bf_entry;
+
+    //非缓存映射 Non-Cached，对应pgprot_noncached
+    //Guest 在 VFIO 模式下，很可能是由于VFIO的拦截，bf_reg_size 被配置成了 0 或 shut_up_bf 为真，导致只使用 NC UAR，无法使用 BF UAR。
+	if (ctx->shut_up_bf || !ctx->bf_reg_size)
+		return ctx->nc_uar; //非缓存 UAR (nc_uar)，也就是最后配的是DEVICE_nGnRE
+
+    //BlueFlame 映射，对应pgprot_writecombine
+    // host 可以通过 mlx5_alloc_qp_uar 分配 UAR
+	pthread_mutex_lock(&ctx->dyn_bfregs_mutex);
+	do {
+		bf = list_pop(&ctx->dyn_uar_qp_dedicated_list, struct mlx5_bf, uar_entry);  //【第1优先级】从空闲列表取专用 UAR
+		if (bf)
+			break;
+
+		if (ctx->qp_alloc_dedicated_uuars < ctx->qp_max_dedicated_uuars) {  //【第2优先级】未达上限，分配新的专用 UAR
+			if (mlx5_alloc_qp_uar(context, true))//mlx5_alloc_qp_uar(context, true) -> NORMAL-NC，也就是 host 的第二次配置
+				break;
+			continue;
+		}
+
+		if (ctx->qp_alloc_shared_uuars < ctx->qp_max_shared_uuars) {//【第3优先级】未达上限，分配新的共享 UAR
+			if (mlx5_alloc_qp_uar(context, false))
+				break;
+		}
+
+		/* Looking for a shared uuar with the less concurrent usage */
+		list_for_each(&ctx->dyn_uar_qp_shared_list, bf_entry, uar_entry) {//【第4优先级】从已使用的共享列表中找并发最少的
+			if (!bf) {
+				bf = bf_entry;
+			} else {
+				if (bf_entry->count < bf->count)
+					bf = bf_entry;
+			}
+		}
+		bf->count++;
+	} while (!bf);
+
+	pthread_mutex_unlock(&ctx->dyn_bfregs_mutex);
+	return bf;
+}
+
+static int mlx5_alloc_qp_uar(struct ibv_context *context, bool dedicated)
+{
+	struct mlx5_context *ctx = to_mctx(context);
+	struct mlx5_bf *bf;
+
+	bf = mlx5_alloc_dyn_uar(context, MLX5_IB_UAPI_UAR_ALLOC_TYPE_BF);
+	if (!bf)
+		return -1;
+
+	if (dedicated)//mlx5_alloc_qp_uar(context, true) -> NORMAL-NC，也就是 host 的第二次配置
+		bf->qp_dedicated = true;
+	else
+		bf->qp_shared = true;
+
+	mlx5_insert_dyn_uuars(ctx, bf);//动态分配
+	return 0;
+}
+```
+
+代码的逻辑如下：
+
+```
+开始
+  ↓
+检查是否禁用 BF 或无 BF 大小？
+  ↓ 是
+返回非缓存 UAR (nc_uar)
+  ↓ 否
+加锁保护
+  ↓
+┌─────────────────────────────────┐
+│        循环尝试分配              │
+└─────────────────────────────────┘
+  ↓
+【第1优先级】从空闲列表取专用 UAR
+  ↓ 有 → 返回
+  ↓ 无
+【第2优先级】未达上限，分配新的专用 UAR
+  ↓ 成功 → 返回
+  ↓ 失败/已达上限
+【第3优先级】未达上限，分配新的共享 UAR
+  ↓
+【第4优先级】从已使用的共享列表中找并发最少的
+  ↓
+增加引用计数
+  ↓
+返回
+```
+
+| 优先级 | 条件 | 说明 |
+|--------|------|------|
+| 1 | 空闲专用列表有 UAR | 直接复用 |
+| 2 | qp_alloc_dedicated_uuars < qp_max_dedicated_uuars | 分配新的专用 UAR |
+| 3 | qp_alloc_shared_uuars < qp_max_shared_uuars | 分配新的共享 UAR |
+| 4 | 其他情况 | 从共享列表选负载最低的 UAR |
+
+其中 ctx 结构体中保存了动态分配 UAR 的信息（以下是一些主要信息）：
+
+```c
+struct mlx5_context {
+    // 动态 BF 寄存器列表
+    struct list_head dyn_uar_qp_dedicated_list;  // 专用 UAR 列表（空闲）
+    struct list_head dyn_uar_qp_shared_list;     // 共享 UAR 列表（已使用）
+    
+    int shut_up_bf;              // 是否禁用 BlueFlame
+    size_t bf_reg_size;          // BF 寄存器大小
+    struct mlx5_bf *nc_uar;      // 非缓存 UAR（回退用）
+    
+    // 配额控制
+    int qp_max_dedicated_uuars;  // 最大专用 UAR 数量
+    int qp_alloc_dedicated_uuars;// 已分配的专用 UAR 数量
+    int qp_max_shared_uuars;     // 最大共享 UAR 数量
+    int qp_alloc_shared_uuars;   // 已分配的共享 UAR 数量
+};
+```
+
+综上，可以怀疑host上是支持分配 BF 寄存器的，所以他可以在`while (!bf)`的循环中，找最优的 UAR。
+
+而 guest 中可能是 VFIO 中拦截了 BlueFlame 寄存器的分配（配置了bf_reg_size 被配置成了 0 或 shut_up_bf 为真），导致只能使用非缓存 UAR，也就只能分配一次就 return 了。
+
+为了确定guest的 UAR 分配路径，可以在用户态代码中加上这个打印：
+
+```c
+// 在 mlx5_get_qp_uar() 中添加
+printk("=== mlx5_get_qp_uar DEBUG ===\n");
+printk("shut_up_bf=%d\n", ctx->shut_up_bf);
+printk("bf_reg_size=%zu\n", ctx->bf_reg_size);
+printk("qp_max_dedicated_uuars=%d\n", ctx->qp_max_dedicated_uuars);
+printk("qp_alloc_dedicated_uuars=%d\n", ctx->qp_alloc_dedicated_uuars);
+printk("qp_max_shared_uuars=%d\n", ctx->qp_max_shared_uuars);
+printk("qp_alloc_shared_uuars=%d\n", ctx->qp_alloc_shared_uuars);
+printk("nc_uar=%p\n", ctx->nc_uar);
+// 这样就能确定 VFIO 到底拦截了什么。
+```
+
+也可以看一下用户态源码中`rdma-core/tests/test_mlx5_uar.py`的测试结果
+
+解决方案：需要在 QEMU/VFIO 层面或 rdma-core 中支持在 VFIO 模式下也允许 BF UAR 分配，或者让 Guest 的 doorbell 使用 NORMAL-NC 属性。
+
+### host 上的两次配置 vs guest 一次配置
+
+host 上的配置：
+
+```text
+  第一次：打开设备时                                                            
+                  
+  mlx5dv_open_device()                                                          
+    ↓                                                                           
+  mlx5_alloc_context()                                                          
+    ↓                                                                           
+  nc_uar = mlx5_alloc_dyn_uar(NC)  ← 第1次，分配 nc_uar                         
+    ↓                                                                           
+  mmap(nc_uar)  ← 第1次 mmap (flag=4)
+                                                                                
+  第二次：创建 QP 时
+                                                                                
+  mlx5_create_qp()
+    ↓
+  mlx5_get_qp_uar()
+    ↓
+  mlx5_alloc_qp_uar()  ← 第2次，分配 bf_uar                                     
+    ↓
+  mmap(bf_uar)  ← 第2次 mmap (flag=3) 
+```
+
+guest 上的配置，因为 VFIO 模式下：：
+
+```c
+  // mlx5_get_qp_uar() 中
+  if (ctx->shut_up_bf || !ctx->bf_reg_size) {                                   
+      return ctx->nc_uar;  // ← 直接返回已有的 nc_uar，不再分配 bf_uar
+  }  
+```
+
+所以 Guest：
+- 第1次：打开设备时分配 nc_uar                                             
+- 第2次：创建 QP 时跳过，直接用 nc_uar
+
+## mlx5 的 context 配置的定义
+
+上述分析中，页面的配置这些信息都是在`mlx5_set_context`中配置的：
+
+```c
+static const struct verbs_device_ops mlx5_dev_ops = {
+	.name = "mlx5",
+	.match_min_abi_version = MLX5_UVERBS_MIN_ABI_VERSION,
+	.match_max_abi_version = MLX5_UVERBS_MAX_ABI_VERSION,
+	.match_table = mlx5_hca_table,
+	.alloc_device = mlx5_device_alloc,
+	.uninit_device = mlx5_uninit_device,
+	.alloc_context = mlx5_alloc_context,
+	.import_context = mlx5_import_context,
+};
+
+mlx5_alloc_context
+    mlx5_set_context
+```
+
+mlx5_set_context 核心流程:
+
+```mermaid
+flowchart TD
+    START["mlx5_set_context() 开始"]
+    
+    START --> GET_RESP["从内核获取 resp 结构<br/>（包含设备能力）"]
+    
+    GET_RESP --> SET_BASIC["设置基本属性<br/>- max_num_qps<br/>- bf_reg_size<br/>- num_dyn_bfregs"]
+    
+    SET_BASIC --> CHECK_BFREG{"resp->tot_bfregs > 0 ?"}
+    
+    CHECK_BFREG -->|是| LEGACY_PATH["Legacy 路径<br/>（老式分配）"]
+    CHECK_BFREG -->|否| DYN_PATH["动态分配路径<br/>（新式分配）"]
+    
+    subgraph LEGACY_PATH ["Legacy 路径"]
+        L1["分配 bfs 数组"]
+        L2["mmap 每个 UAR 页面"]
+        L3["计算每个 BF 寄存器地址"]
+        L4["初始化 BF 结构"]
+    end
+    
+    subgraph DYN_PATH ["动态分配路径"]
+        D1["设置专用/共享配额"]
+        D2["qp_max_dedicated_uuars"]
+        D3["qp_max_shared_uuars"]
+    end
+    
+    LEGACY_PATH --> SET_NC["设置 nc_uar"]
+    DYN_PATH --> SET_NC
+    
+    SET_NC --> SET_OPS["设置 verbs 操作函数"]
+    SET_OPS --> DONE["完成"]
+```
+
+| 步骤 | 代码 | 说明 |
+|------|------|------|
+| 1 | `context->bf_reg_size = resp->bf_reg_size` | 从内核获取 BF 寄存器大小 |
+| 2 | `context->shut_up_bf = get_shut_up_bf()` | 检查环境变量是否禁用 BF |
+| 3 | `if (resp->tot_bfregs)` | 判断使用哪种分配模式 |
+| 4 | `mlx5_mmap()` | 映射 UAR 页面到用户空间 |
+| 5 | `context->bfs[bfi].reg = ...` | 计算每个 BF 寄存器的地址 |
+
+
+属性配置的完整链路：
+
+```mermaid
+sequenceDiagram
+    participant App as 应用
+    participant Lib as libmlx5.so
+    participant Kernel as 内核
+    participant HW as 硬件
+
+    App->>Lib: ibv_open_device()
+    Lib->>Kernel: ioctl(ALLOC_UCONTEXT)
+    Kernel->>Kernel: mlx5_ib_alloc_ucontext()
+    Kernel->>Kernel: 查询设备能力
+    Kernel-->>Lib: 返回 resp (tot_bfregs, bf_reg_size)
+    Lib->>Lib: mlx5_set_context()
+    alt tot_bfregs > 0
+        Lib->>Kernel: mmap(UAR pages)
+        Kernel-->>Lib: 返回虚拟地址
+        Lib->>Lib: 计算 BF 寄存器地址
+    else tot_bfregs == 0
+        Lib->>Lib: 设置动态分配配额
+    end
+    Lib->>Lib: 设置 nc_uar
+    Lib-->>App: 返回 context
+```
+
+可以看到，关键的`bf_reg_size`、`tot_bfregs`、`num_dyn_bfregs`等配置都是通过内核`resp`获取的。`shut_up_bf`是由环境变量`MLX5_SHUT_UP_BF`设置的，这个变量在`mlx5_ib_alloc_ucontext()`中设置。
+
+## 限制 guest 上 doorbell 属性配置的因素
+
+从上面[用户态 mlx5 属性配置](#用户态-mlx5-属性配置)已知，rdma的vfio配置不是主动去决定的，而是被动去配置的，关键在于关键在 bf_reg_size 和 shut_up_bf，而[mlx5-的-context-配置的定义](#mlx5-的-context-配置的定义)中又找到这两个关键属性是通过内核`resp`获取的。因此我们可以看一下在guest时，内核是怎么配置它的（set_ucontext_resp中确定了一系列属性）：
+
+```c
+//./kernel/drivers/infiniband/hw/mlx5/main.c
+static int set_ucontext_resp(struct ib_ucontext *uctx,
+			     struct mlx5_ib_alloc_ucontext_resp *resp)
+{
+	struct ib_device *ibdev = uctx->device;
+	struct mlx5_ib_dev *dev = to_mdev(ibdev);
+	struct mlx5_ib_ucontext *context = to_mucontext(uctx);
+	struct mlx5_bfreg_info *bfregi = &context->bfregi;
+
+	if (MLX5_CAP_GEN(dev->mdev, dump_fill_mkey)) {
+		resp->dump_fill_mkey = dev->mkeys.dump_fill_mkey;
+		resp->comp_mask |=
+			MLX5_IB_ALLOC_UCONTEXT_RESP_MASK_DUMP_FILL_MKEY;
+	}
+
+	resp->qp_tab_size = 1 << MLX5_CAP_GEN(dev->mdev, log_max_qp);
+	if (dev->wc_support) //只有 dev->wc_support = true 时，才会设置 bf_reg_size
+		resp->bf_reg_size = 1 << MLX5_CAP_GEN(dev->mdev,
+						      log_bf_reg_size);
+	//...
+
+	return 0;
+}
+```
+
+所以需要查找在`dev->wc_support`是怎么配置的：
+
+```c
+//./kernel/include/linux/pci.h
+#ifndef arch_can_pci_mmap_wc
+#define arch_can_pci_mmap_wc()		0
+#endif
+//./kernel/arch/arm64/include/asm/pci.h
+#define arch_can_pci_mmap_wc() 1
+
+// ./kernel/drivers/infiniband/hw/mlx5/mem.c
+int mlx5_ib_test_wc(struct mlx5_ib_dev *dev)
+{
+	struct ib_cq_init_attr cq_attr = { .cqe = TEST_WC_NUM_WQES + 1 };
+	int port_type_cap = MLX5_CAP_GEN(dev->mdev, port_type);
+	struct ib_qp_init_attr qp_init_attr = {
+		.cap = { .max_send_wr = TEST_WC_NUM_WQES },
+		.qp_type = IB_QPT_UD,
+		.sq_sig_type = IB_SIGNAL_REQ_WR,
+		.create_flags = MLX5_IB_QP_CREATE_WC_TEST,
+	};
+	struct ib_qp_attr qp_attr = { .port_num = 1 };
+	struct ib_device *ibdev = &dev->ib_dev;
+	struct ib_qp *qp;
+	struct ib_cq *cq;
+	struct ib_pd *pd;
+	int ret;
+
+	if (!MLX5_CAP_GEN(dev->mdev, bf)) // 检查硬件能力，不支持 bf 的话直接返回
+		return 0;
+
+    //!dev->mdev->roce.roce_en：RoCE 未启用
+    //port_type_cap == MLX5_CAP_PORT_TYPE_ETH：端口类型是以太网
+	if (!dev->mdev->roce.roce_en &&
+	    port_type_cap == MLX5_CAP_PORT_TYPE_ETH) {
+        //如果是 PF（物理功能）,检查架构是否支持 PCIe WC mmap，dev->wc_support = true（arch_can_pci_mmap_wc()）
+        //而如果是 ROCE + VF（虚拟功能）的话就悲催了，这里直接默认dev->wc_support = false
+		if (mlx5_core_is_pf(dev->mdev))
+			dev->wc_support = arch_can_pci_mmap_wc();//PF天然配置成1
+
+        //然后返回 0（不继续测试，因为非 RoCE 模式下不支持测试）
+		return 0;
+	}
+
+    // 关键：分配 BF 寄存器时，第二个参数 wc 被设为 true
+	ret = mlx5_alloc_bfreg(dev->mdev, &dev->wc_bfreg, true, false);
+        +->alloc_uars_page
+            +->pfn = uar2pfn(mdev, up->index);// VFIO 的 IOVA 地址
+            +->ioremap_wc(pfn,...)  // e可能失败
+	if (ret)
+		goto print_err;
+
+	if (!dev->wc_bfreg.wc)//检查分配的 BF 是否真的是 WC 类型，如果设备是 VF，那么这里dev->wc_bfreg.wc = 0，所以也不会往下继续配置 dev->wc_support = true
+		goto out1;
+
+	pd = ib_alloc_pd(ibdev, 0);
+	if (IS_ERR(pd)) {
+		ret = PTR_ERR(pd);
+		goto out1;
+	}
+
+	cq = ib_create_cq(ibdev, NULL, NULL, NULL, &cq_attr);
+	if (IS_ERR(cq)) {
+		ret = PTR_ERR(cq);
+		goto out2;
+	}
+
+	qp_init_attr.recv_cq = cq;
+	qp_init_attr.send_cq = cq;
+	qp = ib_create_qp(pd, &qp_init_attr);
+	if (IS_ERR(qp)) {
+		ret = PTR_ERR(qp);
+		goto out3;
+	}
+
+	qp_attr.qp_state = IB_QPS_INIT;
+	ret = ib_modify_qp(qp, &qp_attr,
+			   IB_QP_STATE | IB_QP_PORT | IB_QP_PKEY_INDEX |
+				   IB_QP_QKEY);
+	if (ret)
+		goto out4;
+
+	qp_attr.qp_state = IB_QPS_RTR;
+	ret = ib_modify_qp(qp, &qp_attr, IB_QP_STATE);
+	if (ret)
+		goto out4;
+
+	qp_attr.qp_state = IB_QPS_RTS;
+	ret = ib_modify_qp(qp, &qp_attr, IB_QP_STATE | IB_QP_SQ_PSN);
+	if (ret)
+		goto out4;
+
+	ret = test_wc_do_send(dev, qp);//实际测试通过 BF 发送 doorbell
+	if (ret < 0)
+		goto out4;
+
+	ret = test_wc_poll_cq_result(dev, cq);//检查发送是否成功完成
+	if (ret > 0) {
+		dev->wc_support = true; //一层层配下来，配到这里才确定能配置成功
+		ret = 0;
+	}
+
+out4:
+	ib_destroy_qp(qp);
+out3:
+	ib_destroy_cq(cq);
+out2:
+	ib_dealloc_pd(pd);
+out1:
+	mlx5_free_bfreg(dev->mdev, &dev->wc_bfreg);
+print_err:
+	if (ret)
+		mlx5_ib_err(
+			dev,
+			"Error %d while trying to test write-combining support\n",
+			ret);
+	return ret;
+}
+```
+
+流程图如下：
+```
+                    mlx5_ib_test_wc()
+                          │
+                          ↓
+              ┌───────────────────────┐
+              │ MLX5_CAP_GEN(..., bf) │
+              └───────────────────────┘
+                    │           │
+                   否          是
+                    │           │
+                    ↓           ↓
+                 return 0   ┌─────────────────────────────────┐
+                            │ RoCE 模式？                      │
+                            │ (!roce_en && port_type==ETH)    │
+                            └─────────────────────────────────┘
+                              │                       │
+                             是                      否
+                              │                       │
+                              ↓                       ↓
+                    ┌─────────────────┐    ┌─────────────────────────┐
+                    │ mlx5_core_is_pf │    │ mlx5_alloc_bfreg(wc=true)│
+                    └─────────────────┘    └─────────────────────────┘
+                      │           │                    │
+                     PF          VF                  失败? 否
+                      │           │                    │
+                      ↓           ↓                    ↓
+              wc_support=1    wc_support=0    ┌───────────────────┐
+                      │           │            │ dev->wc_bfreg.wc? │
+                      ↓           ↓            └───────────────────┘
+                   return 0    return 0               │        │
+                                                      是       否
+                                                       │        │
+                                                       ↓        ↓
+                                                ┌──────────┐  goto out1
+                                                │ 完整测试  │
+                                                │ 流程     │
+                                                └──────────┘
+                                                       │
+                                                       ↓
+                                                wc_support=true
+```
+
+最终的结果：
+
+| 环境 | mlx5_core_is_pf() | wc_support | bf_reg_size |
+|------|-------------------|------------|-------------|
+| Host (PF) | true | 设置为 `arch_can_pci_mmap_wc()` | 有值 |
+| Guest (VF via VFIO) | false | 不设置，保持默认值 | = 0 |
+
+对于 VF，他的 wc 配置是 flase：
+
+```text
+
+  路径1：非ROCE + ETH 模式（PF/VF差异在这里）                                   
+   
+  mlx5_ib_test_wc()                                                             
+    ↓             
+  !dev->mdev->roce.roce_en = true                                               
+  port_type_cap == MLX5_CAP_PORT_TYPE_ETH = true
+    ↓                                                                           
+  进入 if 分支    
+    ↓                                                                           
+  mlx5_core_is_pf() = true? (PF) → dev->wc_support = arch_can_pci_mmap_wc()
+  mlx5_core_is_pf() = false? (VF) → 不设置，直接 return 0                       
+   
+  路径2：ROCE 模式（VF走这里）                                                  
+                  
+  mlx5_ib_test_wc()                                                             
+    ↓             
+  dev->mdev->roce.roce_en = true
+    ↓
+  跳过第一个 if 分支
+    ↓                                                                           
+  mlx5_alloc_bfreg(dev->mdev, &dev->wc_bfreg, true, false)  ← ROCE 下VF也走这里
+    ↓                                                                           
+  alloc_uars_page(mdev, map_wc=true)
+    ↓                                                                           
+  ioremap_wc()  ← 可能失败
+    ↓                                                                           
+  返回 -EAGAIN 或 bfreg->wc = false
+    ↓                                                                           
+  dev->wc_support 保持 false
+```
+
+| 模式 | PF | VF |
+|------|----|----|
+| 非ROCE + ETH | `wc_support = arch_can_pci_mmap_wc()` | 直接 return，`wc_support = false` |
+| ROCE | `mlx5_alloc_bfreg()` 成功，`wc_support = true` | `mlx5_alloc_bfreg()` 可能失败，`wc_support = false` |
+
+再来看看为啥说 VF 下`ioremap_wc()`可能失败：
+
+```c
+#define ioremap_wc(addr, size)	\
+	ioremap_prot((addr), (size), PROT_NORMAL_NC)
+#define ioremap_np(addr, size)	\
+	ioremap_prot((addr), (size), PROT_DEVICE_nGnRnE)
+
+// 这个函数里返回NULL的话，VF
+void __iomem *ioremap_prot(phys_addr_t phys_addr, size_t size,
+			   unsigned long prot)
+{
+	unsigned long last_addr = phys_addr + size - 1;
+	pgprot_t pgprot = __pgprot(prot);
+
+	/* Don't allow outside PHYS_MASK */
+    // 检查失败 - 地址超出物理地址范
+	if (last_addr & ~PHYS_MASK)
+		return NULL;
+
+	/* Don't allow RAM to be mapped. */
+    // 失败 - 尝试映射 RAM 区域，VFIO BAR 不支持 WC
+	if (WARN_ON(pfn_is_map_memory(__phys_to_pfn(phys_addr))))
+		return NULL;
+
+	/*
+	 * If a hook is registered (e.g. for confidential computing
+	 * purposes), call that now and barf if it fails.
+	 */
+    //  拒绝 - 某些安全检查失败 
+	if (unlikely(ioremap_prot_hook) &&
+	    WARN_ON(ioremap_prot_hook(phys_addr, size, &pgprot))) {
+		return NULL;
+	}
+
+    // 内部失败 - ioremap_page_range() 返回错
+	return generic_ioremap_prot(phys_addr, size, pgprot);
+}
+EXPORT_SYMBOL(ioremap_prot);
+```
+
+所以接下来还需要验证 guest 上的 wc_support 是不是 false。
+
+## 可能得解决方案
+
+综合上述的分析，这里的关键并不止是让 VF 下页表属性改成 NORMAL-NC，也需要想办法让 guest 下支持 mlx5 的 BF。
+
+BF 依赖：`write combining + relaxed ordering`。
+
+但 VFIO 无法保证：
+- 写入顺序
+    - guest CPU → stage-1 → stage-2 → SMMU
+    - reorder / merge 行为不可控
+- IOVA ≠ 真实物理地址
+    - ioremap_wc() 期望 phys addr，VFIO 给的是 IOVA -> WC buffer flush 行为可能不符合设备预期
+- 安全问题（最重要）
+    - `WC + MMIO = write merge / speculative`（SMMU 是否支持 WC 语义？）
+    - 可能导致：
+        - doorbell 被错误触发
+        - DMA side effect
+        - guest → device 攻击面扩大
+
+但是 VFIO + ARM64 下，系统无法保证 WC 映射对设备是安全的，
+
+VF 通过 VFIO 透传时，ioremap_wc() 接收的地址是 VFIO 的 IOVA 地址，而不是真实物理地址。
+
+可能让 VF 支持 WC 的方案：
+
+```
+  方案1：修改 mlx5 VF 驱动（绕过 ioremap）                                      
+   
+  在 mlx5_ib_test_wc() 中，让 VF 也尝试分配 WC BF：                             
+                  
+  // mem.c - 假设修改后
+  if (!dev->mdev->roce.roce_en && port_type_cap == MLX5_CAP_PORT_TYPE_ETH) {    
+      if (mlx5_core_is_pf(dev->mdev))                                           
+          dev->wc_support = arch_can_pci_mmap_wc();                             
+      return 0;                                                                 
+  }               
+
+  // 新增：VF 也尝试分配 WC                                                     
+  ret = mlx5_alloc_bfreg(dev->mdev, &dev->wc_bfreg, true, false);
+  if (ret) {                                                                    
+      dev->wc_support = false;  // 失败
+  } else {                                                                      
+      dev->wc_support = dev->wc_bfreg.wc;  // 可能成功
+  }                                                                             
+                  
+  方案2：修改 ARM64 ioremap 支持 IOVA                                           
+   
+  // arch/arm64/mm/ioremap.c - 假设修改后                                       
+  int ioremap_prot(phys_addr_t phys_addr, size_t size, unsigned long prot)
+  {                                                                             
+      // 检测是否是 VFIO 的 IOVA 地址
+      if (is_vfio_iova(phys_addr)) {                                            
+          // 使用特殊的 VFIO 映射路径                                           
+          return vfio_ioremap_wc(phys_addr, size);
+      }                                                                         
+      ...         
+  }
+
+  方案3：修改 VFIO 支持 WC 属性                                                 
+   
+  在 VFIO 层面支持 WC 映射给 mlx5 VF 使用。
+```
+
+结论                                                                          
+                  
+目前没有简单的方法让 VF 支持 WC，因为：
+
+1. VFIO 的 IOVA 地址不是真实物理地址
+2. ARM64 ioremap 期望的是物理地址
+3. ioremap_prot_hook 目前只处理 Realm 加密，不处理 VFIO                       
+
+这是一个 架构层面的设计限制，不是简单的配置问题。
+
+对于**方案3**，`vfio_pci_core.c`文件中：
+
+```c
+vfio_pci_core_mmap
+    //VFIO 强制所有 BAR 映射使用 pgprot_noncached（Device_nGnRnE）,无论用户空间请求的是什么内存属性（WC、Normal、Device），VFIO 在建立 mmap 映射时，都强制覆盖为 Non-Cached。
+    +->vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+```
+
+```mermaid
+flowchart TD
+    subgraph GUEST["Guest 应用 (ib_read_lat)"]
+        A["请求 WC 映射<br/>(通过 mlx5_ib mmap)"]
+    end
+
+    subgraph KVM["KVM/VFIO 路径"]
+        B["VFIO 拦截 mmap"]
+        C["vfio_pci_core_mmap()"]
+        D["强制设置:<br/>pgprot_noncached()"]
+        E["Non-Cached 映射返回"]
+    end
+
+    subgraph HOST["Host 内核"]
+        F["ioremap_wc() 请求"]
+        G["实际建立映射"]
+    end
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E -->|Guest 得到 NC 映射| A
+    
+    C -.->|底层| F
+    F -.->|失败| G
+```
+
+| 原因 | 说明 |
+|------|------|
+| 安全性 | WC 映射允许写入合并和重排，可能导致 DMA 攻击或数据泄漏 |
+| 隔离性 | Non-Cached 保证每次访问都直接到达硬件，便于 VFIO 追踪和拦截 |
+| 兼容性 | 不同设备的 WC 行为差异大，Non-Cached 是最安全的选择 |
+| 虚拟化开销 | WC 映射在虚拟化环境中需要额外的 VM_Exit 处理 |
+
+
+所以修改方案为：
+
+```
+  实现方案                                                                      
+                                                                                
+  方案：让 VFIO 支持 mlx5 BAR WC 映射                                           
+   
+  需要修改以下位置：                                                            
+                  
+  1. ARM64 ioremap - 添加 VFIO hook
+
+  // arch/arm64/mm/ioremap.c
+  static ioremap_prot_hook_t ioremap_prot_hook;                                 
+   
+  int arm64_ioremap_prot_hook_register(ioremap_prot_hook_t hook)                
+  {               
+      if (WARN_ON(ioremap_prot_hook))
+          return -EBUSY;                                                        
+      ioremap_prot_hook = hook;
+      return 0;                                                                 
+  }               
+
+  void __iomem *ioremap_prot(phys_addr_t phys_addr, size_t size, unsigned long 
+  prot)
+  {
+      pgprot_t pgprot = __pgprot(prot);
+                                                                                
+      /* 新增：调用 hook 处理 VFIO 地址 */
+      if (unlikely(ioremap_prot_hook) &&                                        
+          ioremap_prot_hook(phys_addr, size, &pgprot)) {                        
+          return NULL;
+      }                                                                         
+                  
+      return generic_ioremap_prot(phys_addr, size, pgprot);
+  }
+
+  2. VFIO 注册 hook                                                             
+   
+  // drivers/vfio/pci/vfio_pci_core.c - 在初始化时注册                          
+  static int vfio_pci_init(void)
+  {                                                                             
+      arm64_ioremap_prot_hook_register(vfio_ioremap_hook);
+  }                                                                             
+                  
+  3. VFIO hook 实现                                                             
+   
+  // drivers/vfio/pci/vfio_pci.c                                                
+  static int vfio_ioremap_hook(phys_addr_t phys, size_t size, pgprot_t *prot)
+  {
+      struct pci_dev *pdev;
+      struct vfio_pci_core_device *vdev;                                        
+   
+      /* 查找是否是需要 WC 的 mlx5 VF */                                        
+      pdev = vfio_pci_from_bar_addr(phys);
+      if (!pdev)                                                                
+          return 0;  // 不是 VFIO 地址，不处理
+                                                                                
+      vdev = to_vfio_pci_core_device(pdev);
+                                                                                
+      if (IS_MLXVF(vdev) && is_wc_bar(phys)) {                                  
+          /* mlx5 VF 的 WC BAR，使用 WC 属性 */
+          *prot = pgprot_writecombine(*prot);                                   
+          return 0;
+      }                                                                         
+                  
+      return 0;
+  }
+
+  4. 关键修改：把强制 pgprot_noncached 改成可配置                               
+   
+  // drivers/vfio/pci/vfio_pci_core.c:1889                                      
+  // 修改前：                                                                   
+  vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+                                                                                
+  // 修改后：允许设备特定设置
+  if (vdev->bar_wc_allowed[index])
+      vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);               
+  else
+      vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);                  
+                                                                                
+  总结
+                                                                                
+  根因：vfio_pci_core_mmap() 第 1889 行强制使用 pgprot_noncached                
+   
+  解决方案：让 VFIO 支持在特定条件下为 mlx5 VF 使用 pgprot_writecombine         
+                  
+  需要修改的文件：
+  1. arch/arm64/mm/ioremap.c - 添加 VFIO hook
+  2. drivers/vfio/pci/vfio_pci_core.c - 改成可配置                              
+  3. drivers/vfio/pci/mlx5/ - mlx5 VF 启用 WC 选项
+```
+
+**所以如果是测试的话，要对齐host和guest的配置的话，最好的办法就是测试时让PF也不支持BF（通过设置环境变量）**
+
+```shell
+export MLX5_SHUT_UP_BF=1
+```
+
+## 该测试及分析的关键总结
+
+- bf_reg_size 决定 BF 能不能用
+- wc_support 是关键 gating
+- VF 路径不会 enable WC
+- 第二次 mmap = BF UAR
+- mlx5 doorbell 性能差异的本质是：是否使用 BF（write combining doorbell），而不是页表属性本身
+- VFIO 禁用 BF 是出于虚拟化一致性和安全模型，而不是简单的技术限制
+
+后续研究：
+
+1. 量化 BF vs non-BF 差异（你已经做了）
+2. 提出：
+    - “trusted VFIO mode”
+    - 或 “mlx5 BF capability exposure”
+3. 讨论：
+    - ordering guarantee
+    - SMMU 支持情况
