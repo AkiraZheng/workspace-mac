@@ -1,0 +1,81 @@
+Subject: [RFC 0/2] vfio/mlx5: Enable write-combining UAR mappings for trusted VMs
+
+Hi all,
+
+This RFC proposes an opt-in mechanism to enable write-combining (WC) UAR
+mappings (BlueFlame doorbells) for mlx5 devices passed through via VFIO
+on arm64.
+
+== Motivation ==
+
+On bare-metal, mlx5 user UAR (User Access Region) doorbell mappings are
+typically created with write-combining attributes, allowing BlueFlame
+(BF) doorbells and achieving optimal latency.
+
+However, under VFIO passthrough on arm64:
+
+  - UAR mappings are forced to non-cached/device-like attributes
+  - BF is effectively disabled (bf_reg_size == 0, wc_support == false)
+  - Doorbells fall back to non-BF MMIO writes
+
+== Measured Impact ==
+
+Using ib_read_lat on arm64 + SMMU + mlx5 (ConnectX series):
+
+  Host (BF enabled):     ~2.45 usec
+  Guest (VFIO):          ~2.95 usec
+  Host (BF forcibly disabled): ~2.94 usec
+
+This clearly shows the performance gap (~0.5 usec) is primarily due to
+the absence of BF doorbells when VFIO enforces non-cached mappings.
+
+== Problem ==
+
+Current VFIO behavior in drivers/vfio/pci/vfio_pci_core.c:1889 enforces
+pgprot_noncached() for all BAR mappings:
+
+    vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+While this is correct for general safety, it prevents enabling WC
+semantics required by BF doorbells in single-tenant / trusted VM scenarios.
+
+== Proposal ==
+
+Introduce an opt-in mechanism to allow WC mappings for mlx5 UAR regions
+when explicitly enabled by userspace:
+
+  PATCH 1/2: VFIO - add allow_wc_bar module parameter for experimental WC mapping
+  PATCH 2/2: mlx5 - relax WC gating when running under VFIO with WC enabled
+
+Default behavior remains unchanged (WC disabled).
+
+== Open Questions ==
+
+  - Is a device-specific VFIO WC mechanism acceptable?
+  - Should WC be exposed as a generic VFIO capability?
+  - What ordering guarantees are required for BF under stage-2 + SMMU?
+  - Are there known arm64 SMMU limitations for WC MMIO?
+
+== Testing ==
+
+Platform: arm64 + SMMU + ConnectX-5
+Workload: ib_read_lat (ibv_read_lat from rdma-core)
+Result: enabling WC restores BF and matches host latency
+
+== Disclaimer ==
+
+This RFC is for discussion only. The implementation is intentionally
+minimal and not production-ready.
+
+--- PATCH 1/2: vfio: allow opt-in WC mapping for selected BAR regions
+--- PATCH 2/2: mlx5: enable WC/BF when VFIO WC mapping is available
+
+CC: linux-rdma@vger.kernel.org
+CC: kvm@vger.kernel.org
+CC: linux-arm-kernel@lists.infradead.org
+CC: linux-pci@vger.kernel.org
+CC: alex.williamson@redhat.com
+CC: leon@kernel.org
+
+Thanks,
+Akira

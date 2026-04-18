@@ -1630,3 +1630,24 @@ export MLX5_SHUT_UP_BF=1
 3. 讨论：
     - ordering guarantee
     - SMMU 支持情况
+
+## 社区讨论 guest 的 mlx5 优化方案
+
+./email-rfc-urar-wc-vfio 下面就是讨论的邮件内容
+
+  预判 reviewer 会问的问题已准备好回答:                                         
+
+```
+  ┌─────────────────────┬────────────────────────────────────────────────────┐  
+  │        问题         │                        回答                        │
+  ├─────────────────────┼────────────────────────────────────────────────────┤
+  │ ordering guarantee? │ "Only for trusted environments, validated by       │
+  │                     │ platform testing"                                  │
+  ├─────────────────────┼────────────────────────────────────────────────────┤
+  │ Why not generic?    │ "RFC starts mlx5-specific; generalization can      │
+  │                     │ follow"                                            │  
+  ├─────────────────────┼────────────────────────────────────────────────────┤
+  │ arm64 SMMU WC       │ "Tested on our platform; further validation        │  
+  │ support?            │ needed"                                            │  
+  └─────────────────────┴────────────────────────────────────────────────────┘
+```

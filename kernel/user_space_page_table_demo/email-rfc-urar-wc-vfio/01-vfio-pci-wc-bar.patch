@@ -1,0 +1,62 @@
+From: AkiraZheng <1428384878@qq.com>
+
+This patch introduces an experimental opt-in mechanism to allow
+write-combining (WC) mappings for selected PCI BAR regions under VFIO.
+
+Currently, VFIO enforces pgprot_noncached() for all BAR mappings in
+vfio_pci_core_mmap() (line 1889), which prevents devices that rely on
+WC semantics (e.g., mlx5 BF doorbells) from achieving optimal performance.
+
+This patch adds:
+
+  - A module parameter: allow_wc_bar
+  - Conditional pgprot_writecombine() usage when enabled
+
+This is intended for experimentation and discussion only. WC is disabled
+by default and must be explicitly enabled.
+
+---
+ drivers/vfio/pci/vfio_pci_core.c | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+
+diff --git a/drivers/vfio/pci/vfio_pci_core.c b/drivers/vfio/pci/vfio_pci_core.c
+index 58c4c6664f3e..9b2c1d8e9f1a 100644
+--- a/drivers/vfio/pci/vfio_pci_core.c
++++ b/drivers/vfio/pci/vfio_pci_core.c
+@@ -46,6 +46,11 @@ static bool nointxmask;
+ static bool disable_vga;
+ static bool disable_idle_d3;
+ module_param_named(nointxmask, nointxmask, bool, 0444);
+ module_param_named(disable_vga, disable_vga, bool, 0444);
++
++/* Experimental: allow WC mapping for BAR regions */
++static bool allow_wc_bar;
++module_param(allow_wc_bar, bool, 0644);
++MODULE_PARM_DESC(allow_wc_bar,
++		 "Allow WC mapping for VFIO BAR (unsafe, experimental)");
+
+ static bool noblock;
+ module_param(noblock, bool, 0644);
+@@ -1886,7 +1891,18 @@ static int vfio_pci_core_mmap(struct vfio_device *core_vdev,
+ 		vdev->barmap[index] = pci_iomap(pdev, index, 0);
+ 	}
+
+ 	vma->vm_private_data = vdev;
+-	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
++
++	/*
++	 * Experimental: allow WC mapping when explicitly enabled.
++	 * This is intended for devices that benefit from WC (e.g., mlx5 BF).
++	 * WC mapping is only intended for trusted environments where
++	 * ordering requirements are validated by platform-specific testing.
++	 */
++	if (allow_wc_bar)
++		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
++	else
++		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
++
+ 	vma->vm_pgoff = (pci_resource_start(pdev, index) >> PAGE_SHIFT) + pgoff;
+
+ 	/*
+--

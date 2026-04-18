@@ -1,0 +1,83 @@
+From: AkiraZheng <1428384878@qq.com>
+
+This patch relaxes WC gating for mlx5 when running under VFIO,
+allowing BF (BlueFlame) doorbells if WC mappings are available.
+
+Currently, mlx5_ib_test_wc() disables WC support for VF devices:
+
+  if (!dev->mdev->roce.roce_en &&
+      port_type_cap == MLX5_CAP_PORT_TYPE_ETH) {
+      if (mlx5_core_is_pf(dev->mdev))
+          dev->wc_support = arch_can_pci_mmap_wc();
+      return 0;  // <-- VF exits here without setting wc_support
+  }
+
+This causes bf_reg_size == 0 in userspace, leading to fallback to
+non-BF doorbells and degraded latency (~0.5 usec overhead observed).
+
+When VFIO is configured to allow WC mappings (via allow_wc_bar module
+parameter), it is possible to enable BF safely in controlled environments.
+
+This patch adds a module parameter to allow experimental WC support
+for VFs when VFIO WC mapping is available.
+
+---
+ drivers/infiniband/hw/mlx5/mem.c | 30 ++++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+
+diff --git a/drivers/infiniband/hw/mlx5/mem.c b/drivers/infiniband/hw/mlx5/mem.c
+index 5a22be14d958..2af9c5f7908b 100644
+--- a/drivers/infiniband/hw/mlx5/mem.c
++++ b/drivers/infiniband/hw/mlx5/mem.c
+@@ -110,6 +110,12 @@ static void *const test_wc_err =
+ static int test_wc_poll_cq_result(struct mlx5_ib_dev *dev, struct ib_cq *cq);
+ static int test_wc_do_send(struct mlx5_ib_dev *dev, struct ib_qp *qp);
+
++/*
++ * Experimental: allow WC for VF when VFIO WC mapping is enabled.
++ * This is only intended for trusted single-tenant environments.
++ */
++static bool force_wc_vf;
++module_param(force_wc_vf, bool, 0644);
++MODULE_PARM_DESC(force_wc_vf,
++		 "Force WC support for VF (experimental, requires allow_wc_bar in VFIO)");
+
+ int mlx5_ib_test_wc(struct mlx5_ib_dev *dev)
+ {
+ 	struct ib_cq_init_attr cq_attr = { .cqe = TEST_WC_NUM_WQES + 1 };
+@@ -120,8 +126,18 @@ int mlx5_ib_test_wc(struct mlx5_ib_dev *dev)
+ 		.qp_type = IB_QPT_UD,
+ 		.sq_sig_type = IB_SIGNAL_REQ_WR,
+ 		.create_flags = MLX5_IB_QP_CREATE_WC_TEST,
+ 	};
+ 	struct ib_qp_attr qp_attr = { .port_num = 1 };
+ 	struct ib_device *ibdev = &dev->ib_dev;
+ 	struct ib_qp *qp;
+ 	struct ib_cq *cq;
+ 	struct ib_pd *pd;
+ 	int ret;
+
+ 	if (!MLX5_CAP_GEN(dev->mdev, bf))
+ 		return 0;
+
+ 	if (!dev->mdev->roce.roce_en &&
+ 	    port_type_cap == MLX5_CAP_PORT_TYPE_ETH) {
++
++		/*
++		 * RFC: allow WC probing for VF when VFIO WC mapping is enabled.
++		 * This is experimental and assumes trusted environment.
++		 * WC mapping is only intended for trusted environments where
++		 * ordering requirements are validated by platform testing.
++		 */
+ 		if (mlx5_core_is_pf(dev->mdev))
+ 			dev->wc_support = arch_can_pci_mmap_wc();
++
++		if (!dev->wc_support && force_wc_vf) {
++			pr_warn_ratelimited("mlx5_ib: forcing WC support for VF (experimental)\n");
++			dev->wc_support = true;
++		}
++
+ 		return 0;
+ 	}
+--

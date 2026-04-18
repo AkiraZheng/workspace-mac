@@ -1,0 +1,28 @@
+From: AkiraZheng <1428384878@qq.com>
+Subject: [PATCH 1/2] vfio/pci: Add allow_wc_bar module parameter for experimental WC mapping
+
+This patch introduces an experimental opt-in mechanism to allow
+write-combining (WC) mappings for selected PCI BAR regions under VFIO.
+
+Currently, VFIO enforces pgprot_noncached() for all BAR mappings in
+vfio_pci_core_mmap() (line 1889), which prevents devices that rely on
+WC semantics (e.g., mlx5 BF doorbells) from achieving optimal performance.
+
+This patch adds:
+  - A module parameter: allow_wc_bar
+  - Conditional pgprot_writecombine() usage when enabled
+
+This is intended for experimentation and discussion only. WC is disabled
+by default and must be explicitly enabled via:
+  echo 1 > /sys/module/vfio_pci/parameters/allow_wc_bar
+
+Usage example:
+  # Enable WC for mlx5 VF in QEMU
+  qemu -device vfio-pci,host=03:00.0,allow_wc_bar=1 ...
+
+Note: WC mapping is only intended for trusted environments where ordering
+requirements are validated by platform-specific testing.
+
+---
+ drivers/vfio/pci/vfio_pci_core.c | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
