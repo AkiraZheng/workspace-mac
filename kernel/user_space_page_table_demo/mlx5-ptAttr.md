@@ -349,7 +349,12 @@ static int mlx5_ib_mmap(struct ib_ucontext *ibcontext, struct vm_area_struct *vm
 		return uar_mmap(dev, command, vma, context);//全都路由到同一个地方执行 uar_mmap
 
 	//...
+    case MLX5_IB_MMAP_CLOCK_INFO:
+	return mlx5_ib_mmap_clock_info_page(dev, vma, context);
 
+	default:
+		return mlx5_ib_mmap_offset(dev, vma, ibcontext);//实际测试中发现它走的就是这里
+    }
 	return 0;
 }
 
@@ -374,17 +379,32 @@ static int uar_mmap(struct mlx5_ib_dev *dev, enum mlx5_ib_mmap_cmd cmd,
 	}
 
 	//...
+}
 
-err:
-	if (!dyn_uar)
-		return err;
+static int mlx5_ib_mmap_offset(struct mlx5_ib_dev *dev,
+			       struct vm_area_struct *vma,
+			       struct ib_ucontext *ucontext)
+{
+	//...
 
-	mlx5_cmd_uar_dealloc(dev->mdev, idx, context->devx_uid);
+	pgoff = mlx5_vma_to_pgoff(vma);
+	entry = rdma_user_mmap_entry_get_pgoff(ucontext, pgoff);
+	if (!entry)
+		return -EINVAL;
 
-free_bfreg:
-	mlx5_ib_free_bfreg(dev, bfregi, bfreg_dyn_idx);
-
-	return err;
+	mentry = to_mmmap(entry);
+	pfn = (mentry->address >> PAGE_SHIFT);
+	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_VAR ||
+	    mentry->mmap_flag == MLX5_IB_MMAP_TYPE_UAR_NC) 
+		prot = pgprot_noncached(vma->vm_page_prot);
+	else
+		prot = pgprot_writecombine(vma->vm_page_prot);//host 的 stage1就是走这里，配成NORMAL-NC
+	ret = rdma_user_mmap_io(ucontext, vma, pfn,
+				entry->npages * PAGE_SIZE,
+				prot,
+				entry);
+	rdma_user_mmap_entry_put(&mentry->rdma_entry);
+	return ret;
 }
 ```
 
@@ -636,3 +656,82 @@ ARM 架构规范定义属性组合规则，并在硬件中实现。
   io_remap_pfn_range → 按用户态 prot                                            
 - Guest Stage-2（KVM 虚拟化页表）：完全由 VFIO/IOMMU driver 控制，与用户态
   prot 无关 
+
+# 测试
+
+在测试中发现，将mlx5 doorbell 寄存器的 stage1 页表 hard code 成 DEVICE_nGnRE 后，他的性能就跟 guest 持平了，说明就是这个配置导致的性能问题：
+
+先来看一下host和guest执行后的打印：
+
+```shell
+# host
+[17784.095218] mlx5_ib_mmap: command=5 vm_pgoff=0x500 entering switch
+[17784.104747] mlx5_ib_mmap: command=7 vm_pgoff=0x700 entering switch
+[17784.118678] mlx5_ib_mmap: command=9 vm_pgoff=0x900 entering switch
+[17784.125909] mlx5_ib_mmap_offset: pgoff=0x90000
+[17784.131397] mlx5_ib_mmap_offset: mmap_flag=4 address=0x800002102000 pfn=0x800002102
+[17784.140095] mlx5_ib_mmap_offset: setting prot=pgprot_noncached
+[17784.149000] mlx5_ib_mmap: command=9 vm_pgoff=0x901 entering switch
+[17784.157367] mlx5_ib_mmap_offset: pgoff=0x90001               # host多执行了一次mlx5_ib_mmap，这里估计是把剩下的全部配成
+[17784.162847] mlx5_ib_mmap_offset: mmap_flag=3 address=0x800002103000 pfn=0x800002103
+[17784.171540] mlx5_ib_mmap_offset: setting prot=pgprot_noncached (FORCE DEVICE)
+
+---------------------------------------------------------------------------------------
+                    RDMA_Read Latency Test
+ Dual-port       : OFF          Device         : mlx5_0
+ Number of qps   : 1            Transport type : IB
+ Connection type : RC           Using SRQ      : OFF
+ PCIe relax order: ON
+ ibv_wr* API     : ON
+ TX depth        : 1
+ Mtu             : 1024[B]
+ Link type       : Ethernet
+ GID index       : 3
+ Outstand reads  : 16
+ rdma_cm QPs     : OFF
+ Data ex. method : Ethernet
+ Verbose pingpong data : ON
+---------------------------------------------------------------------------------------
+ local address: LID 0000 QPN 0x92e9 PSN 0xb29696 OUT 0x10 RKey 0x186e00 VAddr 0x0000003b8d3000
+ GID: 00:00:00:00:00:00:00:00:00:00:255:255:192:168:10:103
+ remote address: LID 0000 QPN 0x015b PSN 0x726b3d OUT 0x10 RKey 0x186e00 VAddr 0x0000001cbc7000
+ GID: 00:00:00:00:00:00:00:00:00:00:255:255:192:168:10:101
+---------------------------------------------------------------------------------------
+ #bytes        #iterations       t_avg[usec]    tps average
+ 4             5437833            2.94           339864.50
+---------------------------------------------------------------------------------------
+
+# guest
+root@localhost:/# ./ib_read_lat -c RC -d mlx5_0 -p 49054 -s 4 -x 3 --p
+erform_warm_up --use_new_io 192.168.10.101 -D 30
+[  581.225971][  T310] mlx5_ib_mmap: command=5 vm_pgoff=0x500 entering switch
+[  581.227139][  T310] mlx5_ib_mmap: command=7 vm_pgoff=0x700 entering switch
+[  581.229504][  T310] mlx5_ib_mmap: command=9 vm_pgoff=0x900 entering switch # 可以看到，guest只执行了一次mlx5_ib_mmap，然后mlx5_ib_mmap_offset里是走正常的pgprot_noncached设置路径（非FORCE）
+[  581.230647][  T310] mlx5_ib_mmap_offset: pgoff=0x90000
+[  581.231438][  T310] mlx5_ib_mmap_offset: mmap_flag=4 address=0x8000012000 pfn=0x8000012
+[  581.232685][  T310] mlx5_ib_mmap_offset: setting prot=pgprot_noncached
+---------------------------------------------------------------------------------------
+                    RDMA_Read Latency Test
+ Dual-port       : OFF          Device         : mlx5_0
+ Number of qps   : 1            Transport type : IB
+ Connection type : RC           Using SRQ      : OFF
+ PCIe relax order: ON
+ ibv_wr* API     : ON
+ TX depth        : 1
+ Mtu             : 1024[B]
+ Link type       : Ethernet
+ GID index       : 3
+ Outstand reads  : 16
+ rdma_cm QPs     : OFF
+ Data ex. method : Ethernet
+ Verbose pingpong data : ON
+---------------------------------------------------------------------------------------
+ local address: LID 0000 QPN 0x00e0 PSN 0x96e64e OUT 0x10 RKey 0x020800 VAddr 0x00000000455000
+ GID: 00:00:00:00:00:00:00:00:00:00:255:255:192:168:10:102
+ remote address: LID 0000 QPN 0x0161 PSN 0xf71223 OUT 0x10 RKey 0x186e00 VAddr 0x0000003c5bf000
+ GID: 00:00:00:00:00:00:00:00:00:00:255:255:192:168:10:101
+---------------------------------------------------------------------------------------
+ #bytes        #iterations       t_avg[usec]    tps average
+ 4             5420437            2.95           338778.01
+---------------------------------------------------------------------------------------
+```
