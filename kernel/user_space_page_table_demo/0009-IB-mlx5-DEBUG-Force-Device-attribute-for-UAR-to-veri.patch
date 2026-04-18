@@ -1,7 +1,7 @@
 From b9c13754fbe6c2acb1b9078de4ec8692a1b2fff8 Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Wed, 15 Apr 2026 02:49:52 +0000
-Subject: [PATCH] IB/mlx5: DEBUG: Force Device attribute for UAR to verify
+Subject: [PATCH 1/2] IB/mlx5: DEBUG: Force Device attribute for UAR to verify
  performance issue
 
 DEBUG patch: Force all UAR mappings (WC/REGULAR) to use Device

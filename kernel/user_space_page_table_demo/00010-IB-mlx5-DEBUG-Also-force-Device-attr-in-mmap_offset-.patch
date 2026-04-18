@@ -1,8 +1,8 @@
 From 1c9bd98489df58878803142229412f2a96b3ac2b Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Wed, 15 Apr 2026 05:32:55 +0000
-Subject: [PATCH] IB/mlx5: DEBUG: Also force Device attr in mmap_offset path
- (cmd=8/9)
+Subject: [PATCH 2/2] IB/mlx5: DEBUG: Also force Device attr in mmap_offset
+ path (cmd=8/9)
 
 ---
  drivers/infiniband/hw/mlx5/main.c | 6 ++++--
