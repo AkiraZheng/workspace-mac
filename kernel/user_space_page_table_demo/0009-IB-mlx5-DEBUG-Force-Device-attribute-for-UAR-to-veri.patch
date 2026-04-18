@@ -1,21 +1,24 @@
-commit f578ee0253ff80272dd6c97c8f9bde1bc3dce1ac
-Author: AkiraZheng <1428384878@qq.com>
-Date:   Wed Apr 15 02:49:52 2026 +0000
+From f578ee0253ff80272dd6c97c8f9bde1bc3dce1ac Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Wed, 15 Apr 2026 02:49:52 +0000
+Subject: [PATCH] IB/mlx5: DEBUG: Force Device attribute for UAR to verify
+ performance issue
 
-    IB/mlx5: DEBUG: Force Device attribute for UAR to verify performance issue
-    
-    DEBUG patch: Force all UAR mappings (WC/REGULAR) to use Device
-    attribute (pgprot_noncached) instead of NORMAL_NC (pgprot_writecombine).
-    
-    This is to verify whether the page table attribute difference between
-    Host and Guest is causing the performance regression in RDMA RoCE.
-    
-    DO NOT MERGE: This is a debug-only patch.
-    
-    View trace with:
-      cat /sys/kernel/debug/tracing/trace | grep mlx5_uar_mmap
-    
-    Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+DEBUG patch: Force all UAR mappings (WC/REGULAR) to use Device
+attribute (pgprot_noncached) instead of NORMAL_NC (pgprot_writecombine).
+
+This is to verify whether the page table attribute difference between
+Host and Guest is causing the performance regression in RDMA RoCE.
+
+DO NOT MERGE: This is a debug-only patch.
+
+View trace with:
+  cat /sys/kernel/debug/tracing/trace | grep mlx5_uar_mmap
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ drivers/infiniband/hw/mlx5/main.c | 29 +++++++++++++++++++++++++----
+ 1 file changed, 25 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/infiniband/hw/mlx5/main.c b/drivers/infiniband/hw/mlx5/main.c
 index 07fa79900cf9..fff725db2c29 100644
@@ -85,3 +88,6 @@ index 07fa79900cf9..fff725db2c29 100644
  		return uar_mmap(dev, command, vma, context);
  
  	case MLX5_IB_MMAP_GET_CONTIGUOUS_PAGES:
+-- 
+2.43.0
+
