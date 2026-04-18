@@ -1623,7 +1623,7 @@ export MLX5_SHUT_UP_BF=1
 
 后续研究：
 
-1. 量化 BF vs non-BF 差异（你已经做了）
+1. 量化 BF vs non-BF 差异（已经做了）
 2. 提出：
     - “trusted VFIO mode”
     - 或 “mlx5 BF capability exposure”
