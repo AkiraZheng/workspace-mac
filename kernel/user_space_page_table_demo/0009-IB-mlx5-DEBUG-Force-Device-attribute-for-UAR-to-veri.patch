@@ -1,4 +1,4 @@
-From f578ee0253ff80272dd6c97c8f9bde1bc3dce1ac Mon Sep 17 00:00:00 2001
+From b9c13754fbe6c2acb1b9078de4ec8692a1b2fff8 Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Wed, 15 Apr 2026 02:49:52 +0000
 Subject: [PATCH] IB/mlx5: DEBUG: Force Device attribute for UAR to verify
@@ -17,11 +17,11 @@ View trace with:
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ---
- drivers/infiniband/hw/mlx5/main.c | 29 +++++++++++++++++++++++++----
- 1 file changed, 25 insertions(+), 4 deletions(-)
+ drivers/infiniband/hw/mlx5/main.c | 45 ++++++++++++++++++++++++++-----
+ 1 file changed, 38 insertions(+), 7 deletions(-)
 
 diff --git a/drivers/infiniband/hw/mlx5/main.c b/drivers/infiniband/hw/mlx5/main.c
-index 07fa79900cf9..fff725db2c29 100644
+index 07fa79900cf9..58c4c6664f3e 100644
 --- a/drivers/infiniband/hw/mlx5/main.c
 +++ b/drivers/infiniband/hw/mlx5/main.c
 @@ -2211,20 +2211,35 @@ static int uar_mmap(struct mlx5_ib_dev *dev, enum mlx5_ib_mmap_cmd cmd,
@@ -61,7 +61,38 @@ index 07fa79900cf9..fff725db2c29 100644
  	/* Trace mmap attribute settings for debugging performance issues */
  	trace_printk("mlx5_uar_mmap: cmd=%d idx=%lu pgprot=0x%llx\n",
  		     cmd, idx, (unsigned long long)pgprot_val(prot));
-@@ -2350,17 +2365,23 @@ static int mlx5_ib_mmap(struct ib_ucontext *ibcontext, struct vm_area_struct *vm
+@@ -2314,17 +2329,27 @@ static int mlx5_ib_mmap_offset(struct mlx5_ib_dev *dev,
+ 	int ret;
+ 
+ 	pgoff = mlx5_vma_to_pgoff(vma);
++	/* DEBUG: print dmesg for mmap_offset path */
++	pr_info("mlx5_ib_mmap_offset: pgoff=0x%lx\n", pgoff);
+ 	entry = rdma_user_mmap_entry_get_pgoff(ucontext, pgoff);
+-	if (!entry)
++	if (!entry) {
++		pr_info("mlx5_ib_mmap_offset: entry not found for pgoff=0x%lx\n", pgoff);
+ 		return -EINVAL;
++	}
+ 
+ 	mentry = to_mmmap(entry);
+ 	pfn = (mentry->address >> PAGE_SHIFT);
++	pr_info("mlx5_ib_mmap_offset: mmap_flag=%d address=0x%llx pfn=0x%llx\n",
++	       mentry->mmap_flag, (unsigned long long)mentry->address,
++	       (unsigned long long)pfn);
+ 	if (mentry->mmap_flag == MLX5_IB_MMAP_TYPE_VAR ||
+-	    mentry->mmap_flag == MLX5_IB_MMAP_TYPE_UAR_NC)
++	    mentry->mmap_flag == MLX5_IB_MMAP_TYPE_UAR_NC) {
++		pr_info("mlx5_ib_mmap_offset: setting prot=pgprot_noncached\n");
+ 		prot = pgprot_noncached(vma->vm_page_prot);
+-	else
++	} else {
++		pr_info("mlx5_ib_mmap_offset: setting prot=pgprot_writecombine\n");
+ 		prot = pgprot_writecombine(vma->vm_page_prot);
++	}
+ 	ret = rdma_user_mmap_io(ucontext, vma, pfn,
+ 				entry->npages * PAGE_SIZE,
+ 				prot,
+@@ -2350,17 +2375,23 @@ static int mlx5_ib_mmap(struct ib_ucontext *ibcontext, struct vm_area_struct *vm
  	phys_addr_t pfn;
  
  	command = get_command(vma->vm_pgoff);
