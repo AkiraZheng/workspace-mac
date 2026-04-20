@@ -325,6 +325,16 @@ out:
 
 NC 延迟最低，但 REGULAR 在多数实际工作负载中因缓存收益往往更好。环境变量 MLX5_SHUT_UP_BF 主要用于特定调试或低延迟优化场景。
 
+传统的 doorbell 机制只是发一个 doorbell 通知，而 mlx 中的 BF 机制，在写 doorbell 寄存器的时候，还会把 WQE(Work Queue Entry) 也写到寄存器中，这样省去了 DMA 读操作，性能更好。
+
+| 特性维度 | 传统 Doorbell 机制 | MLX5 BlueFlame 机制 |
+|---------|------------------|-------------------|
+| 核心原理 | 软件将 Work Queue Element (WQE) 写入内存后，向设备特定的 Doorbell 寄存器写入地址指针，触发设备通过 DMA 读取内存中的 WQE 并执行。 | 软件在写入 Doorbell 寄存器的同时，直接将 WQE 的关键信息（如操作码、元数据）也写入到设备的 PCI BAR 空间中。设备接收到 Doorbell 时，WQE 已部分或全部在本地，无需再进行 DMA 读。 |
+| 数据路径 | CPU -> 内存(WQE) -> NIC (DMA 读) | CPU -> NIC (PCI MMIO 写，同时完成Doorbell和WQE传输) |
+| 延迟 | 相对较高。因为增加了一次 DMA 读内存的操作，其延迟受内存访问延迟影响。 | 极低。通过编程 I/O (PIO) 的方式，将 WQE 和 Doorbell 合并写入，省去了 DMA 读操作。研究表明，对于小消息，BlueFlame 可比传统方式降低约 800纳秒的延迟。 |
+| 适用场景 | 高吞吐、大数据包场景。在网卡负载较高时，使用传统方式可以更好地利用设备的 DMA 引擎，避免 PIO 写入占用过多 PCI 带宽。 | 低延迟、小消息场景。在网卡负载较轻时，BlueFlame 能显著降低延迟。常用于RDMA、DPDK等对延迟敏感的应用。 |
+| 驱动控制 | 作为默认或基础机制。 | 作为一种可选优化，可通过驱动参数或环境变量（如 MLX5_POST_SEND_PREFER_BF, MLX5_SHUT_UP_BF）来启用或禁用。 |
+
 ## 内核态-stage1
 
 上面是用户态下发 cmd 的流程，接着 mmap 系统调用后就会到内核态进行处理，内核态代码可以看 mlx5 驱动代码`./openeuler/kernel/drivers/infiniband/hw/mlx5/main.c`
