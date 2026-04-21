@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -v -p 2222 root@127.0.0.1 -o ConnectTimeout=5 -o BatchMode=yes)",
+      "Bash(ssh -v -p 2222 root@127.0.0.1 -o ConnectTimeout=10)",
+      "Bash(ssh *)"
+    ]
+  }
+}

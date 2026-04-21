@@ -1,3 +1,23 @@
+# 问题描述
+
+使用 id_read_lat 测试 mlx5_0，发现 **Host 作为 server、Guest 作为 client 时，Guest 中 `post_send_db` 的 MMIO 写操作性能显著差于 Host 作为 client**。
+
+**关键代码（mlx5 驱动）：**
+```c
+static inline void post_send_db(struct mlx5_qp *qp, struct mlx5_bf *bf,
+                int nreq, int inl, int size, void *ctrl)
+{
+    // bf->reg 是 MMIO 寄存器地址
+    mmio_write64_be(bf->reg + bf->offset, *(__be64 *)ctrl);
+}
+```
+
+**核心差异：**
+| 测试场景 | 页表层数 | MMIO 地址转换 |
+|----------|----------|---------------|
+| Host 作为 client | 1 层（stage1） | GVA → PA |
+| Guest 作为 client | 2 层（stage1 + stage2） | GVA → GPA → HPA |
+
 # 原理分析
 Host 侧 mmap 路径
 ```c
@@ -1407,7 +1427,7 @@ EXPORT_SYMBOL(ioremap_prot);
 
 所以接下来还需要验证 guest 上的 wc_support 是不是 false。
 
-## 可能得解决方案
+## 可能的解决方案
 
 综合上述的分析，这里的关键并不止是让 VF 下页表属性改成 NORMAL-NC，也需要想办法让 guest 下支持 mlx5 的 BF。
 

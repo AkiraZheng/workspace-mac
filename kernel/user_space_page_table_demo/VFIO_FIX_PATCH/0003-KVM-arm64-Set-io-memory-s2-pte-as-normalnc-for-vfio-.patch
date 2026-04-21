@@ -1,0 +1,81 @@
+From b6cdf042fe597eddff5395cd293d4a5d84719ac4 Mon Sep 17 00:00:00 2001
+From: Ankit Agrawal <ankita@nvidia.com>
+Date: Sat, 24 Feb 2024 20:35:45 +0530
+Subject: [PATCH 3/4] KVM: arm64: Set io memory s2 pte as normalnc for vfio pci
+ device
+
+To provide VM with the ability to get device IO memory with NormalNC
+property, map device MMIO in KVM for ARM64 at stage2 as NormalNC.
+Having NormalNC S2 default puts guests in control (based on [1],
+"Combining stage 1 and stage 2 memory type attributes") of device
+MMIO regions memory mappings. The rules are summarized below:
+([(S1) - stage1], [(S2) - stage 2])
+
+S1           |  S2           | Result
+NORMAL-WB    |  NORMAL-NC    | NORMAL-NC
+NORMAL-WT    |  NORMAL-NC    | NORMAL-NC
+NORMAL-NC    |  NORMAL-NC    | NORMAL-NC
+DEVICE<attr> |  NORMAL-NC    | DEVICE<attr>
+
+Still this cannot be generalized to non PCI devices such as GICv2.
+There is insufficient information and uncertainity in the behavior
+of non PCI driver. A driver must indicate support using the
+new flag VM_ALLOW_ANY_UNCACHED.
+
+Adapt KVM to make use of the flag VM_ALLOW_ANY_UNCACHED as indicator to
+activate the S2 setting to NormalNc.
+
+[1] section D8.5.5 of DDI0487J_a_a-profile_architecture_reference_manual.pdf
+
+Suggested-by: Catalin Marinas <catalin.marinas@arm.com>
+Acked-by: Jason Gunthorpe <jgg@nvidia.com>
+Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+Reviewed-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Ankit Agrawal <ankita@nvidia.com>
+---
+ arch/arm64/kvm/mmu.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index fbc62b27adc8..e4fe5c7785e2 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1476,7 +1476,7 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	int ret = 0;
+ 	bool write_fault, writable, force_pte = false;
+ 	bool exec_fault, mte_allowed;
+-	bool device = false;
++	bool device = false, vfio_allow_any_uc = false;
+ 	unsigned long mmu_seq;
+ 	struct kvm *kvm = vcpu->kvm;
+ 	struct kvm_mmu_memory_cache *memcache = &vcpu->arch.mmu_page_cache;
+@@ -1583,6 +1583,8 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	gfn = kvm_gpa_from_fault(kvm, fault_ipa) >> PAGE_SHIFT;
+ 	mte_allowed = kvm_vma_mte_allowed(vma);
+ 
++	vfio_allow_any_uc = vma->vm_flags & VM_ALLOW_ANY_UNCACHED;
++
+ 	/* Don't use the VMA after the unlock -- it may have vanished */
+ 	vma = NULL;
+ 
+@@ -1686,10 +1688,14 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (exec_fault)
+ 		prot |= KVM_PGTABLE_PROT_X;
+ 
+-	if (device)
+-		prot |= KVM_PGTABLE_PROT_DEVICE;
+-	else if (cpus_have_const_cap(ARM64_HAS_CACHE_DIC))
++	if (device) {
++		if (vfio_allow_any_uc)
++			prot |= KVM_PGTABLE_PROT_NORMAL_NC;
++		else
++			prot |= KVM_PGTABLE_PROT_DEVICE;
++	} else if (cpus_have_const_cap(ARM64_HAS_CACHE_DIC)) {
+ 		prot |= KVM_PGTABLE_PROT_X;
++	}
+ 
+ 	/*
+ 	 * Under the premise of getting a FSC_PERM fault, we just need to relax
+-- 
+2.43.0
+
