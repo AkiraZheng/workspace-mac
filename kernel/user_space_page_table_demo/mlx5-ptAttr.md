@@ -1272,7 +1272,7 @@ int mlx5_ib_test_wc(struct mlx5_ib_dev *dev)
 
 	ret = test_wc_poll_cq_result(dev, cq);//检查发送是否成功完成
 	if (ret > 0) {
-		dev->wc_support = true; //一层层配下来，配到这里才确定能配置成功
+		dev->wc_support = true; //一层层校验下来，配到这里才确定能配置成功
 		ret = 0;
 	}
 
@@ -1293,6 +1293,29 @@ print_err:
 	return ret;
 }
 ```
+
+```c
+int mlx5_ib_test_wc(struct mlx5_ib_dev *dev)                                  
+{                                                                             
+    // ... 前面检查 bf capability ...                                         
+                                                                              
+    // 1. 分配 BF register (ioremap_wc)                                       
+    ret = mlx5_alloc_bfreg(dev->mdev, &dev->wc_bfreg, true, false);           
+                                                                              
+    // 2. 实际发送 BF doorbell                                                
+    ret = test_wc_do_send(dev, qp);                                           
+                                                                              
+    // 3. 检查发送是否成功                                                    
+    ret = test_wc_poll_cq_result(dev, cq);
+                                                                              
+    // 4. 只有测试成功才设为 true
+    if (ret > 0) {
+        dev->wc_support = true;  // ← 只有这里！                              
+    }
+} 
+```
+
+todo：下一步得在这里打点，看一下配置`dev->wc_support`为true时是阻塞在哪里了
 
 流程图如下：
 ```
@@ -2006,6 +2029,242 @@ dmesg | grep -E "mlx5_ib_mmap|mlx5_ib_mmap_offset"
 3. **结果**：第二次 mmap 触发 → bf_uar 使用 NORMAL-NC → 写合并生效 → 延迟降低
 
 **这是目前社区认可的正确解决方案，已被 Catalin Marinas、Will Deacon、Jason Gunthorpe、Alex Williamson 等内核 maintainers 审核通过。**
+
+### bugfix 分析
+
+接下来得看一下为什么主线上 vfio 对 stage2 的修改能影响 doorbell 寄存器的配置。
+
+从打桩的测试结果中，我们其实可以看出，guest和host的mmap差别在于host有两次mmap的操作，而guest只有一次：
+
+```shell
+# host
+[17784.095218] mlx5_ib_mmap: command=5 vm_pgoff=0x500 entering switch
+[17784.104747] mlx5_ib_mmap: command=7 vm_pgoff=0x700 entering switch
+[17784.118678] mlx5_ib_mmap: command=9 vm_pgoff=0x900 entering switch
+[17784.125909] mlx5_ib_mmap_offset: pgoff=0x90000
+[17784.131397] mlx5_ib_mmap_offset: mmap_flag=4 address=0x800002102000 pfn=0x800002102
+[17784.140095] mlx5_ib_mmap_offset: setting prot=pgprot_noncached
+[17784.149000] mlx5_ib_mmap: command=9 vm_pgoff=0x901 entering switch
+[17784.157367] mlx5_ib_mmap_offset: pgoff=0x90001               # host多执行了一次mlx5_ib_mmap，这里估计是把剩下的全部配成
+[17784.162847] mlx5_ib_mmap_offset: mmap_flag=3 address=0x800002103000 pfn=0x800002103
+[17784.171540] mlx5_ib_mmap_offset: setting prot=pgprot_noncached (FORCE DEVICE) # 原始内核中，这里是 pgprot_writecombine -> NORMAL-NC
+
+# guest
+root@localhost:/# ./ib_read_lat -c RC -d mlx5_0 -p 49054 -s 4 -x 3 --p
+erform_warm_up --use_new_io 192.168.10.101 -D 30
+[  581.225971][  T310] mlx5_ib_mmap: command=5 vm_pgoff=0x500 entering switch
+[  581.227139][  T310] mlx5_ib_mmap: command=7 vm_pgoff=0x700 entering switch
+[  581.229504][  T310] mlx5_ib_mmap: command=9 vm_pgoff=0x900 entering switch # 可以看到，guest只执行了一次mlx5_ib_mmap，然后mlx5_ib_mmap_offset里是走正常的pgprot_noncached设置路径（非FORCE）
+[  581.230647][  T310] mlx5_ib_mmap_offset: pgoff=0x90000
+[  581.231438][  T310] mlx5_ib_mmap_offset: mmap_flag=4 address=0x8000012000 pfn=0x8000012
+[  581.232685][  T310] mlx5_ib_mmap_offset: setting prot=pgprot_noncached
+```
+
+| 场景 | doorbell 类型 | 延迟 |
+|------|-------------|------|
+| host（正常） | WC / BF | ~2.45us |
+| host（强制 DEVICE） | 非 BF | ~2.94us |
+| guest（VFIO） | 非 BF | ~2.95us |
+
+这正好说明了原因了，之前host-host收发包测得结果是2.45us，现在第二次offset强制写成DEVICE后，就跟guest的时延持平了，说明这新增的一次offset很关键，如果能在guest上也多加这一次offset配置成NORMEL-NC，说不定guest就会有大幅度的性能提升。
+
+那么为什么 guest 的这第二次 mmap 没了呢？
+
+我们先来看一下这两次 mmap 是怎么触发的：
+
+```
+  第一次：打开设备时                                                            
+                  
+  mlx5dv_open_device()                                                          
+    ↓                                                                           
+  mlx5_alloc_context()                                                          
+    ↓                                                                           
+  nc_uar = mlx5_alloc_dyn_uar(NC)  ← 第1次，分配 nc_uar                         
+    ↓                                                                           
+  mmap(nc_uar)  ← 第1次 mmap (flag=4)
+                                                                                
+  第二次：创建 QP 时
+                                                                                
+  mlx5_create_qp()
+    ↓
+  mlx5_get_qp_uar()
+    ↓
+  mlx5_alloc_qp_uar()  ← 第2次，分配 bf_uar                                     
+    ↓
+  mmap(bf_uar)  ← 第2次 mmap (flag=3) 
+```
+
+其中，第一次分配是固有的，且分配后的属性都是 DEVICE，所以我们也不 care了。关键来看第二次。
+
+Mellanox (NVIDIA) InfiniBand/RoCE 驱动 中用于动态分配 UAR (User Access Region) 门铃页面的代码中，`mlx5_get_qp_uar()` 为 Queue Pair (QP) 分配一个 UAR（BlueFlame 门铃页面），用于下发 doorbell 通知硬件：
+
+```c
+static struct mlx5_bf *mlx5_get_qp_uar(struct ibv_context *context)
+{
+	struct mlx5_context *ctx = to_mctx(context);
+	struct mlx5_bf *bf = NULL, *bf_entry;
+
+    //非缓存映射 Non-Cached，对应pgprot_noncached
+    //Guest 在 VFIO 模式下，很可能是由于VFIO的拦截，bf_reg_size 被配置成了 0 或 shut_up_bf 为真，导致只使用 NC UAR，无法使用 BF UAR。
+	if (ctx->shut_up_bf || !ctx->bf_reg_size)
+		return ctx->nc_uar; //非缓存 UAR (nc_uar)，也就是最后配的是DEVICE_nGnRE
+
+    //BlueFlame 映射，对应pgprot_writecombine
+    // host 可以通过 mlx5_alloc_qp_uar 分配 UAR
+	pthread_mutex_lock(&ctx->dyn_bfregs_mutex);
+	do {
+		//根据优先级去分配BF： NORMAl-NC
+		-> mlx5_alloc_qp_uar(context, true)
+	} while (!bf);
+
+	pthread_mutex_unlock(&ctx->dyn_bfregs_mutex);
+	return bf;
+}
+```
+
+mlx5 的 context 配置的定义：
+
+| 变量 | 说明 |
+|------|------|
+| `context->bf_reg_size = resp->bf_reg_size` | 从内核获取 BF 寄存器大小 |
+| `context->shut_up_bf = get_shut_up_bf()` | 检查环境变量是否禁用 BF |
+
+`ctx->shut_up_bf`是环境变量配置去手动关 BF 功能的，经检查，我们并没有手动配置这个环境变量，所以先排除这个的影响，怀疑guest是因为不满足`ctx->bf_reg_size`才没有触发第二次 mmap 去配置 BF 空间的。所以接下来看一下`ctx->bf_reg_size`是怎么配上去的。
+
+配置流程：
+
+![](images/2026-04-21-16-10-21.png)
+
+可以看出，mlx5 的 context 配置实际上是有内核的返回结果来配置的，那么内核中，是什么限制了`context->bf_reg_size`的配置呢？
+
+```c
+//./kernel/drivers/infiniband/hw/mlx5/main.c
+static int set_ucontext_resp(struct ib_ucontext *uctx,
+			     struct mlx5_ib_alloc_ucontext_resp *resp)
+{
+	//...
+
+	resp->qp_tab_size = 1 << MLX5_CAP_GEN(dev->mdev, log_max_qp);
+	if (dev->wc_support) //只有 dev->wc_support = true 时，才会设置 bf_reg_size
+		resp->bf_reg_size = 1 << MLX5_CAP_GEN(dev->mdev,
+						      log_bf_reg_size);
+	//...
+
+	return 0;
+}
+```
+
+关键点就在于，只有内核中`dev->wc_support = true`设备支持 wc_support 时，才会设置`bf_reg_size`。所以需要查找在`dev->wc_support`是怎么配置的，该属性的配置，是在 mlx5 驱动中配的，执行`mlx5_ib_test_wc`时配置和测试设备的 wc 能力：
+
+```c
+//./kernel/include/linux/pci.h
+#ifndef arch_can_pci_mmap_wc
+#define arch_can_pci_mmap_wc()		0
+#endif
+//./kernel/arch/arm64/include/asm/pci.h
+#define arch_can_pci_mmap_wc() 1
+
+// ./kernel/drivers/infiniband/hw/mlx5/mem.c
+int mlx5_ib_test_wc(struct mlx5_ib_dev *dev)
+{
+	//...
+
+        //!dev->mdev->roce.roce_en：RoCE 未启用 -> PF 天然使能 wc_support，VF 天然关闭 wc_support
+        //port_type_cap == MLX5_CAP_PORT_TYPE_ETH：端口类型是以太网
+	if (!dev->mdev->roce.roce_en &&
+	    port_type_cap == MLX5_CAP_PORT_TYPE_ETH) {
+        //如果是 PF（物理功能）,检查架构是否支持 PCIe WC mmap，dev->wc_support = true（arch_can_pci_mmap_wc()）
+        //而如果是 ROCE + VF（虚拟功能）的话就悲催了，这里直接默认dev->wc_support = false
+		if (mlx5_core_is_pf(dev->mdev))
+			dev->wc_support = arch_can_pci_mmap_wc();//PF天然配置成1
+
+        //然后返回 0（不继续测试，因为非 RoCE 模式下不支持测试）
+		return 0;
+	}
+
+        // 关键：分配 BF 寄存器时，第二个参数 wc 被设为 true
+	ret = mlx5_alloc_bfreg(dev->mdev, &dev->wc_bfreg, true, false);
+        +->alloc_uars_page
+            +->pfn = uar2pfn(mdev, up->index);// VFIO 的 IOVA 地址
+            +->ioremap_wc(pfn,...)  // stage1 映射成功，但 stage2 用 DEVICE_nGnRE 覆盖
+	if (ret)
+		goto print_err;
+
+	if (!dev->wc_bfreg.wc)//检查分配的 BF 是否真的是 WC 类型，如果设备是 VF，那么这里dev->wc_bfreg.wc = 0，所以也不会往下继续配置 dev->wc_support = true
+		goto out1;
+
+	//...
+
+	ret = test_wc_do_send(dev, qp);//实际测试通过 BF 发送 doorbell
+	if (ret < 0)
+		goto out4;
+
+	ret = test_wc_poll_cq_result(dev, cq);//检查发送是否成功完成
+	if (ret > 0) {
+		dev->wc_support = true; //一层层校验下来，配到这里才确定能配置成功
+		ret = 0;
+	}
+
+        //...
+}
+```
+
+
+所以它其实不是直接配 true 而是通过实际测试：
+
+```
+  test_wc_do_send() → 通过 BF 寄存器发送 doorbell                               
+           ↓                                                                    
+  test_wc_poll_cq_result() → 检查 CQ，发送是否成功
+           ↓                                                                    
+  ret > 0 → wc_support = true  (WC 生效)
+  ret <= 0 → wc_support = false (WC 不生效)
+```
+
+对于 VF + RoCE 模式，VF 走测试路径，但 stage2 DEVICE_nGnRE 会导致测试失败：
+
+```
+mlx5_ib_test_wc() 完整流程                                                    
+                                                                                
+  mlx5_ib_test_wc()                                                             
+        │                                                                       
+        ├─ 1. mlx5_alloc_bfreg() → 分配 BF register (ioremap_wc)
+        │         ↓                                                             
+        │    检查 dev->wc_bfreg.wc
+        │         ↓
+        │    wc_bfreg.wc = false → goto out1 (WC 类型分配失败)                  
+        │    wc_bfreg.wc = true → 继续                                          
+        │
+        ├─ 2. 创建测试用的 QP 和 CQ                                             
+        │                                                                       
+        ├─ 3. test_wc_do_send() 发送 doorbell
+        │         ↓                                                             
+        │    post_send_nop() × 255  // 填充 WQE 到工作队列                      
+        │         ↓
+        │    post_send_nop(WR_ID_END, signaled=true)  // 最后一次带信号         
+        │         ↓                                                             
+        │    __iowrite64_copy(bf->bfreg->map + bf->offset, ...)  // ← 写 BF register
+        │         ↓
+        │    返回 0 表示发送成功                                                
+        │         
+        └─ 4. test_wc_poll_cq_result() 轮询 CQ 等待结果
+                  ↓
+             ib_poll_cq() → 检查完成队列                                        
+                  ↓
+             ┌─ ret > 0 且 wc.wr_id == WR_ID_BF → wc_support = true ✓           
+             └─ ret <= 0 或超时 → wc_support = false ✗                          
+                        ↓                                                       
+                   -ETIMEDOUT (100ms 超时)
+
+WC 正常工作: CQ 很快有完成 → wc_support = true                                
+DEVICE_nGnRE: 写合并不生效 → 设备处理慢 → 超时 -ETIMEDOUT → wc_support = false
+```
+
+todo：下一步得在这里打点，看一下配置`dev->wc_support`为true时是阻塞在哪一步的配置。
+
+因此综上：`dev->wc_support = false` -> `bf_reg_size`未设置 -> mlx5驱动中`if (ctx->shut_up_bf || !ctx->bf_reg_size) return ctx->nc_uar`，因此mlx5驱动中不会继续往下去第二次 mmap 配置 BF UAR 空间了。
+
+而 linux 主线上的 patch 通过改变 KVM stage2 的默认属性 (DEVICE_nGnRE →            NormalNC)，解除了 stage2 对 stage1 WC 属性的覆盖，也使得 dev->support 的配置能成功
 
 # vfio 映射机制
 
