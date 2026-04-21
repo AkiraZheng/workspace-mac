@@ -2266,33 +2266,29 @@ todo：下一步得在这里打点，看一下配置`dev->wc_support`为true时�
 
 ```mermaid
 graph TD
-    subgraph Host_KVM_VFIO["Host (KVM/VFIO)"]
-        A["Host Stage-2 页表属性<br>默认为 DEVICE_nGnRE"] --> B["破坏写合并<br>Write-Combine"]
+    subgraph Host["Host (KVM/VFIO)"]
+        A["Host Stage-2 页表属性 默认为 DEVICE_nGnRE"] --> B["破坏写合并 Write-Combine"]
     end
 
-    subgraph Guest_mlx5["Guest (mlx5 驱动)"]
-        C["mlx5_ib_test_wc"] --> D["test_wc_do_send<br>通过 BF 发送 doorbell"]
+    subgraph Guest["Guest (mlx5 驱动)"]
+        C["mlx5_ib_test_wc"] --> D["test_wc_do_send 通过 BF 发送 doorbell"]
         D --> E["__iowrite64_copy"]
         E --> F{"写合并生效?"}
     end
 
     subgraph Hardware["硬件/虚拟化交互"]
         B -.->|导致| F
-        F -->|否| G["PCIe 事务增多/乱序<br>设备处理慢/超时"]
+        F -->|否| G["PCIe 事务增多/乱序 设备处理慢/超时"]
     end
 
-    subgraph Guest_Result["Guest (最终结果)"]
-        G --> H["test_wc_poll_cq_result<br>返回 -ETIMEDOUT"]
+    subgraph Result["Guest 最终结果"]
+        G --> H["test_wc_poll_cq_result 返回 -ETIMEDOUT"]
         H --> I["dev->wc_support = false"]
-        I --> J["set_ucontext_resp<br>不设置 bf_reg_size"]
-        J --> K["mlx5_get_qp_uar<br>只返回 nc_uar"]
-        K --> L["无第二次 BF UAR mmap<br>Doorbell 属性 = DEVICE"]
-        L --> M["Guest 性能 ≈ Host 强制 DEVICE 模式"]
+        I --> J["set_ucontext_resp 不设置 bf_reg_size"]
+        J --> K["mlx5_get_qp_uar 只返回 nc_uar"]
+        K --> L["无第二次 BF UAR mmap Doorbell 属性 = DEVICE"]
+        L --> M["Guest 性能近似 Host 强制 DEVICE 模式"]
     end
-
-    style A fill:"#f9f",stroke:"#333",stroke-width:2px
-    style I fill:"#f99",stroke:"#333",stroke-width:2px
-    style M fill:"#f99",stroke:"#333",stroke-width:2px
 ```
 
 而 linux 主线上的 patch 通过改变 KVM stage2 的默认属性 (DEVICE_nGnRE →            NormalNC)，解除了 stage2 对 stage1 WC 属性的覆盖，也使得 dev->support 的配置能成功。进而触发第二次配置成 BF NORMAL-NC的 mmap。
