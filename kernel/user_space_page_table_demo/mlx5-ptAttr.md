@@ -1222,7 +1222,7 @@ int mlx5_ib_test_wc(struct mlx5_ib_dev *dev)
 	ret = mlx5_alloc_bfreg(dev->mdev, &dev->wc_bfreg, true, false);
         +->alloc_uars_page
             +->pfn = uar2pfn(mdev, up->index);// VFIO 的 IOVA 地址
-            +->ioremap_wc(pfn,...)  // e可能失败
+            +->ioremap_wc(pfn,...)  // stage1 映射成功，但 stage2 用 DEVICE_nGnRE 覆盖
 	if (ret)
 		goto print_err;
 
@@ -1360,72 +1360,58 @@ print_err:
   mlx5_core_is_pf() = true? (PF) → dev->wc_support = arch_can_pci_mmap_wc()
   mlx5_core_is_pf() = false? (VF) → 不设置，直接 return 0                       
    
-  路径2：ROCE 模式（VF走这里）                                                  
-                  
-  mlx5_ib_test_wc()                                                             
-    ↓             
+  路径2：ROCE 模式（VF走这里）
+
+  mlx5_ib_test_wc()
+    ↓
   dev->mdev->roce.roce_en = true
     ↓
   跳过第一个 if 分支
-    ↓                                                                           
+    ↓
   mlx5_alloc_bfreg(dev->mdev, &dev->wc_bfreg, true, false)  ← ROCE 下VF也走这里
-    ↓                                                                           
+    ↓
   alloc_uars_page(mdev, map_wc=true)
-    ↓                                                                           
-  ioremap_wc()  ← 可能失败
-    ↓                                                                           
-  返回 -EAGAIN 或 bfreg->wc = false
-    ↓                                                                           
+    ↓
+  ioremap_wc()  ← stage1 映射成功 (VA → IOVA, 属性 Normal-NC)
+    ↓
+  但 stage2 (VFIO/IOMMU) 用 DEVICE_nGnRE → 覆盖 stage1
+    ↓
+  WC 实际不生效 → bfreg->wc = false
+    ↓
   dev->wc_support 保持 false
 ```
 
 | 模式 | PF | VF |
 |------|----|----|
 | 非ROCE + ETH | `wc_support = arch_can_pci_mmap_wc()` | 直接 return，`wc_support = false` |
-| ROCE | `mlx5_alloc_bfreg()` 成功，`wc_support = true` | `mlx5_alloc_bfreg()` 可能失败，`wc_support = false` |
+| ROCE | `mlx5_alloc_bfreg()` 成功，`wc_support = true` | `mlx5_alloc_bfreg()` WC 测试失败，`wc_support = false` |
 
-再来看看为啥说 VF 下`ioremap_wc()`可能失败：
+## `ioremap_wc()` 是 stage1，但 stage2 覆盖属性
+
+`ioremap_wc()` 是 Guest kernel 建立 **stage1** 映射的函数：
 
 ```c
-#define ioremap_wc(addr, size)	\
-	ioremap_prot((addr), (size), PROT_NORMAL_NC)
-#define ioremap_np(addr, size)	\
-	ioremap_prot((addr), (size), PROT_DEVICE_nGnRnE)
-
-// 这个函数里返回NULL的话，VF
-void __iomem *ioremap_prot(phys_addr_t phys_addr, size_t size,
-			   unsigned long prot)
-{
-	unsigned long last_addr = phys_addr + size - 1;
-	pgprot_t pgprot = __pgprot(prot);
-
-	/* Don't allow outside PHYS_MASK */
-    // 检查失败 - 地址超出物理地址范
-	if (last_addr & ~PHYS_MASK)
-		return NULL;
-
-	/* Don't allow RAM to be mapped. */
-    // 失败 - 尝试映射 RAM 区域，VFIO BAR 不支持 WC
-	if (WARN_ON(pfn_is_map_memory(__phys_to_pfn(phys_addr))))
-		return NULL;
-
-	/*
-	 * If a hook is registered (e.g. for confidential computing
-	 * purposes), call that now and barf if it fails.
-	 */
-    //  拒绝 - 某些安全检查失败 
-	if (unlikely(ioremap_prot_hook) &&
-	    WARN_ON(ioremap_prot_hook(phys_addr, size, &pgprot))) {
-		return NULL;
-	}
-
-    // 内部失败 - ioremap_page_range() 返回错
-	return generic_ioremap_prot(phys_addr, size, pgprot);
-}
-EXPORT_SYMBOL(ioremap_prot);
+ioremap_wc(addr, size) = ioremap_prot(addr, size, PROT_NORMAL_NC)
+  → 在 stage1 中创建 VA → IOVA 映射，属性设为 Normal-NC
 ```
 
-所以接下来还需要验证 guest 上的 wc_support 是不是 false。
+**`ioremap_wc()` 调用不会失败，映射会成功创建。**
+
+当 CPU 实际访问这段 memory 时：
+
+```
+CPU 访问 VA
+    ↓
+stage1 (Guest kernel): Normal-NC (WC) ✓
+    ↓
+stage2 (VFIO/IOMMU): DEVICE_nGnRE ← 问题在这里！覆盖了 stage1
+    ↓
+ARM 属性组合规则: Device 胜出 → 最终效果是 DEVICE (非 WC)
+```
+
+所以：**`ioremap_wc()` 本身不会失败，但 stage2 的 DEVICE_nGnRE 属性会覆盖 stage1 的 Normal-NC，导致 WC 实际不生效。**
+
+4 NVIDIA patches 解决的就是这个问题：让 stage2 也用 NormalNC，而不是 DEVICE_nGnRE。
 
 ## 可能的解决方案
 
@@ -1657,27 +1643,368 @@ export MLX5_SHUT_UP_BF=1
 2. 提出：
     - “trusted VFIO mode”
     - 或 “mlx5 BF capability exposure”
-3. 讨论：
-    - ordering guarantee
-    - SMMU 支持情况
 
-## 社区讨论 guest 的 mlx5 优化方案
+# 最终解决办法 && bugfix 分析
 
-./email-rfc-urar-wc-vfio 下面就是讨论的邮件内容
+## 问题根因
 
-  预判 reviewer 会问的问题已准备好回答:                                         
+Guest VM 通过 VFIO 使用 mlx5 RDMA RoCE 时，性能比 Host 差约 0.5us：
+
+| 环境 | 延迟 |
+|------|------|
+| Host (BF enabled) | ~2.45 us |
+| Guest (VFIO) | ~2.95 us |
+
+**根因：Guest 的 BF (BlueFlame) doorbell 被禁用，只能使用 non-BF MMIO 写。**
+
+## BF 被禁用的原因链
 
 ```
-  ┌─────────────────────┬────────────────────────────────────────────────────┐  
-  │        问题         │                        回答                        │
-  ├─────────────────────┼────────────────────────────────────────────────────┤
-  │ ordering guarantee? │ "Only for trusted environments, validated by       │
-  │                     │ platform testing"                                  │
-  ├─────────────────────┼────────────────────────────────────────────────────┤
-  │ Why not generic?    │ "RFC starts mlx5-specific; generalization can      │
-  │                     │ follow"                                            │  
-  ├─────────────────────┼────────────────────────────────────────────────────┤
-  │ arm64 SMMU WC       │ "Tested on our platform; further validation        │  
-  │ support?            │ needed"                                            │  
-  └─────────────────────┴────────────────────────────────────────────────────┘
+VFIO 强制 pgprot_noncached
+         ↓
+KVM stage2 使用 DEVICE_nGnRE (覆盖 stage1)
+         ↓
+ioremap_wc() 虽然成功创建 stage1 映射
+但 stage2 属性覆盖 → WC 不生效
+         ↓
+wc_bfreg.wc = false
+         ↓
+wc_support = false
+         ↓
+bf_reg_size = 0
+         ↓
+mlx5_get_qp_uar() 直接返回 nc_uar
+         ↓
+第二次 mmap (bf_uar) 不触发
+         ↓
+只有第一次 mmap (nc_uar, DEVICE_nGnRnE)
+         ↓
+写合并不生效，延迟高
 ```
+
+## 完整触发路径分析
+
+### 第一次 mmap (nc_uar) - 打开设备时
+
+```
+用户态: mlx5_set_context()
+  → mmap(MLX5_UAR_TYPE_NC) → command=3
+  → 内核: mmap_flag=4, pgprot_noncached
+  → 结果: DEVICE_nGnRnE
+
+host和guest都有的阶段，与 BF 无关
+```
+
+### 第二次 mmap (bf_uar) - 创建 QP 时
+
+```
+关键条件: bf_reg_size > 0
+
+用户态: mlx5_get_qp_uar()
+  → if (ctx->shut_up_bf || !ctx->bf_reg_size)
+        return ctx->nc_uar;  ← bf_reg_size=0 时直接返回
+  → 否则: mlx5_alloc_qp_uar() → mmap(bf_uar) → command=9
+
+如果能走下去的话，内核将进行配置：
+内核: mlx5_ib_mmap_offset()
+  → mmap_flag=3
+  → prot = pgprot_writecombine (NORMAL-NC)
+```
+
+**Host 有第二次 mmap，因为 bf_reg_size > 0。**
+
+**Guest 没有第二次 mmap，因为 bf_reg_size = 0。**
+
+## 4 个 NVIDIA Patches 的关键作用
+
+这 4 个 patches 来自 NVIDIA Ankit Agrawal，已被社区认可：
+
+| Patch | 作用 |
+|-------|------|
+| 0001-KVM-arm64-Introduce-new-flag... | 添加 `KVM_PGTABLE_PROT_NORMAL_NC` |
+| 0002-mm-Introduce-new-flag-to-indicate-wc-safe | 添加 `VM_ALLOW_ANY_UNCACHED` |
+| 0003-KVM-arm64-Set-io-memory-s2-pte... | KVM 检查 flag，stage2 用 NormalNC |
+| 0004-vfio-Convey-kvm-that-the-vfio-pci... | VFIO 设置 `VM_ALLOW_ANY_UNCACHED` |
+
+### 4 patches 如何让 VF 支持 WC
+
+```
+4 patches 前:
+  VFIO mmap → stage2 = DEVICE_nGnRE → WC 不生效
+
+4 patches 后:
+  VFIO mmap → VM_ALLOW_ANY_UNCACHED set → stage2 = NormalNC
+             → WC 生效 → wc_bfreg.wc = true
+             → wc_support = true → bf_reg_size > 0
+             → 第二次 mmap 触发
+```
+
+### 4 patches 和第二次 mmap 的因果关系
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 4 NVIDIA patches                                            │
+│   KVM stage2: DEVICE_nGnRE → NormalNC                     │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ mlx5_ib_test_wc() 在 VF 上                                   │
+│   → mlx5_alloc_bfreg() → ioremap_wc()                      │
+│   → stage2 = NormalNC (不再是 DEVICE_nGnRE)               │
+│   → WC 真的生效了 → wc_bfreg.wc = true                     │
+│   → wc_support = true                                      │
+│   → bf_reg_size > 0                                        │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 用户态 mlx5_get_qp_uar()                                     │
+│   bf_reg_size > 0 → 不走 nc_uar 分支                        │
+│   → 触发第二次 mmap (bf_uar)                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## stage1 + stage2 属性组合
+
+```
+第二次 mmap (bf_uar):
+┌─────────────────────────────────────────────────────────────┐
+│ stage1 (Guest kernel): pgprot_writecombine → NORMAL-NC    │
+│                                                             │
+│ stage2 (KVM):                                               │
+│   无 patches: DEVICE_nGnRE                                  │
+│   有 patches: NormalNC (因为 VM_ALLOW_ANY_UNCACHED)         │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+              ARM 属性组合 (最保守胜出)
+                          ↓
+              无 patches: DEVICE_nGnRE (慢)
+              有 patches: NORMAL-NC ✓ (写合并生效)
+```
+
+## 属性组合查表 (ARM ARM D8.5.5)
+
+| Stage-1 | Stage-2 | 最终属性 |
+|---------|---------|---------|
+| NORMAL-NC | DEVICE_nGnRE | DEVICE (保守胜出) |
+| NORMAL-NC | NormalNC | **NORMAL-NC** ✓ |
+
+## 需要的 patches 清单
+
+### 必要 (NVIDIA 官方):
+
+```
+0001-KVM-arm64-Introduce-new-flag-for-non-cacheable-IO-me.patch
+0002-mm-Introduce-new-flag-to-indicate-wc-safe.patch
+0003-KVM-arm64-Set-io-memory-s2-pte-as-normalnc-for-vfio-.patch
+0004-vfio-Convey-kvm-that-the-vfio-pci-device-is-wc-safe.patch
+```
+
+### 可选 (mlx5 增强):
+
+如需更明确控制，可添加 mlx5 `force_wc_vf` 模块参数。
+
+## 验证方法
+
+应用 patches 后，在 Guest 内检查：
+
+```bash
+# dmesg 应该看到第二次 mmap
+dmesg | grep -E “mlx5_ib_mmap|mlx5_ib_mmap_offset”
+
+# 预期输出:
+# mlx5_ib_mmap: command=9 vm_pgoff=0x901 entering switch  ← 第二次
+# mlx5_ib_mmap_offset: mmap_flag=3 ...                    ← bf_uar
+
+# 性能测试
+./ib_read_lat -c RC -d mlx5_0 ...
+
+# 预期延迟: ~2.45 us (接近 Host)
+```
+
+## 最终解决办法 && bugfix 分析
+
+### 问题根因
+
+Guest VM 通过 VFIO 使用 mlx5 RDMA RoCE 时，性能比 Host 差约 0.5us：
+
+| 环境 | 延迟 |
+|------|------|
+| Host (BF enabled) | ~2.45 us |
+| Guest (VFIO) | ~2.95 us |
+
+**根因：Guest 的 BF (BlueFlame) doorbell 被禁用，只能使用 non-BF MMIO 写。**
+
+### BF 被禁用的原因链
+
+```
+VFIO 强制 pgprot_noncached
+         ↓
+KVM stage2 使用 DEVICE_nGnRE (覆盖 stage1)
+         ↓
+ioremap_wc() 虽然成功创建 stage1 映射
+但 stage2 属性覆盖 → WC 不生效
+         ↓
+wc_bfreg.wc = false
+         ↓
+wc_support = false
+         ↓
+bf_reg_size = 0
+         ↓
+mlx5_get_qp_uar() 直接返回 nc_uar
+         ↓
+第二次 mmap (bf_uar) 不触发
+         ↓
+只有第一次 mmap (nc_uar, DEVICE_nGnRnE)
+         ↓
+写合并不生效，延迟高
+```
+
+### 完整触发路径分析
+
+#### 第一次 mmap (nc_uar) - 打开设备时
+
+```
+用户态: mlx5_set_context()
+  → mmap(MLX5_UAR_TYPE_NC) → command=3
+  → 内核: mmap_flag=4, pgprot_noncached
+  → 结果: DEVICE_nGnRnE
+
+两次都有的阶段，与 BF 无关
+```
+
+#### 第二次 mmap (bf_uar) - 创建 QP 时
+
+```
+关键条件: bf_reg_size > 0
+
+用户态: mlx5_get_qp_uar()
+  → if (ctx->shut_up_bf || !ctx->bf_reg_size)
+        return ctx->nc_uar;  ← bf_reg_size=0 时直接返回
+  → 否则: mlx5_alloc_qp_uar() → mmap(bf_uar) → command=9
+
+内核: mlx5_ib_mmap_offset()
+  → mmap_flag=3
+  → prot = pgprot_writecombine (NORMAL-NC)
+```
+
+**Host 有第二次 mmap，因为 bf_reg_size > 0。**
+
+**Guest 没有第二次 mmap，因为 bf_reg_size = 0。**
+
+### 4 个 NVIDIA Patches 的关键作用
+
+这 4 个 patches 来自 NVIDIA Ankit Agrawal，已被社区认可：
+
+| Patch | 作用 |
+|-------|------|
+| 0001-KVM-arm64-Introduce-new-flag... | 添加 `KVM_PGTABLE_PROT_NORMAL_NC` |
+| 0002-mm-Introduce-new-flag-to-indicate-wc-safe | 添加 `VM_ALLOW_ANY_UNCACHED` |
+| 0003-KVM-arm64-Set-io-memory-s2-pte... | KVM 检查 flag，stage2 用 NormalNC |
+| 0004-vfio-Convey-kvm-that-the-vfio-pci... | VFIO 设置 `VM_ALLOW_ANY_UNCACHED` |
+
+#### 4 patches 如何让 VF 支持 WC
+
+```
+4 patches 前:
+  VFIO mmap → stage2 = DEVICE_nGnRE → WC 不生效
+
+4 patches 后:
+  VFIO mmap → VM_ALLOW_ANY_UNCACHED set → stage2 = NormalNC
+             → WC 生效 → wc_bfreg.wc = true
+             → wc_support = true → bf_reg_size > 0
+             → 第二次 mmap 触发
+```
+
+#### 4 patches 和第二次 mmap 的因果关系
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 4 NVIDIA patches                                            │
+│   KVM stage2: DEVICE_nGnRE → NormalNC                     │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ mlx5_ib_test_wc() 在 VF 上                                   │
+│   → mlx5_alloc_bfreg() → ioremap_wc()                      │
+│   → stage2 = NormalNC (不再是 DEVICE_nGnRE)               │
+│   → WC 真的生效了 → wc_bfreg.wc = true                     │
+│   → wc_support = true                                      │
+│   → bf_reg_size > 0                                        │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 用户态 mlx5_get_qp_uar()                                     │
+│   bf_reg_size > 0 → 不走 nc_uar 分支                        │
+│   → 触发第二次 mmap (bf_uar)                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### stage1 + stage2 属性组合
+
+```
+第二次 mmap (bf_uar):
+┌─────────────────────────────────────────────────────────────┐
+│ stage1 (Guest kernel): pgprot_writecombine → NORMAL-NC    │
+│                                                             │
+│ stage2 (KVM):                                               │
+│   无 patches: DEVICE_nGnRE                                  │
+│   有 patches: NormalNC (因为 VM_ALLOW_ANY_UNCACHED)         │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+              ARM 属性组合 (最保守胜出)
+                          ↓
+              无 patches: DEVICE_nGnRE (慢)
+              有 patches: NORMAL-NC ✓ (写合并生效)
+```
+
+#### 属性组合查表 (ARM ARM D8.5.5)
+
+| Stage-1 | Stage-2 | 最终属性 |
+|---------|---------|---------|
+| NORMAL-NC | DEVICE_nGnRE | DEVICE (保守胜出) |
+| NORMAL-NC | NormalNC | **NORMAL-NC** ✓ |
+
+### 需要的 patches 清单
+
+#### 必要 (NVIDIA 官方):
+
+```
+0001-KVM-arm64-Introduce-new-flag-for-non-cacheable-IO-me.patch
+0002-mm-Introduce-new-flag-to-indicate-wc-safe.patch
+0003-KVM-arm64-Set-io-memory-s2-pte-as-normalnc-for-vfio-.patch
+0004-vfio-Convey-kvm-that-the-vfio-pci-device-is-wc-safe.patch
+```
+
+#### 可选 (mlx5 增强):
+
+如需更明确控制，可添加 mlx5 `force_wc_vf` 模块参数。
+
+### 验证方法
+
+应用 patches 后，在 Guest 内检查：
+
+```bash
+# dmesg 应该看到第二次 mmap
+dmesg | grep -E "mlx5_ib_mmap|mlx5_ib_mmap_offset"
+
+# 预期输出:
+# mlx5_ib_mmap: command=9 vm_pgoff=0x901 entering switch  ← 第二次
+# mlx5_ib_mmap_offset: mmap_flag=3 ...                    ← bf_uar
+
+# 性能测试
+./ib_read_lat -c RC -d mlx5_0 ...
+
+# 预期延迟: ~2.45 us (接近 Host)
+```
+
+### 结论
+
+4 个 NVIDIA patches 解决了 VFIO 下 mlx5 VF 的 BF doorbell 性能问题：
+
+1. **机制**：通过 `VM_ALLOW_ANY_UNCACHED` flag 让 KVM stage2 支持 NormalNC
+2. **效果**：WC 生效 → wc_bfreg.wc = true → wc_support = true → bf_reg_size > 0
+3. **结果**：第二次 mmap 触发 → bf_uar 使用 NORMAL-NC → 写合并生效 → 延迟降低
+
+**这是目前社区认可的正确解决方案，已被 Catalin Marinas、Will Deacon、Jason Gunthorpe、Alex Williamson 等内核 maintainers 审核通过。**
+
+
