@@ -43,7 +43,7 @@ BASE_IMG="${BASE_IMG:-${SCRIPT_DIR}/openEuler-24.03-LTS-aarch64.qcow2}"
 CURRENT_IMG="${CURRENT_IMG:-${SCRIPT_DIR}/current.qcow2}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-${SCRIPT_DIR}/snapshots}"
 BIOS="${BIOS:-${SCRIPT_DIR}/edk2-aarch64-code.fd}"
-KERNEL_DIR="${KERNEL_DIR:-${SCRIPT_DIR}/../kernel}"
+KERNEL_DIR="${KERNEL_DIR:-${SCRIPT_DIR}/../shared}"
 
 # CPU 和内存配置
 SMP="${SMP:-8}"
