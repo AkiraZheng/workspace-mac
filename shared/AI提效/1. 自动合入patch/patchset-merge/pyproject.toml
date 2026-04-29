@@ -1,0 +1,23 @@
+[project]
+name = "patchset-merge"
+version = "0.1.0"
+description = "Claude Code skill for merging patchsets from lore.kernel.org"
+requires-python = ">=3.8"
+
+[project.scripts]
+merge-patchset = "patchset_merge.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["patchset_merge*"]
+
+[tool.setuptools.package-data]
+"patchset_merge" = ["*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

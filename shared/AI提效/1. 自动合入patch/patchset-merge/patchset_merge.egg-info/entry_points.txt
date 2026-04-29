@@ -1,0 +1,2 @@
+[console_scripts]
+merge-patchset = patchset_merge.cli:main
