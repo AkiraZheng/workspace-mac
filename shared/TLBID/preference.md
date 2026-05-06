@@ -17,9 +17,9 @@ qemu 启虚机中，传入以下 tlbid 配置：
 传入方式：domain 编号下管多少个 vCPU
 
 ```c
-- tlbidomain domain_id=0,cpu=0-7
-- tlbidomain domain_id=1,cpu=0-3
-- tlbidomain domain_id=2,cpu=4-7
+- tlbidomain domain_id=0,cpus=0-7
+- tlbidomain domain_id=1,cpus=0-3
+- tlbidomain domain_id=2,cpus=4-7
 ```
 
 也就是 domain 0 是 vm 的全广播，domain 1 是 vm 的 0-7 个 vcpu 广播，domain 2 是 vm 的 0-15 个 vcpu 广播。
