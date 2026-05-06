@@ -1,111 +1,77 @@
+# 自动解析 hexdump /sys/firmware/acpi/tables/TLBI 的结果
 #!/usr/bin/env python3
 import struct
 import sys
 
-# 自动解析 hexdump /sys/firmware/acpi/tables/TLBI 的结果
-
-def read_u16(buf, off):
-return struct.unpack_from("<H", buf, off)[0]
-
-def read_u32(buf, off):
-return struct.unpack_from("<I", buf, off)[0]
-
-def parse_tlbi(data):
-print("==== TLBI TABLE PARSE ====")
+def parse_hexdump_file(filename):
+data = bytearray()
 
 ```
-# Header
+with open(filename, "r") as f:
+    for line in f:
+        parts = line.strip().split()
+
+        # 跳过 offset
+        for word in parts[1:]:
+            if len(word) != 4:
+                continue
+
+            val = int(word, 16)
+
+            # 小端 16-bit → bytes
+            data.append(val & 0xFF)
+            data.append((val >> 8) & 0xFF)
+
+return bytes(data)
+```
+
+def u16(b, o): return struct.unpack_from("<H", b, o)[0]
+def u32(b, o): return struct.unpack_from("<I", b, o)[0]
+
+def parse_tlbi(data):
+print("==== TLBI TABLE ====")
+
+```
 sig = data[0:4].decode()
-length = read_u32(data, 4)
-revision = data[8]
-checksum = data[9]
+length = u32(data, 4)
 
-print(f"Signature: {sig}")
-print(f"Length   : {length}")
-print(f"Revision : {revision}")
-print(f"Checksum : {checksum}")
+print(f"Signature : {sig}")
+print(f"Length    : {length}")
 
-if sig != "TLBI":
-    print("❌ Invalid signature")
-    return
+comp_num = u32(data, 36)
+print(f"Components: {comp_num}")
 
-if length != len(data):
-    print("❌ Length mismatch")
-
-# Verify checksum
-if sum(data) & 0xFF != 0:
-    print("❌ Checksum invalid")
-else:
-    print("✅ Checksum OK")
-
-# Number of components
-comp_num = read_u32(data, 36)
-print(f"\nNumber of components: {comp_num}")
-
-# Subtable parsing starts at offset 40
 offset = 40
-comp_idx = 0
 
-print("\n==== COMPONENTS ====")
+for i in range(comp_num):
+    print(f"\nComponent {i} @ 0x{offset:x}")
 
-while offset < len(data) and comp_idx < comp_num:
-    start = offset
+    typ = u16(data, offset)
+    length = u32(data, offset + 4)
+    ident = u32(data, offset + 8)
+    ndom = u32(data, offset + 12)
+    dom_off = u32(data, offset + 16)
 
-    typ = read_u16(data, offset)
-    res = read_u16(data, offset + 2)
-    length = read_u32(data, offset + 4)
-    ident = read_u32(data, offset + 8)
-    ndom = read_u32(data, offset + 12)
-    dom_off = read_u32(data, offset + 16)
+    print(f"  Type      : {typ}")
+    print(f"  CPU       : {ident}")
+    print(f"  Domains   : {ndom}")
+    print(f"  DomOffset : 0x{dom_off:x}")
 
-    print(f"\nComponent #{comp_idx}")
-    print(f"  Type       : {typ} ({'PE' if typ==1 else 'SMMU' if typ==2 else 'UNKNOWN'})")
-    print(f"  Identifier : {ident}")
-    print(f"  Length     : {length}")
-    print(f"  Domains    : {ndom}")
-    print(f"  DomOffset  : 0x{dom_off:x}")
-
-    # Validate length
-    expected_len = 20 + ndom * 4
-    if length != expected_len:
-        print(f"  ❌ Length mismatch (expected {expected_len})")
-
-    # Validate domain offset
-    if dom_off < start or dom_off >= len(data):
-        print("  ❌ Domain offset out of range")
-
-    # Read domains
     domains = []
-    for i in range(ndom):
-        dom = read_u32(data, dom_off + i * 4)
-        domains.append(dom)
+    for j in range(ndom):
+        domains.append(u32(data, dom_off + j * 4))
 
-    print(f"  Domain IDs : {domains}")
+    print(f"  Domain IDs: {domains}")
 
-    # Move to next subtable
     offset += length
-    comp_idx += 1
-
-# Final checks
-if comp_idx != comp_num:
-    print("\n❌ Component count mismatch")
-else:
-    print("\n✅ Component count OK")
-
-if offset != len(data):
-    print(f"\n⚠️ Table parsing ended at 0x{offset:x}, total 0x{len(data):x}")
-else:
-    print("\n✅ Table fully consumed")
 ```
 
 if **name** == "**main**":
 if len(sys.argv) != 2:
-print("Usage: tlbi_parser.py <TLBI binary>")
+print("Usage: python3 tlbi_parser.py tlbi.txt")
 sys.exit(1)
 
 ```
-with open(sys.argv[1], "rb") as f:
-    data = f.read()
-
-parse_tlbi(data)
+binary = parse_hexdump_file(sys.argv[1])
+parse_tlbi(binary)
 ```
