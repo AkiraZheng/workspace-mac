@@ -1,0 +1,294 @@
+From d6d0578451a2d62630ace43a7be430099704c200 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Wed, 6 May 2026 13:15:32 +0800
+Subject: [PATCH] tlbid_v2_claude
+
+---
+ hw/arm/meson.build          |  2 +-
+ hw/arm/tlbidomain.c         | 91 +++++++++++++++++++++++++++++++++++++
+ hw/arm/virt-acpi-build.c    |  6 +++
+ hw/arm/virt.c               | 59 ++++++++++++++++++++++++
+ include/hw/arm/tlbidomain.h | 22 +++++++++
+ include/hw/arm/virt.h       |  3 ++
+ 6 files changed, 182 insertions(+), 1 deletion(-)
+ create mode 100644 hw/arm/tlbidomain.c
+ create mode 100644 include/hw/arm/tlbidomain.h
+
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index 3be1252c4f..7e420ceb5b 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -1,7 +1,7 @@
+ arm_ss = ss.source_set()
+ arm_common_ss = ss.source_set()
+ arm_common_ss.add(when: 'CONFIG_ARM_VIRT', if_true: files('virt.c'))
+-arm_common_ss.add(when: 'CONFIG_ACPI', if_true: files('virt-acpi-build.c'))
++arm_common_ss.add(when: 'CONFIG_ACPI', if_true: files('virt-acpi-build.c', 'tlbidomain.c'))
+ arm_common_ss.add(when: 'CONFIG_DIGIC', if_true: files('digic_boards.c'))
+ arm_common_ss.add(when: 'CONFIG_EMCRAFT_SF2', if_true: files('msf2-som.c'))
+ arm_common_ss.add(when: 'CONFIG_INTEGRATOR', if_true: files('integratorcp.c'))
+diff --git a/hw/arm/tlbidomain.c b/hw/arm/tlbidomain.c
+new file mode 100644
+index 0000000000..20195a1b64
+--- /dev/null
++++ b/hw/arm/tlbidomain.c
+@@ -0,0 +1,91 @@
++/*
++ * TLBI Domain ACPI Table Generation
++ * Conforms to ACPI Specification Table 5.W and 5.X
++ */
++
++#include "qemu/osdep.h"
++#include "hw/arm/tlbidomain.h"
++#include "hw/arm/virt.h"
++#include "hw/acpi/acpi-defs.h"
++#include "hw/acpi/aml-build.h"
++
++/*
++ * Build TLBI (TLB Invalidate Domain) Table
++ * Table 5.W - Translation Lookaside Buffer Invalidate Domain Table
++ */
++void build_tlbi(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms)
++{
++    int i, j;
++    MachineState *ms = MACHINE(vms);
++    AcpiTable table = { .sig = "TLBI", .rev = 1, .oem_id = vms->oem_id,
++                        .oem_table_id = vms->oem_table_id };
++
++    /*
++     * Count vCPUs that belong to at least one domain.
++     * Each vCPU will be one PE component in the TLBI table.
++     */
++    uint32_t num_components = 0;
++    for (i = 0; i < ms->smp.cpus; i++) {
++        for (j = 0; j < vms->num_tlb_domains; j++) {
++            TlbDomainInfo *dom = &vms->tlbidomains[j];
++            if (dom->present && test_bit(i, dom->vcpu_mask)) {
++                num_components++;
++                break;
++            }
++        }
++    }
++
++    acpi_table_begin(&table, table_data);
++
++    /* Number of components */
++    build_append_int_noprefix(table_data, num_components, 4);
++
++    /*
++     * Component list offset from start of TLBI table.
++     * Header (36) + nr_subtable (4) = 40
++     */
++    build_append_int_noprefix(table_data, 40, 4);
++
++    /*
++     * Component list - create PE component for each vCPU
++     */
++    for (i = 0; i < ms->smp.cpus; i++) {
++        uint32_t domain_ids[32];
++        uint32_t num_domains = 0;
++        uint32_t length;
++
++        /* Find all domains this vCPU belongs to (reverse mapping) */
++        for (j = 0; j < vms->num_tlb_domains; j++) {
++            TlbDomainInfo *dom = &vms->tlbidomains[j];
++            if (dom->present && test_bit(i, dom->vcpu_mask)) {
++                domain_ids[num_domains++] = dom->domain_id;
++            }
++        }
++
++        /* Skip vCPUs not belonging to any domain */
++        if (num_domains == 0) {
++            continue;
++        }
++
++        /* Type: 1 = PE (Processor Element) */
++        build_append_int_noprefix(table_data, 1, 2);
++        /* Reserved */
++        build_append_int_noprefix(table_data, 0, 2);
++        /* Length: 20 + 4 * num_domains (header + domain array) */
++        length = 20 + 4 * num_domains;
++        build_append_int_noprefix(table_data, length, 4);
++        /* Identifier: ACPI Processor UID = vCPU index */
++        build_append_int_noprefix(table_data, i, 4);
++        /* Number of Domains */
++        build_append_int_noprefix(table_data, num_domains, 4);
++        /* Domain array offset from start of TLBI table */
++        build_append_int_noprefix(table_data,
++                                  table_data->len - table.table_offset, 4);
++        /* Domain array */
++        for (j = 0; j < num_domains; j++) {
++            build_append_int_noprefix(table_data, domain_ids[j], 4);
++        }
++    }
++
++    acpi_table_end(linker, &table);
++}
+\ No newline at end of file
+diff --git a/hw/arm/virt-acpi-build.c b/hw/arm/virt-acpi-build.c
+index 6817a72e2e..dc0b7b33b7 100644
+--- a/hw/arm/virt-acpi-build.c
++++ b/hw/arm/virt-acpi-build.c
+@@ -52,6 +52,7 @@
+ #include "hw/pci/pci_bus.h"
+ #include "hw/pci-host/gpex.h"
+ #include "hw/arm/virt.h"
++#include "hw/arm/tlbidomain.h"
+ #include "hw/intc/arm_gicv3_its_common.h"
+ #include "hw/mem/nvdimm.h"
+ #include "hw/core/platform-bus.h"
+@@ -1368,6 +1369,11 @@ void virt_acpi_build(VirtMachineState *vms, AcpiBuildTables *tables)
+     acpi_add_table(table_offsets, tables_blob);
+     build_iort(tables_blob, tables->linker, vms);
+ 
++    if (vms->num_tlb_domains > 0) {
++        acpi_add_table(table_offsets, tables_blob);
++        build_tlbi(tables_blob, tables->linker, vms);
++    }
++
+ #ifdef CONFIG_TPM
+     if (tpm_get_version(tpm_find()) == TPM_VERSION_2_0) {
+         acpi_add_table(table_offsets, tables_blob);
+diff --git a/hw/arm/virt.c b/hw/arm/virt.c
+index f62253e1ab..cde24a9a47 100644
+--- a/hw/arm/virt.c
++++ b/hw/arm/virt.c
+@@ -32,6 +32,7 @@
+ #include "qemu/datadir.h"
+ #include "qemu/units.h"
+ #include "qemu/option.h"
++#include "qemu/config-file.h"
+ #include "qemu/target-info.h"
+ #include "monitor/qdev.h"
+ #include "hw/core/sysbus.h"
+@@ -102,6 +103,58 @@ static GlobalProperty arm_virt_compat_defaults[] = {
+ static const size_t arm_virt_compat_defaults_len =
+     G_N_ELEMENTS(arm_virt_compat_defaults);
+ 
++static QemuOptsList qemu_tlbidomain_opts = {
++    .name = "tlbidomain",
++    .implied_opt_name = "domain_id",
++    .head = QTAILQ_HEAD_INITIALIZER(qemu_tlbidomain_opts.head),
++    .desc = {
++        { /* end of list */ }
++    },
++};
++
++static int parse_tlbidomain_entry(void *opaque, QemuOpts *opts, Error **errp)
++{
++    VirtMachineState *vms = opaque;
++    const char *cpus_str;
++    uint32_t domain_id;
++
++    domain_id = qemu_opt_get_number(opts, "domain_id", -1);
++    if (domain_id >= MAX_TLB_DOMAINS) {
++        error_report("TLBI domain ID %u out of range (max %d)",
++                     domain_id, MAX_TLB_DOMAINS - 1);
++        return 0;
++    }
++
++    cpus_str = qemu_opt_get(opts, "cpus");
++    if (cpus_str) {
++        unsigned int start_cpu, end_cpu;
++        if (sscanf(cpus_str, "%u-%u", &start_cpu, &end_cpu) == 2) {
++            if (start_cpu >= MAX_VCPUS || end_cpu >= MAX_VCPUS) {
++                error_report("CPU %u-%u out of range (max %d)",
++                             start_cpu, end_cpu, MAX_VCPUS - 1);
++                return 0;
++            }
++            for (unsigned int i = start_cpu; i <= end_cpu; i++) {
++                set_bit(i, vms->tlbidomains[domain_id].vcpu_mask);
++            }
++        } else {
++            error_report("Invalid CPU range format: %s", cpus_str);
++            return 0;
++        }
++    }
++
++    vms->tlbidomains[domain_id].domain_id = domain_id;
++    vms->tlbidomains[domain_id].present = true;
++    vms->tlbidomains[domain_id].level = 7; /* Default to Leaf level */
++    vms->num_tlb_domains++;
++    return 0;
++}
++
++static void parse_tlbidomain(VirtMachineState *vms)
++{
++    qemu_opts_foreach(&qemu_tlbidomain_opts, parse_tlbidomain_entry, vms, &error_abort);
++}
++
+ /*
+  * This cannot be called from the virt_machine_class_init() because
+  * TYPE_VIRT_MACHINE is abstract and mc->compat_props g_ptr_array_new()
+@@ -4030,6 +4083,11 @@ static void virt_instance_init(Object *obj)
+     vms->oem_id = g_strndup(ACPI_BUILD_APPNAME6, 6);
+     vms->oem_table_id = g_strndup(ACPI_BUILD_APPNAME8, 8);
+     cxl_machine_init(obj, &vms->cxl_devices_state);
++
++    /* Initialize TLBI domain configuration */
++    memset(vms->tlbidomains, 0, sizeof(vms->tlbidomains));
++    vms->num_tlb_domains = 0;
++    parse_tlbidomain(vms);
+ }
+ 
+ static const TypeInfo virt_machine_info = {
+@@ -4049,6 +4107,7 @@ static const TypeInfo virt_machine_info = {
+ static void machvirt_machine_init(void)
+ {
+     type_register_static(&virt_machine_info);
++    qemu_add_opts(&qemu_tlbidomain_opts);
+ }
+ type_init(machvirt_machine_init);
+ 
+diff --git a/include/hw/arm/tlbidomain.h b/include/hw/arm/tlbidomain.h
+new file mode 100644
+index 0000000000..9166741f3b
+--- /dev/null
++++ b/include/hw/arm/tlbidomain.h
+@@ -0,0 +1,22 @@
++#ifndef HW_ARM_TLBIDOMAIN_H
++#define HW_ARM_TLBIDOMAIN_H
++
++#include "qemu/osdep.h"
++#include "qemu/bitmap.h"
++#include "hw/acpi/bios-linker-loader.h"
++
++#define MAX_TLB_DOMAINS 32
++#define MAX_VCPUS 256
++
++typedef struct TlbDomainInfo {
++    uint32_t domain_id;
++    DECLARE_BITMAP(vcpu_mask, MAX_VCPUS);
++    bool present;
++    uint8_t level;  /* Hierarchy level, default 7 (Leaf) */
++} TlbDomainInfo;
++
++typedef struct VirtMachineState VirtMachineState;
++
++void build_tlbi(GArray *table_data, BIOSLinker *linker, VirtMachineState *vms);
++
++#endif
+diff --git a/include/hw/arm/virt.h b/include/hw/arm/virt.h
+index fc7950da85..c86ad66510 100644
+--- a/include/hw/arm/virt.h
++++ b/include/hw/arm/virt.h
+@@ -42,6 +42,7 @@
+ #include "hw/intc/arm_gicv3_common.h"
+ #include "qom/object.h"
+ #include "hw/core/cpu.h"
++#include "hw/arm/tlbidomain.h"
+ 
+ #define NUM_GICV2M_SPIS       64
+ #define NUM_VIRTIO_TRANSPORTS 32
+@@ -190,6 +191,8 @@ struct VirtMachineState {
+     MemoryRegion *sysmem;
+     MemoryRegion *secure_sysmem;
+     bool pci_preserve_config;
++    int num_tlb_domains;
++    TlbDomainInfo tlbidomains[MAX_TLB_DOMAINS];
+ };
+ 
+ #define VIRT_ECAM_ID(high) (high ? VIRT_HIGH_PCIE_ECAM : VIRT_PCIE_ECAM)
+-- 
+2.43.0
+
