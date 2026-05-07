@@ -1,0 +1,105 @@
+Subject: [PATCH v1 0/12] KVM Dirty-bit cleaning accelerator (HACDBS)
+From: Leonardo Bras <leo.bras@arm.com>
+Date: Thu, 30 Apr 2026 12:14:04 +0100
+Message-Id: <20260430111424.3479613-2-leo.bras@arm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+This patchset intends to create an arm64-specific dirty-bit cleaning
+accelerator based on HACDBS. To do so, it's needed to add a few
+snippets in arch-generic kvm code, and to do so properly, it makes
+them compile-out if the arch does not implement them.
+
+Patch 1 & 2 are here just to make this testable, as this patchset
+depends on bits from HDBSS that are not upstream yet. 
+
+Patch 1 should be included in the HDBSS patchset, and patch 2
+is a bunch of bits that I collected across other patches so this can
+work. So few free to ignore them.
+
+To be able to properly use HACDBS, it requires a PPI IRQ that triggers
+either on error, or when processing is complete. It's called
+HACDBSIRQ, and there is currently no upstream way of announcing it on
+ACPI tables, so it uses the suggested table/index in [1].
+
+It is able to accelerate the cleaning on both dirty-bitmap and
+dirty-ring tracking mechanisms on KVM, and that require different
+functions to be made accessible outside KVM code.
+
+On top of finding issues, there are a few questions I would like help with:
+a - Is the distribution between patches ok? should I merge or split
+    any of them?
+b - checkpatch.pl keeps bothering me to add an entry in MAINTAINERS file,
+    and I like the idea of maintaining this. Is there any rule or
+    common sense on this? Should I add this entry, or should I leave it
+    in the arch/arm64/kvm/ general rule?
+c - There are some trace_prink() I have left in the code, as they could
+    be helpful to check when HACDBS is not performing as well as it
+    should. Should I introduce a tracepoint instead? or just ignore it?
+    (it's triggered on HACDBS error, but as it falls back to software in
+    that case, it should not impact correctness, only performance).
+d - In __kvm_arch_dirty_log_clear() there is no way to predict how long
+    should be the buffer, so I used 1x PAGE_SIZE, and when it gets full
+    it's cleaned and reused. Should I let users configure that over a
+    parameter, or is it overthinking?
+
+Kernel v7.0.0 + this patchset builds properly, passing both kvm selftests
+for dirty-bit tracking[2], on HW HACDBS enabled or disabled.
+
+Please let me know of any question :)
+
+Thanks for reviewing!
+Leo
+
+
+[1]: https://github.com/tianocore/edk2/issues/12409
+[2]: dirty_log_test && dirty_log_perf_test
+
+Leonardo Bras (12):
+  KVM: arm64: Enable eager hugepage splitting if HDBSS is available
+  KVM: arm64: HDBSS bits
+  arm64/cpufeature: Add system-wide FEAT_HACDBS detection
+  arm64/sysreg: Add HACDBS consumer and base registers
+  KVM: arm64: Detect (via ACPI) and initialize HACDBSIRQ
+  KVM: arm64: dirty_bit: Add base FEAT_HACDBS cleaning routine
+  kvm: Add arch-generic interface for hw-accelerated dirty-bitmap
+    cleaning
+  KVM: arm64: Add hardware-accelerated dirty-bitmap cleaning routine
+  kvm/dirty_ring: Introduce get_memslot and move helpers to header
+  kvm/dirty_ring: Add arch-generic interface for hw-accelerated
+    dirty-ring cleaning
+  KVM: arm64: Add hardware-accelerated dirty-ring cleaning routine
+  KVM: arm64: Enable KVM_HW_DIRTY_BIT
+
+ MAINTAINERS                            |   7 +
+ arch/arm64/include/asm/acpi.h          |   3 +
+ arch/arm64/include/asm/cpufeature.h    |  10 +
+ arch/arm64/include/asm/kvm_dirty_bit.h |  67 ++++
+ arch/arm64/include/asm/kvm_pgtable.h   |   3 +
+ include/acpi/actbl2.h                  |   1 +
+ include/linux/kvm_dirty_bit.h          |  34 ++
+ include/linux/kvm_dirty_ring.h         |  12 +
+ include/linux/kvm_host.h               |   3 +
+ arch/arm64/kernel/cpufeature.c         |  20 ++
+ arch/arm64/kvm/arm.c                   |   5 +
+ arch/arm64/kvm/dirty_bit.c             | 418 +++++++++++++++++++++++++
+ arch/arm64/kvm/hyp/pgtable.c           |  15 +-
+ arch/arm64/kvm/mmu.c                   |  12 +-
+ virt/kvm/dirty_ring.c                  |  34 +-
+ virt/kvm/kvm_main.c                    |  13 +-
+ arch/arm64/kvm/Kconfig                 |   1 +
+ arch/arm64/kvm/Makefile                |   2 +-
+ arch/arm64/tools/cpucaps               |   2 +
+ arch/arm64/tools/sysreg                |  30 ++
+ virt/kvm/Kconfig                       |   3 +
+ 21 files changed, 673 insertions(+), 22 deletions(-)
+ create mode 100644 arch/arm64/include/asm/kvm_dirty_bit.h
+ create mode 100644 include/linux/kvm_dirty_bit.h
+ create mode 100644 arch/arm64/kvm/dirty_bit.c
+
+-- 
+2.54.0
+
+
+
