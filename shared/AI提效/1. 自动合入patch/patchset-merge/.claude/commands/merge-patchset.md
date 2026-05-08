@@ -18,7 +18,7 @@
 2. git am 失败 + 有冲突 → 解冲突 → commit → 继续下一个
 3. git am 失败 + 无冲突 → 尝试 git apply --3way → commit → 继续下一个
 4. 还失败 → 尝试 git apply + 手动 commit → 继续下一个
-5. 全部失败 → **询问用户如何处理**
+5. 全部失败 → **自信思考后提出可能得解决方法，并询问用户如何处理**
 
 **注意**：不是跳过失败，是**必须解决当前 patch 或询问用户如何处理**。
 
@@ -101,7 +101,7 @@ cd /path/to/patchset-merge
 
 合入完成后生成 `.patchset-diff.md`，记录：
 - 每个 patch 的合入状态和 commit hash
-- 失败的 patch、错误原因
+- 失败的 patch、错误原因、原先代码与当前merge代码及差异
 - 解冲突记录
 - 编译错误和警告
 
