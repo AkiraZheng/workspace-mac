@@ -478,6 +478,88 @@ bear -- make -j$(nproc)
 
 ---
 
+## 交互式问答与文档闭环（重要）
+
+分析完成后，Skill 应支持用户提问并自动更新文档。
+
+### 问答流程图
+
+```mermaid
+flowchart LR
+    UserQ[用户提问] --> Parse[解析问题]
+    Parse --> Search[搜索代码找答案]
+    Search --> Answer[生成回答]
+    Answer --> Update{回答是否需要更新文档?}
+    Update -->|是| UpdateDoc[更新相关文档]
+    Update -->|否| Done[直接回复用户]
+    UpdateDoc --> Done
+
+    style UserQ fill:#FFD700
+    style UpdateDoc fill:#98FB98
+```
+
+### 问题类型与回答策略
+
+| 问题类型 | 回答策略 | 文档更新 |
+|---------|---------|---------|
+| 概念理解 | 结合代码解释原理 | 更新 FAQ 或注释 |
+| 调用链疑问 | 追踪源码并图示 | 更新 callgraph.md |
+| 数据结构疑问 | 分析结构体定义 | 更新 data_structures.md |
+| 并发问题 | 分析锁和同步机制 | 更新 concurrency.md |
+| 内存问题 | 分析 DMA/IOMMU 等 | 更新 memory_model.md |
+| 调试问题 | 提供 tracepoint/命令 | 更新 debug_guide.md |
+| 架构问题 | 解释模块交互 | 更新 architecture.md |
+
+### 文档闭环流程
+
+```
+1. [接收问题] 用户提出关于模块的问题
+       ↓
+2. [理解意图] 判断问题属于哪类（概念/调用/数据结构等）
+       ↓
+3. [搜索答案] 在代码库中搜索相关实现
+       ↓
+4. [生成回答] 结合代码给出准确答案
+       ↓
+5. [判断是否更新] 回答是否涉及新知识点或纠正
+       ↓
+       ├── 是 → [更新对应文档] → [反馈更新位置]
+       ↓
+       └── 否 → [直接返回答案]
+       ↓
+6. [追问确认] 询问用户是否满意
+```
+
+### 更新文档的具体要求
+
+1. **追加到 FAQ**：新问题新答案加入 `docs/faq.md`
+2. **补充调用链**：新路径补充到 `docs/architecture/callgraph.md`
+3. **完善数据结构**：新发现补充到 `docs/architecture/data_structures.md`
+4. **修正架构图**：新理解更新到 `docs/overview/architecture.md`
+5. **标注来源**：所有更新必须注明代码出处（文件:行号）
+
+### 示例交互
+
+```
+用户：i915 的 GPU 调度器是如何工作的？
+
+AI 回答：
+  i915 使用经典的 BFS（Brain Fucker Scheduler）调度器...
+  [结合代码解释调度流程]
+
+AI 更新文档：
+  ✓ 已将调度器原理补充到 docs/architecture/callgraph.md
+  ✓ 已将常见问题补充到 docs/faq.md
+```
+
+### 敏感信息处理
+
+- 遇到不确定内容，明确标注「待验证」
+- 遇到内核版本差异，说明「某些版本可能...」
+- 不要臆测代码行为，必须基于实际代码
+
+---
+
 ## 推荐 Workflow
 
 AI 分析 Linux 内核模块时，推荐使用：
