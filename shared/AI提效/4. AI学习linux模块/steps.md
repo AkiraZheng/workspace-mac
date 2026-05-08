@@ -70,7 +70,42 @@ flowchart TD
     D9 --> O9
 
     classDef output fill:#87CEEB,stroke:#333,stroke-width:2px
+
+    subgraph Agent1[Agent 1: 目录与入口]
+        A1_1[目录分析] --> A1_2[入口点分析]
+    end
+
+    subgraph Agent2[Agent 2: 数据结构与调用链]
+        A2_1[数据结构分析] --> A2_2[调用链分析]
+    end
+
+    subgraph Agent3[Agent 3: 并发与内存]
+        A3_1[并发模型分析] --> A3_2[内存模型分析]
+    end
+
+    subgraph Agent4[Agent 4: 调试与总结]
+        A4_1[调试可观测性] --> A4_2[架构总结]
+        A4_2 --> A4_3[生成FAQ]
+    end
 ```
+
+### Subagent 并行策略
+
+| Agent | 负责任务 | 输出文档 |
+|-------|---------|---------|
+| **Agent 1** | 目录分析 + 入口点分析 | `docs/overview/` |
+| **Agent 2** | 数据结构 + 调用链 | `docs/architecture/` |
+| **Agent 3** | 并发模型 + 内存模型 | `docs/architecture/` |
+| **Agent 4** | 调试指南 + 架构总结 + FAQ | `docs/debug/` + `docs/overview/` + `docs/faq.md` |
+
+### 并行执行规则
+
+1. **Phase 1（并行）**：Agent 1、Agent 2、Agent 3 同时启动
+2. **Phase 2（依赖）**：Agent 4 等待 Agent 1、2、3 完成后启动
+3. **通信**：各 Agent 结果汇总到主 agent 合并
+4. **去重**：避免重复分析相同代码路径
+
+---
 
 ### 详细步骤流程
 
@@ -83,25 +118,29 @@ flowchart TD
        ↓
 4. [构建索引] 执行 cscope/ctags 建立索引
        ↓
-5. [目录分析] 分析目录结构、Makefile、Kconfig
+5. [并行分析] Agent 1/2/3 同时开始分析
+       ├── Agent 1: 目录分析 + 入口点分析
+       ├── Agent 2: 数据结构 + 调用链分析
+       └── Agent 3: 并发模型 + 内存模型
        ↓
-6. [入口点分析] 找出 module_init、probe 等入口
+6. [汇总合并] 主 agent 收集各 Agent 结果
        ↓
-7. [数据结构分析] 分析核心数据结构的生命周期
+7. [Agent 4 执行] 调试可观测性 + 架构总结 + FAQ
        ↓
-8. [调用链分析] 追踪 ioctl、fast path、irq 等路径
+8. [文档输出] 生成所有文档到目标目录
        ↓
-9. [并发分析] 分析锁、RCU、workqueue 等
-       ↓
-10. [内存分析] 分析 DMA、MMIO、IOMMU 等
-       ↓
-11. [调试分析] 识别 tracepoint、debugfs 等
-       ↓
-12. [架构总结] 生成高层架构文档
-       ↓
-13. [生成FAQ] 生成常见问题文档
-       ↓
-14. [完成] 输出所有文档到目标目录
+9. [完成] 分析完成，等待用户提问
+```
+
+### Agent 间通信
+
+```
+主 Agent（协调者）
+    ├── 读取用户输入 → 分配任务
+    ├── 监听 Agent 1 → 合并 overview
+    ├── 监听 Agent 2 → 合并 architecture
+    ├── 监听 Agent 3 → 合并 architecture
+    └── 汇总后 → 触发 Agent 4
 ```
 
 ---
