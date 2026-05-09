@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//root/.claude/**)",
+      "Read(//root/.claude/skills/**)",
+      "Read(//root/.claude/commands/**)",
+      "Bash(python3 -m json.tool)",
+      "Bash(mkdir -p /root/.claude/skills/merge-patchset)",
+      "Bash(cp \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/SKILL.md\" /root/.claude/skills/merge-patchset/SKILL.md)",
+      "Bash(rm -f \"/mnt/shared/AI提效/1. 自动合入patch/.claude/commands/merge-patchset.md\" \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/.claude/commands/merge-patchset.md\")",
+      "Bash(rm -f /root/.claude/commands/merge-patchset.md)",
+      "Bash(rmdir \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/.claude/commands\")",
+      "Bash(rmdir \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/.claude\")",
+      "Bash(rmdir \"/mnt/shared/AI提效/1. 自动合入patch/.claude/commands\")",
+      "Bash(rmdir \"/mnt/shared/AI提效/1. 自动合入patch/.claude\")",
+      "Bash(mkdir -p /root/.claude/skills/revert-patchset)",
+      "Bash(cat \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/revert-patchset-SKILL.md\")"
+    ]
+  }
+}
