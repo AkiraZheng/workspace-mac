@@ -5,6 +5,8 @@ patchset_merge/b4_installer.py
 patchset_merge/cli.py
 patchset_merge/conflict_resolver.py
 patchset_merge/diff_tracker.py
+patchset_merge/interface_checker.py
+patchset_merge/interface_detector.py
 patchset_merge/merger.py
 patchset_merge/patchset_downloader.py
 patchset_merge/skill.py
@@ -13,4 +15,5 @@ patchset_merge.egg-info/SOURCES.txt
 patchset_merge.egg-info/dependency_links.txt
 patchset_merge.egg-info/entry_points.txt
 patchset_merge.egg-info/top_level.txt
+tests/test_interface_detector.py
 tests/test_patchset_merge.py

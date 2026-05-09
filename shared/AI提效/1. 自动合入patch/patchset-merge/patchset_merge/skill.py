@@ -17,6 +17,53 @@ from typing import Optional, List
 from .b4_installer import ensure_b4
 from .patchset_downloader import download_patchset
 from .diff_tracker import DiffTracker, DiffEntry
+from .interface_detector import detect_interface_changes, InterfaceChange
+
+
+def prompt_user_on_compile_failure() -> int:
+    """询问用户编译失败时的处理方式
+
+    Returns:
+        1: 跳过继续下一个 patch
+        2: 停止整个合入流程
+    """
+    print("\n请选择处理方式：")
+    print("  1. 跳过继续（不推荐，可能导致后续 patch 也有问题）")
+    print("  2. 停止整个合入流程")
+    while True:
+        try:
+            choice = int(input("输入选项编号 (1-2): ").strip())
+            if choice in [1, 2]:
+                return choice
+            print("请输入 1 或 2")
+        except ValueError:
+            print("请输入有效的数字")
+
+
+def deep_think_and_confirm(interface_changes: List[InterfaceChange]) -> bool:
+    """对接口变化进行深度思考并确认
+
+    Args:
+        interface_changes: 检测到的接口变化列表
+
+    Returns:
+        True: 用户确认可以继续
+        False: 用户选择停止
+    """
+    print("\n接口变化确认：")
+    print("  1. 确认接口变化，继续合入")
+    print("  2. 停止合入流程")
+    while True:
+        try:
+            choice = int(input("输入选项编号 (1-2): ").strip())
+            if choice == 1:
+                return True
+            elif choice == 2:
+                return False
+            print("请输入 1 或 2")
+        except ValueError:
+            print("请输入有效的数字")
+
 
 class PatchApplyFailed(Exception):
     """Patch 合入失败异常
@@ -144,10 +191,10 @@ def has_conflict_markers(repo_path: Path) -> bool:
     return len(conflict_files) > 0
 
 def try_git_am(repo_path: Path, patch_file: Path) -> tuple[bool, str]:
-    """尝试 git am 合入
+    """尝试 git am 合入（不自动 commit）
 
     Returns:
-        (success, commit_hash_or_error_message)
+        (success, output_message)
     """
     result = subprocess.run(
         ['git', 'am', str(patch_file)],
@@ -157,13 +204,8 @@ def try_git_am(repo_path: Path, patch_file: Path) -> tuple[bool, str]:
     )
 
     if result.returncode == 0:
-        log_result = subprocess.run(
-            ['git', 'log', '-1', '--format=%H'],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
-        return True, log_result.stdout.strip()
+        # am 成功，staged 状态，不 commit
+        return True, "git am 成功"
     else:
         return False, result.stderr
 
@@ -196,7 +238,7 @@ def try_git_apply(repo_path: Path, patch_file: Path) -> tuple[bool, str]:
             # 有未合并的变更，需要解决
             return False, "git apply --3way 有未合并的变更"
         else:
-            # 完全成功
+            # 完全成功，add 但不 commit
             subprocess.run(['git', 'add', '.'], cwd=repo_path, capture_output=True)
             return True, "apply_success"
     else:
@@ -207,13 +249,13 @@ def try_manual_apply_and_commit(
     patch_info: PatchInfo,
     diff_tracker: DiffTracker
 ) -> tuple[bool, str]:
-    """尝试手动 apply 并提交
+    """尝试手动 apply（不 commit）
 
     适用于版本不匹配的情况，尝试用 git apply
-    然后手动 add 和 commit
+    然后手动 add 但不 commit
 
     Returns:
-        (success, commit_hash_or_error_message)
+        (success, message)
     """
     with tempfile.NamedTemporaryFile(mode='w', suffix='.patch', delete=False) as f:
         f.write(patch_info.patch_content)
@@ -229,27 +271,9 @@ def try_manual_apply_and_commit(
         )
 
         if result.returncode == 0:
-            # apply 成功，添加并提交
+            # apply 成功，add 但不 commit
             subprocess.run(['git', 'add', '.'], cwd=repo_path, check=True)
-
-            commit_msg = f"""{patch_info.subject}
-
-[Patch-index: {patch_info.index}]
-[Manually applied - original patch preserved as much as possible]
-"""
-            subprocess.run(
-                ['git', 'commit', '-m', commit_msg],
-                cwd=repo_path,
-                check=True
-            )
-
-            log_result = subprocess.run(
-                ['git', 'log', '-1', '--format=%H'],
-                cwd=repo_path,
-                capture_output=True,
-                text=True
-            )
-            return True, log_result.stdout.strip()
+            return True, "手动 apply 成功"
         else:
             # apply 失败，记录差异报告供 AI 后续处理
             diff_tracker.add_entry(
@@ -325,8 +349,6 @@ def resolve_conflicts_and_commit(
         suggestions.append("注意多个文件间可能有相互依赖的修改")
 
     return False, full_error, suggestions
-
-    return False, full_error
 
 def apply_single_patch_with_retry(
     repo_path: Path,
@@ -406,22 +428,11 @@ def apply_single_patch_with_retry(
             success, result = try_git_apply(repo_path, patch_file)
 
             if success:
+                # add 但不 commit
                 subprocess.run(['git', 'add', '.'], cwd=repo_path, check=True)
-                commit_msg = f"""{patch_info.subject}
-
-[Patch-index: {patch_info.index}]
-[Applied via git apply --3way]
-"""
-                subprocess.run(['git', 'commit', '-m', commit_msg], cwd=repo_path, check=True)
-                log_result = subprocess.run(
-                    ['git', 'log', '-1', '--format=%H'],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True
-                )
                 patch_info.success = True
-                patch_info.commit_hash = log_result.stdout.strip()
-                print(f"  ✓ git apply 成功: {patch_info.commit_hash[:12]}")
+                patch_info.commit_hash = ""
+                print(f"  ✓ git apply 成功")
                 return patch_info
             else:
                 # 策略4: 尝试普通 git apply + commit
@@ -470,12 +481,103 @@ def apply_patchset_one_by_one(
     print(f"{'='*60}\n")
 
     for i, patch in enumerate(patches):
+        # 记录合入前的 commit hash（用于后续接口变化检测）
+        old_commit_hash = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        ).stdout.strip()
+
         patch = apply_single_patch_with_retry(repo_path, patch, diff_tracker)
         results.append(patch)
 
         if patch.success:
             successful += 1
-            print(f"  ✓ 合入成功，继续下一个")
+            print(f"  ✓ 合入成功")
+
+            # 接口变化检测（BEFORE commit）
+            from .interface_detector import detect_interface_changes
+            interface_changes = detect_interface_changes(repo_path, patch, old_commit_hash)
+
+            if interface_changes:
+                print(f"\n{'='*60}")
+                print(f"【接口变化检测】发现 {len(interface_changes)} 处接口变化")
+                print(f"{'='*60}")
+                for change in interface_changes:
+                    print(f"\n  文件: {change.file_path}")
+                    print(f"  函数: {change.function_name}")
+                    print(f"  旧签名: {change.old_signature}")
+                    print(f"  新签名: {change.new_signature}")
+
+                    # 记录接口变化到 diff_tracker
+                    diff_tracker.add_entry(
+                        file_path=f"[Patch {patch.index}] {change.file_path}",
+                        original=change.old_signature,
+                        applied=change.new_signature,
+                        reason=f"interface_changed: {change.function_name}",
+                        patch_hash=patch.commit_hash
+                    )
+
+                # 用户交互确认
+                from .interface_checker import deep_think_and_confirm
+                decision = deep_think_and_confirm(repo_path, patch, interface_changes)
+                if decision == 'stop':
+                    # 用户选择停止
+                    for remaining_patch in patches[i+1:]:
+                        remaining_patch.success = False
+                        remaining_patch.error_message = "因接口变化未确认停止"
+                        results.append(remaining_patch)
+                        failed += 1
+                    break
+
+            # 用户确认后 COMMIT
+            subprocess.run(['git', 'add', '.'], cwd=repo_path, capture_output=True)
+            commit_msg = f"""{patch.subject}
+
+[Patch-index: {patch.index}]
+"""
+            subprocess.run(
+                ['git', 'commit', '-m', commit_msg],
+                cwd=repo_path,
+                capture_output=True
+            )
+            patch.commit_hash = subprocess.run(
+                ['git', 'log', '-1', '--format=%H'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            ).stdout.strip()
+            print(f"  ✓ 已提交: {patch.commit_hash[:12]}")
+
+            # THEN 编译验证
+            compile_result = compile_project(repo_path)
+            if not compile_result.success:
+                # 编译失败，询问用户
+                print(f"\n{'='*60}")
+                print(f"【编译失败】Patch {patch.index} 合入后编译失败")
+                print(f"{'='*60}")
+                if compile_result.errors:
+                    print("\n错误信息：")
+                    for err in compile_result.errors[:10]:
+                        print(f"  {err}")
+
+                user_choice = prompt_user_on_compile_failure()
+                if user_choice == 2:
+                    # 用户选择停止
+                    failed += 1
+                    for remaining_patch in patches[i+1:]:
+                        remaining_patch.success = False
+                        remaining_patch.error_message = "因编译失败停止"
+                        results.append(remaining_patch)
+                        failed += 1
+                    break
+                # 用户选择继续（user_choice == 1）
+
+            # 记录编译结果到 diff_tracker
+            add_compilation_diff_entries(diff_tracker, compile_result)
+
+            print(f"  ✓ 编译验证通过，继续下一个")
         else:
             failed += 1
             # 记录失败的 patch
