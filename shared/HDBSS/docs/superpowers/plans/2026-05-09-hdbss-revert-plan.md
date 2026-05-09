@@ -2,6 +2,18 @@
 
 记录需要revert的HDBSS相关commits，共8个。
 
+```
+  Commits to revert (in reverse chronological order):
+    1. b1d8169dd540 - !17748 fix bug in hdbss (MERGE)
+    2. 00c93102b328 - KVM: arm64: fix memory leak in HDBSS
+    3. a5e3c939fbb1 - KVM: arm64: do not support hdbss in nvhe
+    4. fe4fa7481191 - v3 Support the FEAT_HDBSS (MERGE)
+    5. 8d2e1e3b26a9 - arm64/config: add config to control HDBSS feature
+    6. 6d60015590c3 - arm64/kvm: support to handle HDBSSF event
+    7. bd6106e348d7 - arm64/kvm: using ioctl to enable/disable the HDBSS feature
+    8. 16ab2a2fee8b - arm64/sysreg: add HDBSS related register information
+```
+
 ## Revert顺序（从最新到最老）
 
 每个commit单独revert并立即commit。
