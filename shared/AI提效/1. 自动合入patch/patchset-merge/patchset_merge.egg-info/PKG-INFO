@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: patchset-merge
-Version: 0.1.0
-Summary: Claude Code skill for merging patchsets from lore.kernel.org
-Requires-Python: >=3.8
