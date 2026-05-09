@@ -1,0 +1,284 @@
+From 6309b789b170d36bbeddb2b9ca5e2724c1a5eb1c Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 9 May 2026 23:11:19 +0800
+Subject: [PATCH 09/18] KVM: arm64: Add dirty_bit.c and dirty_bit.h for HDBSS
+ code archiving
+
+Create dedicated files for HDBSS (Hardware Dirty Bit Storage System)
+support, moving related code from arm.c and mmu.c.
+
+- arch/arm64/include/asm/kvm_dirty_bit.h: HDBSS definitions and declarations
+- arch/arm64/kvm/dirty_bit.c: HDBSS implementation
+- arch/arm64/kvm/Makefile: Add dirty_bit.o to build
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h |  61 +++++++++
+ arch/arm64/kvm/Makefile                |   1 +
+ arch/arm64/kvm/dirty_bit.c             | 172 +++++++++++++++++++++++++
+ 3 files changed, 234 insertions(+)
+ create mode 100644 arch/arm64/include/asm/kvm_dirty_bit.h
+ create mode 100644 arch/arm64/kvm/dirty_bit.c
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+new file mode 100644
+index 000000000000..1ebdd8015aea
+--- /dev/null
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -0,0 +1,61 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Copyright (c) 2024 Huawei Technologies Co., Ltd.
++ *
++ * Header file for HDBSS (Hardware Dirty Bit Storage System) support.
++ *
++ * This file contains the definitions and declarations for HDBSS feature
++ * support in ARM64 KVM.
++ */
++
++#ifndef _ASM_ARM64_KVM_DIRTY_BIT_H
++#define _ASM_ARM64_KVM_DIRTY_BIT_H
++
++#include <linux/types.h>
++#include <asm/sysreg.h>
++
++/* HDBSS entry valid flag */
++#define HDBSS_ENTRY_VALID	UL(0x1)
++#define HDBSS_ENTRY_IPA		GENMASK_ULL(55, 12)
++
++/* HDBSS producer index mask */
++#define HDBSSPROD_IDX(prod)	FIELD_GET(HDBSSPROD_EL2_INDEX_MASK, prod)
++
++/* HDBSS producer FSC codes */
++#define HDBSSPROD_EL2_FSC_OK			0x00
++#define HDBSSPROD_EL2_FSC_ExternalAbort		0x10
++#define HDBSSPROD_EL2_FSC_GPF			0x0f
++
++/*
++ * kvm_arm_enable_hdbss_internal - Enable HDBSS for a VM
++ * @kvm: pointer to KVM instance
++ * @order: order of the HDBSS buffer page (size = 2^order pages)
++ *
++ * Returns: 0 on success, negative error code on failure
++ */
++int kvm_arm_enable_hdbss_internal(struct kvm *kvm, u64 order);
++
++/*
++ * kvm_arm_disable_hdbss_internal - Disable HDBSS for a VM
++ * @kvm: pointer to KVM instance
++ */
++void kvm_arm_disable_hdbss_internal(struct kvm *kvm);
++
++/*
++ * kvm_flush_hdbss_buffer - Flush HDBSS buffer to dirty bitmap
++ * @vcpu: pointer to VCPU instance
++ *
++ * This function reads the HDBSS buffer and marks dirty pages
++ * in the KVM dirty bitmap.
++ */
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
++
++/*
++ * kvm_hdbss_buffer_empty - Check if HDBSS buffer is empty
++ * @vcpu: pointer to VCPU instance
++ *
++ * Returns: true if buffer is empty, false otherwise
++ */
++bool kvm_hdbss_buffer_empty(struct kvm_vcpu *vcpu);
++
++#endif /* _ASM_ARM64_KVM_DIRTY_BIT_H */
+\ No newline at end of file
+diff --git a/arch/arm64/kvm/Makefile b/arch/arm64/kvm/Makefile
+index 59612d2f277c..ec2749af64fa 100644
+--- a/arch/arm64/kvm/Makefile
++++ b/arch/arm64/kvm/Makefile
+@@ -18,6 +18,7 @@ kvm-y += arm.o mmu.o mmio.o psci.o hypercalls.o pvtime.o \
+ 	 guest.o debug.o reset.o sys_regs.o stacktrace.o \
+ 	 vgic-sys-reg-v3.o fpsimd.o pkvm.o \
+ 	 arch_timer.o trng.o vmid.o emulate-nested.o nested.o at.o \
++	 dirty_bit.o \
+ 	 vgic/vgic.o vgic/vgic-init.o \
+ 	 vgic/vgic-irqfd.o vgic/vgic-v2.o \
+ 	 vgic/vgic-v3.o vgic/vgic-v4.o \
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+new file mode 100644
+index 000000000000..2ffd00259748
+--- /dev/null
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -0,0 +1,172 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright (c) 2024 Huawei Technologies Co., Ltd.
++ *
++ * Hardware Dirty Bit Storage System (HDBSS) support for ARM64 KVM.
++ *
++ * HDBSS provides hardware-assisted dirty page tracking for live migration
++ * by utilizing the ARMv8.2-HDBSS feature.
++ */
++
++#include <linux/kvm_host.h>
++#include <linux/page-flags.h>
++#include <linux/sched.h>
++#include <asm/kvm.h>
++#include <asm/kvm_dirty_bit.h>
++#include <asm/kvm_pgtable.h>
++#include <asm/sysreg.h>
++
++int kvm_arm_enable_hdbss_internal(struct kvm *kvm, u64 order)
++{
++	unsigned long i;
++	struct kvm_vcpu *vcpu;
++	struct page *hdbss_pg = NULL;
++
++	if (!system_supports_hdbss())
++		return -EINVAL;
++
++	if (order > HDBSS_MAX_SIZE)
++		return -EINVAL;
++
++	if (kvm->arch.enable_hdbss) /* Already On */
++		return -EINVAL;
++
++	/* Turn it on */
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT, order);
++		if (!hdbss_pg)
++			goto error_alloc;
++
++		vcpu->arch.hdbss = (struct vcpu_hdbss_state) {
++			.base_phys = page_to_phys(hdbss_pg),
++			.size = order,
++			.next_index = 0,
++		};
++	}
++
++	kvm->arch.enable_hdbss = true;
++	kvm->arch.mmu.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA;
++
++	/*
++	 * Kick vcpus to load new vtcr value when re-enter guest mode.
++	 */
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_vcpu_kick(vcpu);
++
++	return 0;
++
++error_alloc:
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		if (vcpu->arch.hdbss.base_phys)
++			kvm_arm_vcpu_free_hdbss(vcpu);
++	}
++
++	return -ENOMEM;
++}
++EXPORT_SYMBOL_GPL(kvm_arm_enable_hdbss_internal);
++
++void kvm_arm_disable_hdbss_internal(struct kvm *kvm)
++{
++	unsigned long i;
++	struct kvm_vcpu *vcpu;
++
++	if (!kvm->arch.enable_hdbss) /* Already Off */
++		return;
++
++	kvm->arch.mmu.vtcr &= ~(VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA);
++
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		/* Kick vcpus to flush hdbss buffer. */
++		kvm_vcpu_kick(vcpu);
++
++		kvm_arm_vcpu_free_hdbss(vcpu);
++	}
++
++	kvm->arch.enable_hdbss = false;
++}
++EXPORT_SYMBOL_GPL(kvm_arm_disable_hdbss_internal);
++
++void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
++{
++	struct page *hdbss_pg;
++
++	hdbss_pg = phys_to_page(vcpu->arch.hdbss.base_phys);
++	if (hdbss_pg)
++		__free_pages(hdbss_pg, vcpu->arch.hdbss.size);
++
++	vcpu->arch.hdbss.size = 0;
++}
++
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
++{
++	int idx, curr_idx;
++	u64 br_el2;
++	u64 *hdbss_buf;
++	struct kvm *kvm = vcpu->kvm;
++
++	if (!kvm->arch.enable_hdbss)
++		return;
++
++	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
++	br_el2 = HDBSSBR_EL2(vcpu->arch.hdbss.base_phys, vcpu->arch.hdbss.size);
++
++	/* Do nothing if HDBSS buffer is empty or br_el2 is NULL */
++	if (curr_idx == 0 || br_el2 == 0)
++		return;
++
++	hdbss_buf = page_address(phys_to_page(vcpu->arch.hdbss.base_phys));
++	if (!hdbss_buf)
++		return;
++
++	guard(write_lock_irqsave)(&vcpu->kvm->mmu_lock);
++	for (idx = 0; idx < curr_idx; idx++) {
++		u64 gpa;
++
++		gpa = hdbss_buf[idx];
++		if (!(gpa & HDBSS_ENTRY_VALID))
++			continue;
++
++		gpa &= HDBSS_ENTRY_IPA;
++		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
++	}
++
++	/* reset HDBSS index */
++	write_sysreg_s(0, SYS_HDBSSPROD_EL2);
++	vcpu->arch.hdbss.next_index = 0;
++	isb();
++}
++EXPORT_SYMBOL_GPL(kvm_flush_hdbss_buffer);
++
++bool kvm_hdbss_buffer_empty(struct kvm_vcpu *vcpu)
++{
++	if (!vcpu->kvm->arch.enable_hdbss)
++		return true;
++
++	return HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2)) == 0;
++}
++EXPORT_SYMBOL_GPL(kvm_hdbss_buffer_empty);
++
++static int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
++{
++	u64 prod;
++	u64 fsc;
++
++	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
++	fsc = FIELD_GET(HDBSSPROD_EL2_FSC_MASK, prod);
++
++	switch (fsc) {
++	case HDBSSPROD_EL2_FSC_OK:
++		/* Buffer full, which is reported as permission fault. */
++		kvm_flush_hdbss_buffer(vcpu);
++		return 1;
++	case HDBSSPROD_EL2_FSC_ExternalAbort:
++	case HDBSSPROD_EL2_FSC_GPF:
++		return -EFAULT;
++	default:
++		/* Unknown fault. */
++		WARN_ONCE(1,
++				"Unexpected HDBSS fault type, FSC: 0x%llx (prod=0x%llx, vcpu=%d)\n",
++				fsc, prod, vcpu->vcpu_id);
++		return -EFAULT;
++	}
++}
+\ No newline at end of file
+-- 
+2.43.0
+

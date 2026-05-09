@@ -1,0 +1,37 @@
+From c350afd1ade749abdce0e7b7d9368f5ab829545b Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 9 May 2026 20:37:27 +0800
+Subject: [PATCH 6/7] KVM: arm64: Fix HDBSS DBM setting logic in user_mem_abort
+
+---
+ arch/arm64/kvm/mmu.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 5d4a4bb66ec1..20d883d4433f 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2017,9 +2017,6 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
+ 	if (!perm_fault_granule && !s2vi->map_non_cacheable && kvm_has_mte(kvm))
+ 		sanitise_mte_tags(kvm, pfn, mapping_size);
+ 
+-	if (writable && kvm->arch.enable_hdbss && logging_active)
+-		prot |= KVM_PGTABLE_PROT_DBM;
+-
+ 	/*
+ 	 * Under the premise of getting a FSC_PERM fault, we just need to relax
+ 	 * permissions only if mapping_size equals perm_fault_granule. Otherwise,
+@@ -2095,6 +2092,10 @@ static int user_mem_abort(const struct kvm_s2_fault_desc *s2fd)
+ 		return ret;
+ 	}
+ 
++	if (prot & KVM_PGTABLE_PROT_W && kvm->arch.enable_hdbss &&
++	    memslot_is_logging(s2fd->memslot))
++		prot |= KVM_PGTABLE_PROT_DBM;
++
+ 	return kvm_s2_fault_map(s2fd, &s2vi, prot, memcache);
+ }
+ 
+-- 
+2.43.0
+

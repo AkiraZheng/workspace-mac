@@ -1,0 +1,86 @@
+From 5cb83f995e46f266f78ec0e84045cefd62a0e141 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 02:28:38 +0800
+Subject: [PATCH 18/18] KVM: arm64: Fix build errors in HDBSS code
+
+- Move HDBSS_ENTRY_VALID/IPA definitions to kvm_dirty_bit.h
+- Remove duplicate definitions from kvm_host.h
+- Remove duplicate FSC code definitions (use sysreg-defs.h ones)
+- Remove static from kvm_handle_hdbss_fault (used by mmu.c)
+- Add missing asm/sysreg.h include for FSC field macros
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h | 15 ++-------------
+ arch/arm64/include/asm/kvm_host.h      |  3 ---
+ arch/arm64/kvm/dirty_bit.c             |  2 +-
+ 3 files changed, 3 insertions(+), 17 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index 765959c85ade..b69e82895ce3 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -14,18 +14,13 @@
+ #include <linux/types.h>
+ #include <asm/sysreg.h>
+ 
+-/* HDBSS entry valid flag */
+-#define HDBSS_ENTRY_VALID	UL(0x1)
++/* HDBSS entry field definitions */
++#define HDBSS_ENTRY_VALID	BIT(0)
+ #define HDBSS_ENTRY_IPA		GENMASK_ULL(55, 12)
+ 
+ /* HDBSS producer index mask */
+ #define HDBSSPROD_IDX(prod)	FIELD_GET(HDBSSPROD_EL2_INDEX_MASK, prod)
+ 
+-/* HDBSS producer FSC codes */
+-#define HDBSSPROD_EL2_FSC_OK			0x00
+-#define HDBSSPROD_EL2_FSC_ExternalAbort		0x10
+-#define HDBSSPROD_EL2_FSC_GPF			0x0f
+-
+ /*
+  * kvm_arm_enable_hdbss_internal - Enable HDBSS for a VM
+  * @kvm: pointer to KVM instance
+@@ -64,12 +59,6 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
+  */
+ bool kvm_hdbss_buffer_empty(struct kvm_vcpu *vcpu);
+ 
+-/*
+- * kvm_handle_hdbss_fault - Handle HDBSS buffer full fault
+- * @vcpu: pointer to VCPU instance
+- *
+- * Returns: 1 if fault handled (buffer flushed), negative error code on failure
+- */
+ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
+ 
+ /*
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 3d43518aeba0..0e4f86c90cfd 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -62,9 +62,6 @@
+ 
+ #define KVM_HAVE_MMU_RWLOCK
+ 
+-/* HDBSS entry field definitions */
+-#define HDBSS_ENTRY_VALID BIT(0)
+-#define HDBSS_ENTRY_IPA GENMASK_ULL(55, 12)
+ 
+ /*
+  * Mode of operation configurable with kvm-arm.mode early param.
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 1f959e46f5c3..f215de6e3876 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -154,7 +154,7 @@ bool kvm_hdbss_buffer_empty(struct kvm_vcpu *vcpu)
+ }
+ EXPORT_SYMBOL_GPL(kvm_hdbss_buffer_empty);
+ 
+-static int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
++int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ {
+ 	u64 prod;
+ 	u64 fsc;
+-- 
+2.43.0
+

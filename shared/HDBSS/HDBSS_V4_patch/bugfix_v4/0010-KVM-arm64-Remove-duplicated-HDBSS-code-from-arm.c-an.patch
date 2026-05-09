@@ -1,0 +1,185 @@
+From 58425f7ae05615fa30dad735c34e8b408cd44e8a Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 9 May 2026 23:19:59 +0800
+Subject: [PATCH 10/18] KVM: arm64: Remove duplicated HDBSS code from arm.c and
+ mmu.c
+
+After archiving HDBSS code to dirty_bit.c, remove the duplicate
+implementations from arm.c and mmu.c. The functions are now
+provided by dirty_bit.c:
+
+- kvm_arm_vcpu_free_hdbss() removed from arm.c
+- kvm_cap_arm_enable_hdbss() kept in arm.c (ioctl interface)
+- kvm_flush_hdbss_buffer() removed from mmu.c
+- kvm_handle_hdbss_fault() removed from mmu.c
+
+The ioctl interface kvm_cap_arm_enable_hdbss() remains in arm.c
+as it's the user-facing API for enabling/disabling HDBSS.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h | 14 ++++++
+ arch/arm64/kvm/arm.c                   | 12 +----
+ arch/arm64/kvm/dirty_bit.c             |  2 +
+ arch/arm64/kvm/mmu.c                   | 64 --------------------------
+ 4 files changed, 17 insertions(+), 75 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index 1ebdd8015aea..b3b16df5ea84 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -50,6 +50,12 @@ void kvm_arm_disable_hdbss_internal(struct kvm *kvm);
+  */
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+ 
++/*
++ * kvm_arm_vcpu_free_hdbss - Free HDBSS buffer for a VCPU
++ * @vcpu: pointer to VCPU instance
++ */
++void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
++
+ /*
+  * kvm_hdbss_buffer_empty - Check if HDBSS buffer is empty
+  * @vcpu: pointer to VCPU instance
+@@ -58,4 +64,12 @@ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+  */
+ bool kvm_hdbss_buffer_empty(struct kvm_vcpu *vcpu);
+ 
++/*
++ * kvm_handle_hdbss_fault - Handle HDBSS buffer full fault
++ * @vcpu: pointer to VCPU instance
++ *
++ * Returns: 1 if fault handled (buffer flushed), negative error code on failure
++ */
++int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
++
+ #endif /* _ASM_ARM64_KVM_DIRTY_BIT_H */
+\ No newline at end of file
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 50bce57d1e82..b129f4118bae 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -28,6 +28,7 @@
+ 
+ #include <linux/uaccess.h>
+ #include <asm/ptrace.h>
++#include <asm/kvm_dirty_bit.h>
+ #include <asm/mman.h>
+ #include <asm/tlbflush.h>
+ #include <asm/cacheflush.h>
+@@ -130,17 +131,6 @@ int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
+ 	return kvm_vcpu_exiting_guest_mode(vcpu) == IN_GUEST_MODE;
+ }
+ 
+-void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+-{
+-	struct page *hdbss_pg;
+-
+-	hdbss_pg = phys_to_page(vcpu->arch.hdbss.base_phys);
+-	if (hdbss_pg)
+-		__free_pages(hdbss_pg, vcpu->arch.hdbss.size);
+-
+-	vcpu->arch.hdbss.size = 0;
+-}
+-
+ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 				    struct kvm_enable_cap *cap)
+ {
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 2ffd00259748..ba738303888c 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -12,6 +12,7 @@
+ #include <linux/page-flags.h>
+ #include <linux/sched.h>
+ #include <asm/kvm.h>
++#include <asm/kvm_arm.h>
+ #include <asm/kvm_dirty_bit.h>
+ #include <asm/kvm_pgtable.h>
+ #include <asm/sysreg.h>
+@@ -96,6 +97,7 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ 
+ 	vcpu->arch.hdbss.size = 0;
+ }
++EXPORT_SYMBOL_GPL(kvm_arm_vcpu_free_hdbss);
+ 
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ {
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index dc76043a1322..2d3078ac6de3 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2192,70 +2192,6 @@ int kvm_handle_guest_sea(struct kvm_vcpu *vcpu)
+ 	return 0;
+ }
+ 
+-void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+-{
+-	int idx, curr_idx;
+-	u64 br_el2;
+-	u64 *hdbss_buf;
+-	struct kvm *kvm = vcpu->kvm;
+-
+-	if (!kvm->arch.enable_hdbss)
+-		return;
+-
+-	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
+-	br_el2 = HDBSSBR_EL2(vcpu->arch.hdbss.base_phys, vcpu->arch.hdbss.size);
+-
+-	/* Do nothing if HDBSS buffer is empty or br_el2 is NULL */
+-	if (curr_idx == 0 || br_el2 == 0)
+-		return;
+-
+-	hdbss_buf = page_address(phys_to_page(vcpu->arch.hdbss.base_phys));
+-	if (!hdbss_buf)
+-		return;
+-
+-	guard(write_lock_irqsave)(&vcpu->kvm->mmu_lock);
+-	for (idx = 0; idx < curr_idx; idx++) {
+-		u64 gpa;
+-
+-		gpa = hdbss_buf[idx];
+-		if (!(gpa & HDBSS_ENTRY_VALID))
+-			continue;
+-
+-		gpa &= HDBSS_ENTRY_IPA;
+-		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
+-	}
+-
+-	/* reset HDBSS index */
+-	write_sysreg_s(0, SYS_HDBSSPROD_EL2);
+-	vcpu->arch.hdbss.next_index = 0;
+-	isb();
+-}
+-
+-static int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+-{
+-	u64 prod;
+-	u64 fsc;
+-
+-	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
+-	fsc = FIELD_GET(HDBSSPROD_EL2_FSC_MASK, prod);
+-
+-	switch (fsc) {
+-	case HDBSSPROD_EL2_FSC_OK:
+-		/* Buffer full, which is reported as permission fault. */
+-		kvm_flush_hdbss_buffer(vcpu);
+-		return 1;
+-	case HDBSSPROD_EL2_FSC_ExternalAbort:
+-	case HDBSSPROD_EL2_FSC_GPF:
+-		return -EFAULT;
+-	default:
+-		/* Unknown fault. */
+-		WARN_ONCE(1,
+-				"Unexpected HDBSS fault type, FSC: 0x%llx (prod=0x%llx, vcpu=%d)\n",
+-				fsc, prod, vcpu->vcpu_id);
+-		return -EFAULT;
+-	}
+-}
+-
+ /**
+  * kvm_handle_guest_abort - handles all 2nd stage aborts
+  * @vcpu:	the VCPU pointer
+-- 
+2.43.0
+

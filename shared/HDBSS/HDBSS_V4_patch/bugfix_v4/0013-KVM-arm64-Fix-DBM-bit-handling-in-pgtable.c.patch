@@ -1,0 +1,47 @@
+From 55e27f644f3c4e64a7e527429902db8fa95cdf99 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 00:08:54 +0800
+Subject: [PATCH 13/18] KVM: arm64: Fix DBM bit handling in pgtable.c
+
+Two fixes for proper DBM (Dirty Bit Modifier) handling:
+
+1. stage2_pte_needs_update(): Add DBM change detection so that
+   PTE updates with only DBM changes are not ignored.
+
+2. kvm_pgtable_stage2_pte_prot(): Extract DBM bit when converting
+   PTE to protection, so huge page splitting properly inherits DBM.
+
+Without these fixes, DBM clearing operations would be ignored and
+huge page splitting would lose DBM state.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/hyp/pgtable.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 0e915af83037..e98b880530ca 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -758,6 +758,8 @@ enum kvm_pgtable_prot kvm_pgtable_stage2_pte_prot(kvm_pte_t pte)
+ 		prot |= KVM_PGTABLE_PROT_R;
+ 	if (pte & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W)
+ 		prot |= KVM_PGTABLE_PROT_W;
++	if (pte & KVM_PTE_LEAF_ATTR_HI_S2_DBM)
++		prot |= KVM_PGTABLE_PROT_DBM;
+ 
+ 	switch (FIELD_GET(KVM_PTE_LEAF_ATTR_HI_S2_XN, pte)) {
+ 	case 0b00:
+@@ -781,6 +783,9 @@ static bool stage2_pte_needs_update(kvm_pte_t old, kvm_pte_t new)
+ 	if (!kvm_pte_valid(old) || !kvm_pte_valid(new))
+ 		return true;
+ 
++	if ((old ^ new) & KVM_PTE_LEAF_ATTR_HI_S2_DBM)
++		return true;
++
+ 	return ((old ^ new) & (~KVM_PTE_LEAF_ATTR_S2_PERMS));
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,49 @@
+From 7699c478704f76cd270460629ffa3204bf49100c Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 9 May 2026 23:57:40 +0800
+Subject: [PATCH 12/18] KVM: arm64: Move HDBSS flush from vcpu_put_vhe to
+ kvm_arch_vcpu_put
+
+Move the HDBSS buffer flush from kvm_vcpu_put_vhe() to kvm_arch_vcpu_put()
+to ensure flush happens on every schedule out, including protected VM path.
+
+Rationale:
+- kvm_vcpu_put_vhe() only does simple load/store, should not do flush
+- kvm_arch_vcpu_put() is called for all VCPUs on schedule out
+- Adding flush here ensures coverage for both VHE and protected VMs
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/arm.c            | 3 +++
+ arch/arm64/kvm/hyp/vhe/switch.c | 1 -
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 4db97b63c413..de864ff38923 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -807,6 +807,9 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
+ 
+ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ {
++	if (vcpu->kvm->arch.enable_hdbss)
++		kvm_flush_hdbss_buffer(vcpu);
++
+ 	if (is_protected_kvm_enabled()) {
+ 		kvm_call_hyp(__vgic_v3_save_aprs, &vcpu->arch.vgic_cpu.vgic_v3);
+ 		kvm_call_hyp_nvhe(__pkvm_vcpu_put);
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index 86821fcb9c34..275fd385ffaf 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -238,7 +238,6 @@ void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu)
+ 
+ void kvm_vcpu_put_vhe(struct kvm_vcpu *vcpu)
+ {
+-	kvm_flush_hdbss_buffer(vcpu);
+ 	__vcpu_put_deactivate_traps(vcpu);
+ 	__vcpu_put_switch_sysregs(vcpu);
+ 
+-- 
+2.43.0
+

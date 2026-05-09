@@ -1,0 +1,74 @@
+From 06527a688d5dee3fee4f711b645205d3d267c074 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 9 May 2026 22:56:47 +0800
+Subject: [PATCH 08/18] KVM: arm64: Refactor HDBSS code for clarity
+
+- Replace GENMASK(55, 12 + sz) with HDBSSBR_EL2_BADDR_MASK
+- Rename 'size' variable to 'order' in kvm_cap_arm_enable_hdbss()
+  to avoid confusion with actual memory size
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/sysreg.h |  2 +-
+ arch/arm64/kvm/arm.c            | 10 +++++-----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 3e006c01f6a5..4920f1a4989a 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1045,7 +1045,7 @@
+  */
+ #define HDBSS_MAX_SIZE		HDBSSBR_EL2_SZ_2MB
+ 
+-#define HDBSSBR_EL2(baddr, sz)	(((baddr) & GENMASK(55, 12 + sz)) | \
++#define HDBSSBR_EL2(baddr, sz)	(((baddr) & HDBSSBR_EL2_BADDR_MASK) | \
+ 				 FIELD_PREP(HDBSSBR_EL2_SZ_MASK, sz))
+ 
+ #define HDBSSPROD_IDX(prod)	FIELD_GET(HDBSSPROD_EL2_INDEX_MASK, prod)
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index b58dee1446cf..50bce57d1e82 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -147,19 +147,19 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 	unsigned long i;
+ 	struct kvm_vcpu *vcpu;
+ 	struct page *hdbss_pg = NULL;
+-	__u64 size = cap->args[0];
++	__u64 order = cap->args[0];
+ 	bool enable = cap->args[1] ? true : false;
+ 
+ 	if (!system_supports_hdbss())
+ 		return -EINVAL;
+ 
+-	if (size > HDBSS_MAX_SIZE)
++	if (order > HDBSS_MAX_SIZE)
+ 		return -EINVAL;
+ 
+ 	if (!enable && !kvm->arch.enable_hdbss) /* Already Off */
+ 		return 0;
+ 
+-	if (enable && kvm->arch.enable_hdbss) /* Already On, can't set size */
++	if (enable && kvm->arch.enable_hdbss) /* Already On, can't change order */
+ 		return -EINVAL;
+ 
+ 	if (!enable) { /* Turn it off */
+@@ -179,13 +179,13 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 
+ 	/* Turn it on */
+ 	kvm_for_each_vcpu(i, vcpu, kvm) {
+-		hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT, size);
++		hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT, order);
+ 		if (!hdbss_pg)
+ 			goto error_alloc;
+ 
+ 		vcpu->arch.hdbss = (struct vcpu_hdbss_state) {
+ 			.base_phys = page_to_phys(hdbss_pg),
+-			.size = size,
++			.size = order,
+ 			.next_index = 0,
+ 		};
+ 	}
+-- 
+2.43.0
+

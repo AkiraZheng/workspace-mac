@@ -1,0 +1,25 @@
+From 607875ab494c74c9698c1789497b3dbfa68333ae Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 9 May 2026 20:37:55 +0800
+Subject: [PATCH 7/7] KVM: arm64: Fix kvm reference in user_mem_abort
+
+---
+ arch/arm64/kvm/mmu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 20d883d4433f..dc76043a1322 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2092,7 +2092,7 @@ static int user_mem_abort(const struct kvm_s2_fault_desc *s2fd)
+ 		return ret;
+ 	}
+ 
+-	if (prot & KVM_PGTABLE_PROT_W && kvm->arch.enable_hdbss &&
++	if (prot & KVM_PGTABLE_PROT_W && s2fd->vcpu->kvm->arch.enable_hdbss &&
+ 	    memslot_is_logging(s2fd->memslot))
+ 		prot |= KVM_PGTABLE_PROT_DBM;
+ 
+-- 
+2.43.0
+

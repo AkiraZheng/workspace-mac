@@ -10,11 +10,12 @@
 
 ---
 
-## 执行要求
+## 执行要求(必须遵循)
 
 1. **Revert代码**: 每revert一个commit就立即commit，不允许一次性revert多个
 2. **Merge代码**: 每merge一个patch就立即commit
 3. **Task确认**: 每完成一个task后停下来，让用户确认是否符合要求
+4. **Task结束**：每执行完一个task必须commit，并调用review skill
 
 ---
 
@@ -149,77 +150,11 @@ git commit -m "Apply v3 patch 1: arm64/sysreg: Add HDBSS related register inform
 
 - [ ] **Step 1: 创建kvm_dirty_bit.h头文件**
 
-```c
-/* SPDX-License-Identifier: GPL-2.0 */
-/*
- * Copyright (c) 2023, 2024 Hisilicon Limited.
- *
- * Kernel-based dirty page tracking for KVM.
- */
-
-#ifndef __ARM64_KVM_DIRTY_BIT_H__
-#define __ARM64_KVM_DIRTY_BIT_H__
-
-#include <linux/types.h>
-#include <asm/sysreg.h>
-
-struct kvm_vcpu;
-struct kvm;
-
-/* HDBSS entry field definitions */
-#define HDBSS_ENTRY_VALID   BIT(0)
-#define HDBSS_ENTRY_IPA     GENMASK_ULL(55, 12)
-
-/* HDBSS request for flushing buffer */
-#define KVM_REQ_FLUSH_HDBSS    KVM_ARCH_REQ(10)
-
-/* HDBSS constants */
-#define HDBSS_MAX_SIZE  9  /* 2MB buffer per vcpu */
-
-/* HDBSSBR_EL2 definitions */
-#define HDBSSBR_EL2_BADDR_MASK  GENMASK_ULL(55, 12)
-#define HDBSSBR_EL2(baddr, sz)  (((baddr) & HDBSSBR_EL2_BADDR_MASK) | \
-                                 FIELD_PREP(HDBSSBR_EL2_SZ_MASK, sz))
-#define HDBSSPROD_IDX(prod)  FIELD_GET(HDBSSPROD_EL2_INDEX_MASK, prod)
-
-struct vcpu_hdbss_state {
-    phys_addr_t base_phys;   /* for memory free */
-    u64 hdbssbr_el2;         /* load directly */
-    u64 hdbssprod_el2;       /* save directly */
-};
-
-/* HDBSS flush operations */
-void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
-void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
-
-/* VM-level HDBSS enable/disable */
-int kvm_arm_enable_hdbss_internal(struct kvm *kvm, unsigned long order);
-int kvm_arm_disable_hdbss_internal(struct kvm *kvm);
-
-/* Sync dirty pages to slot before reporting to userspace */
-void kvm_flush_hdbss_to_memslot(struct kvm *kvm);
-
-/* HDBSS trap handler */
-int kvm_handle_hdbss_trap(struct kvm_vcpu *vcpu);
-
-/* Auto select order based on VM memory */
-unsigned int hdbss_auto_select_order(struct kvm *kvm);
-
-#endif /* __ARM64_KVM_DIRTY_BIT_H__ */
-```
+深度思考一下，然后将HDBSS相关代码的定义移动到这
 
 - [ ] **Step 2: 创建dirty_bit.c实现文件**
 
-实现以下函数:
-- `kvm_arm_vcpu_free_hdbss()`
-- `kvm_flush_hdbss_buffer()`
-- `kvm_handle_hdbss_fault()`
-- `kvm_arm_enable_hdbss_internal()`
-- `kvm_arm_disable_hdbss_internal()`
-- `kvm_cap_arm_enable_hdbss()` (保留ioctl接口以备后用)
-- `kvm_flush_hdbss_to_memslot()`
-- `kvm_handle_hdbss_trap()`
-- `hdbss_auto_select_order()`
+深度思考一下，然后将HDBSS的一些相关接口移动到这
 
 - [ ] **Step 3: 修改Makefile添加dirty_bit.o**
 
@@ -348,7 +283,13 @@ static bool stage2_pte_needs_update(kvm_pte_t old, kvm_pte_t new)
 
 ---
 
-### Task 11: 实现HugePage eager split
+### Task 11：修复 dirty ring的bug
+
+参考文档：../../dirty-ring-vs-dirty-bitmap.md 和 HDBSS-HACDBS-analysis.md 确定需要做什么 bugfix
+
+深度思考后，这里停下来，确认需要修复dirty ring的什么bug
+
+### Task 12: 实现HugePage eager split
 
 **Files:**
 - 修改: `arch/arm64/kvm/mmu.c`
@@ -368,7 +309,7 @@ else
 
 ---
 
-### Task 12: 实现Migration集成
+### Task 13: 实现Migration集成（这个任务必须最后再做，且经过手动同意后才能做）
 
 **Files:**
 - 修改: `arch/arm64/kvm/virtcca_cvm.c`
@@ -397,7 +338,7 @@ if (kvm->arch.enable_hdbss)
 
 ## Phase 5: 验证和测试
 
-### Task 13: 代码验证
+### Task 14: 代码验证
 
 **Files:**
 - 检查: 整个HDBSS实现

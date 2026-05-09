@@ -1,0 +1,153 @@
+From 07aef5ac2b6bc686f9728e6e319cb82f9614aeb1 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 9 May 2026 23:27:47 +0800
+Subject: [PATCH 11/18] KVM: arm64: Update vcpu_hdbss_state structure
+
+Simplify the structure to store pre-computed register values
+instead of computing them each time:
+
+Old structure:
+- base_phys: physical address of HDBSS buffer
+- size: order of the buffer page
+- next_index: producer index
+
+New structure:
+- base_phys: physical address (for memory free)
+- hdbssbr_el2: pre-computed HDBSSBR_EL2 value
+- hdbssprod_el2: saved HDBSSPROD_EL2 value
+
+This eliminates the need to recompute HDBSSBR_EL2 from base_phys and size
+each time in __load_hdbss() and kvm_flush_hdbss_buffer().
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/kvm_host.h |  6 +++---
+ arch/arm64/kvm/arm.c              |  4 ++--
+ arch/arm64/kvm/dirty_bit.c        | 22 ++++++++++++----------
+ arch/arm64/kvm/hyp/vhe/switch.c   |  8 ++------
+ 4 files changed, 19 insertions(+), 21 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 3eed77273f3d..3d43518aeba0 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -863,9 +863,9 @@ struct vcpu_reset_state {
+ };
+ 
+ struct vcpu_hdbss_state {
+-	phys_addr_t base_phys;
+-	u32 size;
+-	u32 next_index;
++	phys_addr_t base_phys;   /* for memory free */
++	u64 hdbssbr_el2;         /* load directly to SYS_HDBSSBR_EL2 */
++	u64 hdbssprod_el2;       /* load directly to SYS_HDBSSPROD_EL2 */
+ };
+ 
+ struct vncr_tlb;
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index b129f4118bae..4db97b63c413 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -175,8 +175,8 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 
+ 		vcpu->arch.hdbss = (struct vcpu_hdbss_state) {
+ 			.base_phys = page_to_phys(hdbss_pg),
+-			.size = order,
+-			.next_index = 0,
++			.hdbssbr_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), order),
++			.hdbssprod_el2 = 0,
+ 		};
+ 	}
+ 
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index ba738303888c..22d2cf60c965 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -40,8 +40,8 @@ int kvm_arm_enable_hdbss_internal(struct kvm *kvm, u64 order)
+ 
+ 		vcpu->arch.hdbss = (struct vcpu_hdbss_state) {
+ 			.base_phys = page_to_phys(hdbss_pg),
+-			.size = order,
+-			.next_index = 0,
++			.hdbssbr_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), order),
++			.hdbssprod_el2 = 0,
+ 		};
+ 	}
+ 
+@@ -90,19 +90,22 @@ EXPORT_SYMBOL_GPL(kvm_arm_disable_hdbss_internal);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ {
+ 	struct page *hdbss_pg;
++	u32 order;
+ 
+ 	hdbss_pg = phys_to_page(vcpu->arch.hdbss.base_phys);
+-	if (hdbss_pg)
+-		__free_pages(hdbss_pg, vcpu->arch.hdbss.size);
++	if (hdbss_pg) {
++		order = FIELD_GET(HDBSSBR_EL2_SZ_MASK, vcpu->arch.hdbss.hdbssbr_el2);
++		__free_pages(hdbss_pg, order);
++	}
+ 
+-	vcpu->arch.hdbss.size = 0;
++	vcpu->arch.hdbss.hdbssbr_el2 = 0;
++	vcpu->arch.hdbss.hdbssprod_el2 = 0;
+ }
+ EXPORT_SYMBOL_GPL(kvm_arm_vcpu_free_hdbss);
+ 
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ {
+ 	int idx, curr_idx;
+-	u64 br_el2;
+ 	u64 *hdbss_buf;
+ 	struct kvm *kvm = vcpu->kvm;
+ 
+@@ -110,10 +113,9 @@ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ 		return;
+ 
+ 	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
+-	br_el2 = HDBSSBR_EL2(vcpu->arch.hdbss.base_phys, vcpu->arch.hdbss.size);
+ 
+ 	/* Do nothing if HDBSS buffer is empty or br_el2 is NULL */
+-	if (curr_idx == 0 || br_el2 == 0)
++	if (curr_idx == 0 || vcpu->arch.hdbss.hdbssbr_el2 == 0)
+ 		return;
+ 
+ 	hdbss_buf = page_address(phys_to_page(vcpu->arch.hdbss.base_phys));
+@@ -132,9 +134,9 @@ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ 		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
+ 	}
+ 
+-	/* reset HDBSS index */
++	/* reset HDBSS index and save to vcpu state */
+ 	write_sysreg_s(0, SYS_HDBSSPROD_EL2);
+-	vcpu->arch.hdbss.next_index = 0;
++	vcpu->arch.hdbss.hdbssprod_el2 = 0;
+ 	isb();
+ }
+ EXPORT_SYMBOL_GPL(kvm_flush_hdbss_buffer);
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index 600cbc4f8ae9..86821fcb9c34 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -216,16 +216,12 @@ static void __vcpu_put_deactivate_traps(struct kvm_vcpu *vcpu)
+ static void __load_hdbss(struct kvm_vcpu *vcpu)
+ {
+ 	struct kvm *kvm = vcpu->kvm;
+-	u64 br_el2, prod_el2;
+ 
+ 	if (!kvm->arch.enable_hdbss)
+ 		return;
+ 
+-	br_el2 = HDBSSBR_EL2(vcpu->arch.hdbss.base_phys, vcpu->arch.hdbss.size);
+-	prod_el2 = vcpu->arch.hdbss.next_index;
+-
+-	write_sysreg_s(br_el2, SYS_HDBSSBR_EL2);
+-	write_sysreg_s(prod_el2, SYS_HDBSSPROD_EL2);
++	write_sysreg_s(vcpu->arch.hdbss.hdbssbr_el2, SYS_HDBSSBR_EL2);
++	write_sysreg_s(vcpu->arch.hdbss.hdbssprod_el2, SYS_HDBSSPROD_EL2);
+ 
+ 	isb();
+ }
+-- 
+2.43.0
+

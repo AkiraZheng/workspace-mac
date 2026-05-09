@@ -1,0 +1,33 @@
+From ccaf4e4bedea41e737b3663394e14e7f4f47dea6 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 00:13:44 +0800
+Subject: [PATCH 14/18] KVM: arm64: Enable eager page split for HDBSS
+
+When HDBSS is supported, set split_page_chunk_size to PAGE_SIZE
+to ensure huge pages are split when HDBSS is enabled. This is
+necessary because HDBSS tracks dirty pages at page granularity
+and cannot work with huge pages.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/mmu.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 2d3078ac6de3..be555c5655c3 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1002,6 +1002,10 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long t
+ 
+ 	 /* The eager page splitting is disabled by default */
+ 	mmu->split_page_chunk_size = KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT;
++
++	if (system_supports_hdbss())
++		mmu->split_page_chunk_size = PAGE_SIZE;
++
+ 	mmu->split_page_cache.gfp_zero = __GFP_ZERO;
+ 
+ 	mmu->pgd_phys = __pa(pgt->pgd);
+-- 
+2.43.0
+

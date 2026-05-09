@@ -1,0 +1,156 @@
+From 12f5ec727f8a888b1cba8e9ccd9cbcbe4dc80a66 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 00:53:24 +0800
+Subject: [PATCH 16/18] KVM: arm64: Add auto-enable HDBSS for migration
+
+Add automatic HDBSS enable/disable based on dirty logging:
+
+1. Add hdbss_auto_select_order() to automatically select HDBSS buffer
+   order based on VM memory size (0-5 based on 1GB-256GB+)
+
+2. Add kvm_arm_hdbss_auto_enable() to auto-enable HDBSS when
+   dirty logging is enabled via KVM_SET_USER_MEMORY_REGION
+
+3. Call kvm_arm_hdbss_auto_enable() in kvm_arch_commit_memory_region()
+   when log_dirty_pages is set and change is not DELETE
+
+This replaces the manual ioctl approach for enabling HDBSS.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h | 11 ++++
+ arch/arm64/kvm/dirty_bit.c             | 72 ++++++++++++++++++++++++++
+ arch/arm64/kvm/mmu.c                   |  7 +++
+ 3 files changed, 90 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index b3b16df5ea84..765959c85ade 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -72,4 +72,15 @@ bool kvm_hdbss_buffer_empty(struct kvm_vcpu *vcpu);
+  */
+ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
+ 
++/*
++ * kvm_arm_hdbss_auto_enable - Auto-enable HDBSS for migration
++ * @kvm: pointer to KVM instance
++ *
++ * Called during memory region creation to automatically enable HDBSS
++ * when dirty logging is enabled. This replaces the manual ioctl approach.
++ *
++ * Returns: 0 on success, negative error code on failure
++ */
++int kvm_arm_hdbss_auto_enable(struct kvm *kvm);
++
+ #endif /* _ASM_ARM64_KVM_DIRTY_BIT_H */
+\ No newline at end of file
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 797a2df048b7..1f959e46f5c3 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -177,4 +177,76 @@ static int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 				fsc, prod, vcpu->vcpu_id);
+ 		return -EFAULT;
+ 	}
++}
++
++/*
++ * hdbss_auto_select_order - Automatically select HDBSS buffer order
++ * @kvm: pointer to KVM instance
++ *
++ * Returns: order value (0-9) for HDBSS buffer size, or negative error code.
++ *
++ * The HDBSS buffer can hold up to (2^order * 512) entries.
++ * We select order based on the total VM memory to ensure adequate tracking capacity.
++ */
++static int hdbss_auto_select_order(struct kvm *kvm)
++{
++	unsigned long nr_pages = kvm->nr_memslot_pages;
++	u32 order;
++
++	/*
++	 * HDBSS buffer entries: 2^order pages * 512 entries per page
++	 * For a 4KB page: 2^order * 512 entries
++	 * Typical dirty rate is ~1% of memory per iteration, so we want
++	 * buffer size to handle at least 3-5 iterations worth of entries.
++	 *
++	 * Minimum: order 0 (512 entries for 4KB buffer)
++	 * Maximum: order 9 (256KB buffer with 262144 entries)
++	 *
++	 * Scale with memory size:
++	 * - < 1GB: order 0 (512 entries)
++	 * - < 4GB: order 1 (1024 entries)
++	 * - < 16GB: order 2 (2048 entries)
++	 * - < 64GB: order 3 (4096 entries)
++	 * - < 256GB: order 4 (8192 entries)
++	 * - >= 256GB: order 5 (16384 entries)
++	 */
++	if (nr_pages < 256 * 1024) /* < 1GB */
++		order = 0;
++	else if (nr_pages < 1024 * 1024) /* < 4GB */
++		order = 1;
++	else if (nr_pages < 4 * 1024 * 1024) /* < 16GB */
++		order = 2;
++	else if (nr_pages < 16 * 1024 * 1024) /* < 64GB */
++		order = 3;
++	else if (nr_pages < 64 * 1024 * 1024) /* < 256GB */
++		order = 4;
++	else
++		order = 5;
++
++	/* Cap at maximum supported size */
++	if (order > HDBSS_MAX_SIZE)
++		order = HDBSS_MAX_SIZE;
++
++	return order;
++}
++
++int kvm_arm_hdbss_auto_enable(struct kvm *kvm)
++{
++	int order;
++
++	if (!system_supports_hdbss())
++		return -EINVAL;
++
++	/* HDBSS doesn't support dirty ring mode yet */
++	if (kvm->dirty_ring_size)
++		return -EINVAL;
++
++	if (kvm->arch.enable_hdbss)
++		return 0;
++
++	order = hdbss_auto_select_order(kvm);
++	if (order < 0)
++		return order;
++
++	return kvm_arm_enable_hdbss_internal(kvm, order);
+ }
+\ No newline at end of file
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index be555c5655c3..08c341f0c9c4 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -20,6 +20,7 @@
+ #include <asm/kvm_pkvm.h>
+ #include <asm/kvm_asm.h>
+ #include <asm/kvm_emulate.h>
++#include <asm/kvm_dirty_bit.h>
+ #include <asm/virt.h>
+ 
+ #include "trace.h"
+@@ -2552,6 +2553,12 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 		if (change == KVM_MR_DELETE)
+ 			return;
+ 
++		/*
++		 * Auto-enable HDBSS for migration when dirty logging is enabled.
++		 * This is done in addition to the write-protection below.
++		 */
++		kvm_arm_hdbss_auto_enable(kvm);
++
+ 		/*
+ 		 * Huge and normal pages are write-protected and split
+ 		 * on either of these two cases:
+-- 
+2.43.0
+
