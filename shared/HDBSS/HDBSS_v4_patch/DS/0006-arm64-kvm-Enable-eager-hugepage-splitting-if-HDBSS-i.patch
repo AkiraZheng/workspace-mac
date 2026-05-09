@@ -1,0 +1,43 @@
+From f053cf862ff8ea5f842f7a58ed211a86c9b0b469 Mon Sep 17 00:00:00 2001
+From: Leonardo Bras <leo.bras@arm.com>
+Date: Wed, 25 Mar 2026 18:20:27 +0000
+Subject: [PATCH 06/15] arm64/kvm: Enable eager hugepage splitting if HDBSS is
+ available
+
+FEAT_HDBSS speeds up guest memory dirty tracking by avoiding a page fault
+and saving the entry in a tracking structure.
+
+That may be a problem when we have guest memory backed by hugepages or
+transparent huge pages, as it's not possible to do on-demand hugepage
+splitting, relying only on eager hugepage splitting.
+
+So, at stage2 initialization, enable eager hugepage splitting with
+chunk = PAGE_SIZE if the system supports HDBSS.
+
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 7434d105c87d..f1c6af46f182 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1000,8 +1000,12 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long t
+ 	for_each_possible_cpu(cpu)
+ 		*per_cpu_ptr(mmu->last_vcpu_ran, cpu) = -1;
+ 
+-	 /* The eager page splitting is disabled by default */
+-	mmu->split_page_chunk_size = KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT;
++	 /* The eager page splitting is disabled by default if system has no HDBSS */
++	if (system_supports_hdbss())
++		mmu->split_page_chunk_size = PAGE_SIZE;
++	else
++		mmu->split_page_chunk_size = KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT;
++
+ 	mmu->split_page_cache.gfp_zero = __GFP_ZERO;
+ 
+ 	mmu->pgd_phys = __pa(pgt->pgd);
+-- 
+2.43.0
+

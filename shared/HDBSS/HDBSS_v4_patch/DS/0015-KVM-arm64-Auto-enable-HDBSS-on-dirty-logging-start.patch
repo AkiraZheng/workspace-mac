@@ -1,0 +1,125 @@
+From 8c130f4479d4b5a0e0a1dd86bcd3b3d98eefb42c Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 05:44:49 +0800
+Subject: [PATCH 15/15] KVM: arm64: Auto-enable HDBSS on dirty logging start
+
+Remove the KVM_CAP_ARM_HW_DIRTY_STATE_TRACK enable cap ioctl and replace
+it with automatic HDBSS enable/disable based on dirty logging state.
+
+HDBSS is now automatically enabled in kvm_arch_commit_memory_region()
+when the first memslot enables KVM_MEM_LOG_DIRTY_PAGES (migration start),
+and automatically disabled when the last memslot removes dirty logging
+(migration end). The buffer order is auto-selected based on VM memory size.
+
+Refactor hdbss_auto_select_order() to require the caller to hold
+kvm->slots_lock, since it is always called under that lock.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/arm.c       | 17 -----------------
+ arch/arm64/kvm/dirty_bit.c |  6 ++++--
+ arch/arm64/kvm/mmu.c       | 21 +++++++++++++++++++++
+ 3 files changed, 25 insertions(+), 19 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index aeb75f63ed0a..dfcf98dd220e 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -131,18 +131,6 @@ int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
+ 	return kvm_vcpu_exiting_guest_mode(vcpu) == IN_GUEST_MODE;
+ }
+ 
+-static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+-				    struct kvm_enable_cap *cap)
+-{
+-	unsigned int order = cap->args[0];
+-	bool enable = cap->args[1] ? true : false;
+-
+-	if (enable)
+-		return kvm_arm_enable_hdbss_internal(kvm, order);
+-	else
+-		return kvm_arm_disable_hdbss_internal(kvm);
+-}
+-
+ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+ 			    struct kvm_enable_cap *cap)
+ {
+@@ -200,11 +188,6 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+ 		r = 0;
+ 		set_bit(KVM_ARCH_FLAG_EXIT_SEA, &kvm->arch.flags);
+ 		break;
+-	case KVM_CAP_ARM_HW_DIRTY_STATE_TRACK:
+-		mutex_lock(&kvm->lock);
+-		r = kvm_cap_arm_enable_hdbss(kvm, cap);
+-		mutex_unlock(&kvm->lock);
+-		break;
+ 	default:
+ 		break;
+ 	}
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 36701d249aec..12a6fa0a2007 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -10,16 +10,18 @@
+ #include <asm/kvm_pgtable.h>
+ #include <asm/sysreg.h>
+ 
++/*
++ * Select HDBSS buffer order based on total VM memory size.
++ * Caller must hold kvm->slots_lock.
++ */
+ unsigned int hdbss_auto_select_order(struct kvm *kvm)
+ {
+ 	unsigned long npages = 0;
+ 	struct kvm_memory_slot *memslot;
+ 	int idx;
+ 
+-	mutex_lock(&kvm->slots_lock);
+ 	kvm_for_each_memslot(memslot, idx, kvm_memslots(kvm))
+ 		npages += memslot->npages;
+-	mutex_unlock(&kvm->slots_lock);
+ 
+ 	if (npages <= 16384)
+ 		return 0;		/* 4KB */
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index edc2e2492328..e00d539a115c 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2570,6 +2570,10 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 		 */
+ 		kvm_mmu_wp_memory_region(kvm, new->id);
+ 		kvm_mmu_split_memory_region(kvm, new->id);
++
++		if (system_supports_hdbss() && !kvm->arch.enable_hdbss)
++			kvm_arm_enable_hdbss_internal(kvm,
++				hdbss_auto_select_order(kvm));
+ 	} else {
+ 		/*
+ 		 * Free any leftovers from the eager page splitting cache. Do
+@@ -2579,6 +2583,23 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 		 * cache around for any of the other cases.
+ 		 */
+ 		kvm_mmu_free_memory_cache(&kvm->arch.mmu.split_page_cache);
++
++		if (kvm->arch.enable_hdbss && old &&
++		    (old->flags & KVM_MEM_LOG_DIRTY_PAGES)) {
++			struct kvm_memory_slot *memslot;
++			bool has_logging = false;
++			int idx;
++
++			kvm_for_each_memslot(memslot, idx, kvm_memslots(kvm)) {
++				if (memslot->flags & KVM_MEM_LOG_DIRTY_PAGES) {
++					has_logging = true;
++					break;
++				}
++			}
++
++			if (!has_logging)
++				kvm_arm_disable_hdbss_internal(kvm);
++		}
+ 	}
+ }
+ 
+-- 
+2.43.0
+

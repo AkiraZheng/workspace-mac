@@ -1,0 +1,96 @@
+From 0d47bc18c4f47cf7e1ad3122b873de7f37007873 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 05:30:37 +0800
+Subject: [PATCH 14/15] KVM: arm64: Refactor HDBSS flush to explicit call sites
+
+Move HDBSS buffer flush out of kvm_arch_vcpu_put() and into explicit
+call sites per community discussion. kvm_arch_vcpu_put() is a pure
+save/restore path and should not contain side effects like flushing.
+
+Flush now happens at:
+- kvm_arch_vcpu_ioctl_run(): before vcpu_put at run loop exit
+- kvm_arch_vcpu_sched_out(): new arch hook called from kvm_sched_out()
+- check_vcpu_requests(): via KVM_REQ_FLUSH_HDBSS request
+- kvm_handle_hdbss_fault(): sets KVM_REQ_FLUSH_HDBSS request
+- kvm_arch_sync_dirty_log(): via KVM_REQ_FLUSH_HDBSS | KVM_REQUEST_WAIT
+
+Add kvm_arch_vcpu_sched_out() as a new arch hook with a __weak default
+no-op, called from the generic kvm_sched_out() preempt notifier.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/arm.c     | 7 ++++++-
+ include/linux/kvm_host.h | 1 +
+ virt/kvm/kvm_main.c      | 5 +++++
+ 3 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 72841a30c1bd..aeb75f63ed0a 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -749,7 +749,6 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
+ 
+ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ {
+-	kvm_flush_hdbss_buffer(vcpu);
+ 
+ 	if (is_protected_kvm_enabled()) {
+ 		kvm_call_hyp(__vgic_v3_save_aprs, &vcpu->arch.vgic_cpu.vgic_v3);
+@@ -771,6 +770,11 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ 	vcpu->cpu = -1;
+ }
+ 
++void kvm_arch_vcpu_sched_out(struct kvm_vcpu *vcpu)
++{
++	kvm_flush_hdbss_buffer(vcpu);
++}
++
+ static void __kvm_arm_vcpu_power_off(struct kvm_vcpu *vcpu)
+ {
+ 	WRITE_ONCE(vcpu->arch.mp_state.mp_state, KVM_MP_STATE_STOPPED);
+@@ -1451,6 +1455,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+ 		     vcpu_get_flag(vcpu, INCREMENT_PC)))
+ 		kvm_call_hyp(__kvm_adjust_pc, vcpu);
+ 
++	kvm_flush_hdbss_buffer(vcpu);
+ 	vcpu_put(vcpu);
+ 	return ret;
+ }
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 4c14aee1fb06..f2b8d20eaf9f 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -1619,6 +1619,7 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu);
+ 
+ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu);
+ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu);
++void kvm_arch_vcpu_sched_out(struct kvm_vcpu *vcpu);
+ int kvm_arch_vcpu_precreate(struct kvm *kvm, unsigned int id);
+ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu);
+ void kvm_arch_vcpu_postcreate(struct kvm_vcpu *vcpu);
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 89489996fbc1..5e8f4546b666 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -3956,6 +3956,10 @@ bool __weak kvm_arch_dy_has_pending_interrupt(struct kvm_vcpu *vcpu)
+ 	return false;
+ }
+ 
++void __weak kvm_arch_vcpu_sched_out(struct kvm_vcpu *vcpu)
++{
++}
++
+ void kvm_vcpu_on_spin(struct kvm_vcpu *me, bool yield_to_kernel_mode)
+ {
+ 	int nr_vcpus, start, i, idx, yielded;
+@@ -6402,6 +6406,7 @@ static void kvm_sched_out(struct preempt_notifier *pn,
+ 		WRITE_ONCE(vcpu->preempted, true);
+ 		WRITE_ONCE(vcpu->ready, true);
+ 	}
++	kvm_arch_vcpu_sched_out(vcpu);
+ 	kvm_arch_vcpu_put(vcpu);
+ 	__this_cpu_write(kvm_running_vcpu, NULL);
+ }
+-- 
+2.43.0
+

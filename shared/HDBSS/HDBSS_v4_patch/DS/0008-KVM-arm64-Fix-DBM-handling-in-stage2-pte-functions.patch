@@ -1,0 +1,43 @@
+From 7cf7c80b7e6890d5b3009cddded9c21c04394efe Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 04:22:29 +0800
+Subject: [PATCH 08/15] KVM: arm64: Fix DBM handling in stage2 pte functions
+
+Add DBM extraction to kvm_pgtable_stage2_pte_prot() to preserve DBM
+state during huge page splitting. Add DBM comparison to
+stage2_pte_needs_update() to ensure DBM changes trigger PTE updates
+instead of being silently ignored as irrelevant bits.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/hyp/pgtable.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 0e915af83037..84b1bb84f169 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -773,6 +773,10 @@ enum kvm_pgtable_prot kvm_pgtable_stage2_pte_prot(kvm_pte_t pte)
+ 		break;
+ 	}
+ 
++	if (pte & KVM_PTE_LEAF_ATTR_HI_S2_DBM)
++		prot |= KVM_PGTABLE_PROT_DBM;
++
++
+ 	return prot;
+ }
+ 
+@@ -781,6 +785,9 @@ static bool stage2_pte_needs_update(kvm_pte_t old, kvm_pte_t new)
+ 	if (!kvm_pte_valid(old) || !kvm_pte_valid(new))
+ 		return true;
+ 
++	if ((old ^ new) & KVM_PTE_LEAF_ATTR_HI_S2_DBM)
++		return true;
++
+ 	return ((old ^ new) & (~KVM_PTE_LEAF_ATTR_S2_PERMS));
+ }
+ 
+-- 
+2.43.0
+
