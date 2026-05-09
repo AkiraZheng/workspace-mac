@@ -1,0 +1,30 @@
+From 0762d89326d60d0860f28253681400e148377253 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Fri, 8 May 2026 22:25:09 +0800
+Subject: [PATCH 1/5] arm64/sysreg: fix HDBSSBR_EL2 BADDR mask definition
+
+Replace the incorrect GENMASK(55, 12 + sz) with the proper
+HDBSSBR_EL2_BADDR_MASK which correctly represents the BADDR
+field as GENMASK(55, 12).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/sysreg.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 0d36f20ecd33..97df3882b5b2 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1037,7 +1037,7 @@
+  */
+ #define HDBSS_MAX_SIZE		HDBSSBR_EL2_SZ_2MB
+ 
+-#define HDBSSBR_EL2(baddr, sz)	(((baddr) & GENMASK(55, 12 + sz)) | \
++#define HDBSSBR_EL2(baddr, sz)	(((baddr) & HDBSSBR_EL2_BADDR_MASK) | \
+ 				 ((sz) << HDBSSBR_EL2_SZ_SHIFT))
+ #define HDBSSBR_BADDR(br)	((br) & GENMASK(55, (12 + HDBSSBR_SZ(br))))
+ #define HDBSSBR_SZ(br)		(((br) & HDBSSBR_EL2_SZ_MASK) >> HDBSSBR_EL2_SZ_SHIFT)
+-- 
+2.43.0
+

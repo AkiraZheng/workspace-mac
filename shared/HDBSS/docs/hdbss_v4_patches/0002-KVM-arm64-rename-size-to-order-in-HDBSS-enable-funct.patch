@@ -1,0 +1,71 @@
+From 965248a5b4d365fd7175be732a19478e931ccd2a Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Fri, 8 May 2026 22:26:36 +0800
+Subject: [PATCH 2/5] KVM: arm64: rename size to order in HDBSS enable function
+
+Rename the local variable 'size' to 'order' in kvm_cap_arm_enable_hdbss()
+to avoid confusion, since the value is used as an order parameter for
+alloc_pages() rather than a byte size.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/arm.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 0e7b633e3d05..a0ba58940aef 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -163,7 +163,7 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 	unsigned long i;
+ 	struct kvm_vcpu *vcpu;
+ 	struct page *hdbss_pg;
+-	int size = cap->args[0];
++	int order = cap->args[0];
+ 
+ 	if (!system_supports_hdbss()) {
+ 		kvm_err("This system does not support HDBSS!\n");
+@@ -175,25 +175,25 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 		return -EINVAL;
+ 	}
+ 
+-	if (size < 0 || size > HDBSS_MAX_SIZE) {
+-		kvm_err("Invalid HDBSS buffer size: %d!\n", size);
++	if (order < 0 || order > HDBSS_MAX_SIZE) {
++		kvm_err("Invalid HDBSS buffer order: %d!\n", order);
+ 		return -EINVAL;
+ 	}
+ 
+-	/* Enable the HDBSS feature if size > 0, otherwise disable it. */
+-	if (size) {
++	/* Enable the HDBSS feature if order > 0, otherwise disable it. */
++	if (order) {
+ 		kvm->enable_hdbss = true;
+ 		kvm->arch.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS;
+ 
+ 		kvm_for_each_vcpu(i, vcpu, kvm) {
+-			hdbss_pg = alloc_pages(GFP_KERNEL, size);
++			hdbss_pg = alloc_pages(GFP_KERNEL, order);
+ 			if (!hdbss_pg) {
+ 				kvm_err("Alloc HDBSS buffer failed!\n");
+ 				kvm_clear_hdbss(kvm);
+ 				return -EINVAL;
+ 			}
+ 
+-			vcpu->arch.hdbss.br_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), size);
++			vcpu->arch.hdbss.br_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), order);
+ 			vcpu->arch.hdbss.prod_el2 = 0;
+ 
+ 			/*
+@@ -204,7 +204,7 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 			kvm_vcpu_kick(vcpu);
+ 		}
+ 
+-		kvm_info("Enable HDBSS success, HDBSS buffer size: %d\n", size);
++		kvm_info("Enable HDBSS success, HDBSS buffer order: %d\n", order);
+ 	} else if (kvm->enable_hdbss) {
+ 		kvm_clear_hdbss(kvm);
+ 		kvm_info("Disable HDBSS success\n");
+-- 
+2.43.0
+
