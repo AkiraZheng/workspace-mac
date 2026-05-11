@@ -17,7 +17,9 @@
       "Bash(bash \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/install.sh\")",
       "Bash(sed -n '/@preamble-start/,/@preamble-end/p' \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/SKILL.md\")",
       "Bash(sed -n '/@preamble-start/,/@preamble-end/p' \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/revert-patchset-SKILL.md\")",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Read(//root/.claude/skills/merge-patchset/**)",
+      "Read(//root/.claude/skills/revert-patchset/**)"
     ]
   }
 }

@@ -1,6 +1,6 @@
 # revert-patchset (generic 自包含版本)
 
-> 自动生成于 2026-05-11 03:40，内联 karpathy-guidelines 行为准则
+> 自动生成于 2026-05-11 10:13，内联 karpathy-guidelines 行为准则
 > 适用于没有 skill 系统的 AI 编码平台
 
 ---
@@ -88,8 +88,9 @@ allowed-tools: Bash(git:*), Bash(make:*), Bash(bash:*), Bash(mkdir:*), Bash(grep
 2. **逐个 commit**: 每个 revert 单独 git commit
 3. **逆序执行**: 从最新到最旧，保持依赖关系正确
 4. **遇错即停**: 当前 revert 失败时停止，报告用户，不跳到下一个
-5. **保留分支**: revert 分支保留不删除，不在主干分支上操作
-6. **中文输出**: 所有思考、解释、输出使用中文
+5. **只取改动行**: revert 时只应用反向修改的实际代码行。diff 中不带 `+`/`-` 前缀的上下文行仅用于定位，**禁止写入源码**
+6. **保留分支**: revert 分支保留不删除，不在主干分支上操作
+7. **中文输出**: 所有思考、解释、输出使用中文
 
 ## 参数
 
@@ -152,7 +153,7 @@ git checkout -b <branch_name>
 | ② | 解冲突 | 读取冲突文件 → 分析两边差异 → 优先保留 revert 后的内容 → `git add` + `git commit` | 继续下一个 | 进入③ |
 | ③ | `git revert --abort` + 手动 | `git revert --abort` → 手动 `git diff <hash>^..<hash> \| git apply -R` | `git add .` + `git commit` | **报告用户** |
 
-**冲突解决规则**: 优先保留 revert 后的内容（即去掉被 revert commit 引入的修改）。
+**冲突解决规则**: 优先保留 revert 后的内容（即去掉被 revert commit 引入的修改）。**关键：只取 patch 中以 `+`/`-` 开头的行，不以 `+`/`-` 开头的上下文行（diff 中不带前缀的行）不得写入源码文件。**
 
 **检测冲突文件**:
 ```bash
@@ -220,3 +221,4 @@ revert 及残留检查完成后在源码目录生成 `.revert-diff.md`:
 - 不按逆序 revert（从旧到新可能导致依赖错乱）
 - 不确认 commit 列表就直接执行
 - 遇到问题不询问用户自行决定
+- 把 patch diff 中的上下文行（不带 `+`/`-` 前缀的行）写入源码文件

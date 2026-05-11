@@ -57,7 +57,8 @@ grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpath
 2. **逐个 commit**: 每个 patch 单独 git commit
 3. **遇错即停**: 当前 patch 失败时停止，报告用户，不跳到下一个
 4. **保留分支**: 合入分支保留不删除，不在主干分支上操作
-5. **中文输出**: 所有思考、解释、输出使用中文
+5. **只取改动行**: 合入 patch 时只应用以 `+`/`-` 开头的实际修改行。diff 中不带前缀的上下文行仅用于定位，**禁止写入源码**
+6. **中文输出**: 所有思考、解释、输出使用中文
 
 ## 参数
 
@@ -115,7 +116,7 @@ git checkout -b <branch_name>
 | ③ | `git apply --3way` | `git apply --3way <file.patch>` | `git add .` + `git commit` | 进入④ |
 | ④ | `git apply` | `git apply <file.patch>` | `git add .` + `git commit` | **报告用户** |
 
-**冲突解决规则**: 优先保留 patchset 的修改内容。
+**冲突解决规则**: 优先保留 patchset 的修改内容。**关键：只取 patch 中以 `+`/`-` 开头的行，不以 `+`/`-` 开头的上下文行（diff 中不带前缀的行）不得写入源码文件。**
 
 **检测冲突文件**:
 ```bash
@@ -173,3 +174,4 @@ test -f build.sh && bash build.sh || make -j$(nproc)
 - 多个 patch 合并为一个 commit
 - 写 Python 脚本来替代直接的 bash 调用
 - 遇到问题不询问用户自行决定
+- 把 patch diff 中的上下文行（不带 `+`/`-` 前缀的行）写入源码文件
