@@ -1,0 +1,643 @@
+From 773c717c6d79dba0912a048ea16684b5eb90738c Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 04:12:28 +0800
+Subject: [PATCH 2/2] Revert "!15754 v3  Support the FEAT_HDBSS introduced in
+ Armv9.5"
+
+This reverts commit fe4fa748119154562e90d7ffb1fdb775ee084f99, reversing
+changes made to a8f711b494f352fee7d319f77d87d63916854c6e.
+---
+ arch/arm64/Kconfig                     |  12 ---
+ arch/arm64/configs/openeuler_defconfig |   6 --
+ arch/arm64/include/asm/cpufeature.h    |  14 ----
+ arch/arm64/include/asm/esr.h           |   2 -
+ arch/arm64/include/asm/kvm_arm.h       |   1 -
+ arch/arm64/include/asm/kvm_host.h      |   8 --
+ arch/arm64/include/asm/kvm_mmu.h       |  14 ----
+ arch/arm64/include/asm/kvm_pgtable.h   |   1 -
+ arch/arm64/include/asm/sysreg.h        |  14 ----
+ arch/arm64/kvm/arm.c                   | 104 ++++---------------------
+ arch/arm64/kvm/handle_exit.c           |  50 ------------
+ arch/arm64/kvm/hyp/pgtable.c           |  12 ---
+ arch/arm64/kvm/hyp/vhe/switch.c        |   3 -
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c     |   4 -
+ arch/arm64/kvm/mmu.c                   |  17 +---
+ arch/arm64/kvm/reset.c                 |  14 +---
+ arch/arm64/tools/sysreg                |  28 -------
+ include/linux/kvm_host.h               |   3 -
+ include/uapi/linux/kvm.h               |   2 -
+ tools/include/uapi/linux/kvm.h         |   2 -
+ 20 files changed, 21 insertions(+), 290 deletions(-)
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index 74e4639776de..4974c629221b 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -2423,18 +2423,6 @@ config ARM64_HAFT
+ 
+ endmenu # "ARMv8.8 architectural features"
+ 
+-menu "ARMv9.5 architectural features"
+-
+-config ARM64_HDBSS
+-	bool "Enable support for Hardware Dirty state tracking Structure (HDBSS)"
+-	default y
+-	help
+-	  Hardware Dirty state tracking Structure(HDBSS) enhances tracking
+-	  translation table descriptors’ dirty state to reduce the cost of
+-	  surveying for dirtied granules.
+-
+-endmenu # "ARMv9.5 architectural features"
+-
+ config ARM64_HISI_IPIV
+ 	bool "Enable support for IPIV"
+ 	default y
+diff --git a/arch/arm64/configs/openeuler_defconfig b/arch/arm64/configs/openeuler_defconfig
+index 27a273a8db79..d9a9e2732a30 100644
+--- a/arch/arm64/configs/openeuler_defconfig
++++ b/arch/arm64/configs/openeuler_defconfig
+@@ -595,12 +595,6 @@ CONFIG_ARM64_EPAN=y
+ CONFIG_ARM64_NMI=y
+ # end of ARMv8.8 architectural features
+ 
+-#
+-# ARMv9.5 architectural features
+-#
+-CONFIG_ARM64_HDBSS=y
+-# end of ARMv9.5 architectural features
+-
+ CONFIG_ARM64_HISI_IPIV=y
+ CONFIG_ARM64_SVE=y
+ CONFIG_ARM64_SME=y
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index 6f73a51d2422..856c40ee00cf 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -767,20 +767,6 @@ static __always_inline bool system_supports_fpsimd(void)
+ 	return !cpus_have_const_cap(ARM64_HAS_NO_FPSIMD);
+ }
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-static inline bool system_supports_hdbss(void)
+-{
+-	u64 mmfr1;
+-	u32 val;
+-
+-	mmfr1 =	read_sanitised_ftr_reg(SYS_ID_AA64MMFR1_EL1);
+-	val = cpuid_feature_extract_unsigned_field(mmfr1,
+-						ID_AA64MMFR1_EL1_HAFDBS_SHIFT);
+-
+-	return val == ID_AA64MMFR1_EL1_HAFDBS_HDBSS;
+-}
+-#endif
+-
+ static inline bool system_uses_hw_pan(void)
+ {
+ 	return IS_ENABLED(CONFIG_ARM64_PAN) &&
+diff --git a/arch/arm64/include/asm/esr.h b/arch/arm64/include/asm/esr.h
+index cf3cfc9f1688..42c3c3984e5e 100644
+--- a/arch/arm64/include/asm/esr.h
++++ b/arch/arm64/include/asm/esr.h
+@@ -148,8 +148,6 @@
+ #define ESR_ELx_CM 		(UL(1) << ESR_ELx_CM_SHIFT)
+ 
+ /* ISS2 field definitions for Data Aborts */
+-#define ESR_ELx_HDBSSF_SHIFT	(11)
+-#define ESR_ELx_HDBSSF		(UL(1) << ESR_ELx_HDBSSF_SHIFT)
+ #define ESR_ELx_TnD_SHIFT	(10)
+ #define ESR_ELx_TnD 		(UL(1) << ESR_ELx_TnD_SHIFT)
+ #define ESR_ELx_TagAccess_SHIFT	(9)
+diff --git a/arch/arm64/include/asm/kvm_arm.h b/arch/arm64/include/asm/kvm_arm.h
+index 6f4c9b1b4e9d..db78c577579e 100644
+--- a/arch/arm64/include/asm/kvm_arm.h
++++ b/arch/arm64/include/asm/kvm_arm.h
+@@ -128,7 +128,6 @@
+ 			 TCR_EL2_ORGN0_MASK | TCR_EL2_IRGN0_MASK | TCR_EL2_T0SZ_MASK)
+ 
+ /* VTCR_EL2 Registers bits */
+-#define VTCR_EL2_HDBSS		(1UL << 45)
+ #define VTCR_EL2_RES1		(1U << 31)
+ #define VTCR_EL2_HD		(1 << 22)
+ #define VTCR_EL2_HA		(1 << 21)
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 6160d5704d07..f19f168f4dc0 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -697,14 +697,6 @@ struct kvm_vcpu_arch {
+ 				} pvtimer_status;
+ #endif
+ 			})
+-
+-#ifdef CONFIG_ARM64_HDBSS
+-	/* HDBSS registers info */
+-	KABI_EXTEND(struct {
+-		u64 br_el2;
+-		u64 prod_el2;
+-	} hdbss)
+-#endif
+ };
+ 
+ /*
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index 92e20990f772..3271e33971b2 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -312,20 +312,6 @@ static __always_inline void __load_stage2(struct kvm_s2_mmu *mmu,
+ 	asm(ALTERNATIVE("nop", "isb", ARM64_WORKAROUND_SPECULATIVE_AT));
+ }
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-static __always_inline void __load_hdbss(struct kvm_vcpu *vcpu)
+-{
+-	if (!vcpu->kvm->enable_hdbss)
+-		return;
+-
+-	write_sysreg_s(vcpu->arch.hdbss.br_el2, SYS_HDBSSBR_EL2);
+-	write_sysreg_s(vcpu->arch.hdbss.prod_el2, SYS_HDBSSPROD_EL2);
+-
+-	dsb(sy);
+-	isb();
+-}
+-#endif
+-
+ static inline struct kvm *kvm_s2_mmu_to_kvm(struct kvm_s2_mmu *mmu)
+ {
+ 	return container_of(mmu->arch, struct kvm, arch);
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 5a640122e241..5ac7893d760b 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -189,7 +189,6 @@ enum kvm_pgtable_prot {
+ 	KVM_PGTABLE_PROT_R			= BIT(2),
+ 
+ 	KVM_PGTABLE_PROT_DEVICE			= BIT(3),
+-	KVM_PGTABLE_PROT_DBM			= BIT(4),
+ 
+ 	KVM_PGTABLE_PROT_SW0			= BIT(55),
+ 	KVM_PGTABLE_PROT_SW1			= BIT(56),
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 0d36f20ecd33..435634a703c6 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1031,20 +1031,6 @@
+ 
+ #define PIRx_ELx_PERM(idx, perm)	((perm) << ((idx) * 4))
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-/*
+- * Definitions for the HDBSS feature
+- */
+-#define HDBSS_MAX_SIZE		HDBSSBR_EL2_SZ_2MB
+-
+-#define HDBSSBR_EL2(baddr, sz)	(((baddr) & GENMASK(55, 12 + sz)) | \
+-				 ((sz) << HDBSSBR_EL2_SZ_SHIFT))
+-#define HDBSSBR_BADDR(br)	((br) & GENMASK(55, (12 + HDBSSBR_SZ(br))))
+-#define HDBSSBR_SZ(br)		(((br) & HDBSSBR_EL2_SZ_MASK) >> HDBSSBR_EL2_SZ_SHIFT)
+-
+-#define HDBSSPROD_IDX(prod)	(((prod) & HDBSSPROD_EL2_INDEX_MASK) >> HDBSSPROD_EL2_INDEX_SHIFT)
+-#endif
+-
+ #define ARM64_FEATURE_FIELD_BITS	4
+ 
+ /* Defined for compatibility only, do not add new users. */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 45ebcdedbb40..a64b5fa60448 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -142,72 +142,6 @@ int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
+ bool enable_vmovp_elision __read_mostly;
+ module_param(enable_vmovp_elision, bool, 0644);
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+-				    struct kvm_enable_cap *cap)
+-{
+-	unsigned long i;
+-	struct kvm_vcpu *vcpu;
+-	struct page *hdbss_pg;
+-	int size = cap->args[0];
+-
+-	if (!system_supports_hdbss()) {
+-		kvm_err("This system does not support HDBSS!\n");
+-		return -EINVAL;
+-	}
+-
+-	if (size < 0 || size > HDBSS_MAX_SIZE) {
+-		kvm_err("Invalid HDBSS buffer size: %d!\n", size);
+-		return -EINVAL;
+-	}
+-
+-	/* Enable the HDBSS feature if size > 0, otherwise disable it. */
+-	if (size) {
+-		kvm->enable_hdbss = true;
+-		kvm->arch.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS;
+-
+-		kvm_for_each_vcpu(i, vcpu, kvm) {
+-			hdbss_pg = alloc_pages(GFP_KERNEL, size);
+-			if (!hdbss_pg) {
+-				kvm_err("Alloc HDBSS buffer failed!\n");
+-				return -EINVAL;
+-			}
+-
+-			vcpu->arch.hdbss.br_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), size);
+-			vcpu->arch.hdbss.prod_el2 = 0;
+-
+-			/*
+-			 * We should kick vcpus out of guest mode here to
+-			 * load new vtcr value to vtcr_el2 register when
+-			 * re-enter guest mode.
+-			 */
+-			kvm_vcpu_kick(vcpu);
+-		}
+-
+-		kvm_info("Enable HDBSS success, HDBSS buffer size: %d\n", size);
+-	} else if (kvm->enable_hdbss) {
+-		kvm->arch.vtcr &= ~(VTCR_EL2_HD | VTCR_EL2_HDBSS);
+-
+-		kvm_for_each_vcpu(i, vcpu, kvm) {
+-			/* Kick vcpus to flush hdbss buffer. */
+-			kvm_vcpu_kick(vcpu);
+-
+-			hdbss_pg = phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2));
+-			if (hdbss_pg)
+-				__free_pages(hdbss_pg, HDBSSBR_SZ(vcpu->arch.hdbss.br_el2));
+-
+-			vcpu->arch.hdbss.br_el2 = 0;
+-			vcpu->arch.hdbss.prod_el2 = 0;
+-		}
+-
+-		kvm->enable_hdbss = false;
+-		kvm_info("Disable HDBSS success\n");
+-	}
+-
+-	return 0;
+-}
+-#endif
+-
+ #ifdef CONFIG_ARM64_HISI_IPIV
+ static int kvm_hisi_ipiv_enable_cap(struct kvm *kvm, struct kvm_enable_cap *cap)
+ {
+@@ -271,11 +205,6 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+ 		}
+ 		mutex_unlock(&kvm->slots_lock);
+ 		break;
+-#ifdef CONFIG_ARM64_HDBSS
+-	case KVM_CAP_ARM_HW_DIRTY_STATE_TRACK:
+-		r = kvm_cap_arm_enable_hdbss(kvm, cap);
+-		break;
+-#endif
+ #ifdef CONFIG_ARM64_HISI_IPIV
+ 	case KVM_CAP_ARM_HISI_IPIV:
+ 		r = kvm_hisi_ipiv_enable_cap(kvm, cap);
+@@ -286,6 +215,13 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+ 		r = kvm_realm_enable_cap(kvm, cap);
+ 		mutex_unlock(&kvm->lock);
+ 		break;
++#ifdef CONFIG_HISI_VIRTCCA_HOST
++	case KVM_CAP_ARM_TMM:
++		r = 0;
++		if (static_branch_unlikely(&virtcca_cvm_is_available))
++			r = kvm_cvm_enable_cap(kvm, cap);
++		break;
++#endif
+ 	default:
+ 		r = -EINVAL;
+ 		break;
+@@ -545,11 +481,6 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+ 		r = sdev_enable;
+ 		break;
+ #endif
+-#ifdef CONFIG_ARM64_HDBSS
+-	case KVM_CAP_ARM_HW_DIRTY_STATE_TRACK:
+-		r = system_supports_hdbss();
+-		break;
+-#endif
+ #ifdef CONFIG_ARM64_HISI_IPIV
+ 	case KVM_CAP_ARM_HISI_IPIV:
+ 		if (static_branch_unlikely(&ipiv_enable))
+@@ -569,6 +500,15 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+ 	case KVM_CAP_ARM_RME:
+ 		r = static_key_enabled(&kvm_rme_is_available);
+ 		break;
++#ifdef CONFIG_HISI_VIRTCCA_HOST
++	case KVM_CAP_ARM_TMM:
++		if (!is_armv8_4_sel2_present()) {
++			r = -ENXIO;
++			break;
++		}
++		r = static_key_enabled(&virtcca_cvm_is_available);
++		break;
++#endif
+ 	default:
+ 		r = 0;
+ 	}
+@@ -2016,19 +1956,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
+ 
+ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ {
+-#ifdef CONFIG_ARM64_HDBSS
+-	/*
+-	 * Flush all CPUs' dirty log buffers to the dirty_bitmap.  Called
+-	 * before reporting dirty_bitmap to userspace.  KVM flushes the buffers
+-	 * on all VM-Exits, thus we only need to kick running vCPUs to force a
+-	 * VM-Exit.
+-	 */
+-	struct kvm_vcpu *vcpu;
+-	unsigned long i;
+ 
+-	kvm_for_each_vcpu(i, vcpu, kvm)
+-		kvm_vcpu_kick(vcpu);
+-#endif
+ }
+ 
+ static int kvm_vm_ioctl_set_device_addr(struct kvm *kvm,
+diff --git a/arch/arm64/kvm/handle_exit.c b/arch/arm64/kvm/handle_exit.c
+index 6919c3858193..90959b8b6228 100644
+--- a/arch/arm64/kvm/handle_exit.c
++++ b/arch/arm64/kvm/handle_exit.c
+@@ -292,52 +292,6 @@ static exit_handle_fn kvm_get_exit_handler(struct kvm_vcpu *vcpu)
+ 	return arm_exit_handlers[esr_ec];
+ }
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-#define HDBSS_ENTRY_VALID_SHIFT 0
+-#define HDBSS_ENTRY_VALID_MASK (1UL << HDBSS_ENTRY_VALID_SHIFT)
+-#define HDBSS_ENTRY_IPA_SHIFT 12
+-#define HDBSS_ENTRY_IPA_MASK GENMASK_ULL(55, HDBSS_ENTRY_IPA_SHIFT)
+-
+-static void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+-{
+-	int idx, curr_idx;
+-	u64 *hdbss_buf;
+-
+-	if (!vcpu->kvm->enable_hdbss)
+-		return;
+-
+-	dsb(sy);
+-	isb();
+-	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
+-
+-	/* Do nothing if HDBSS buffer is empty or br_el2 is NULL */
+-	if (curr_idx == 0 || vcpu->arch.hdbss.br_el2 == 0)
+-		return;
+-
+-	hdbss_buf = page_address(phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2)));
+-	if (!hdbss_buf) {
+-		kvm_err("Enter flush hdbss buffer with buffer == NULL!");
+-		return;
+-	}
+-
+-	for (idx = 0; idx < curr_idx; idx++) {
+-		u64 gpa;
+-
+-		gpa = hdbss_buf[idx];
+-		if (!(gpa & HDBSS_ENTRY_VALID_MASK))
+-			continue;
+-
+-		gpa = gpa & HDBSS_ENTRY_IPA_MASK;
+-		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
+-	}
+-
+-	/* reset HDBSS index */
+-	write_sysreg_s(0, SYS_HDBSSPROD_EL2);
+-	dsb(sy);
+-	isb();
+-}
+-#endif
+-
+ /*
+  * We may be single-stepping an emulated instruction. If the emulation
+  * has been completed in the kernel, we can return to userspace with a
+@@ -373,10 +327,6 @@ int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
+ {
+ 	struct kvm_run *run = vcpu->run;
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (vcpu->kvm->enable_hdbss)
+-		kvm_flush_hdbss_buffer(vcpu);
+-#endif
+ 	if (ARM_SERROR_PENDING(exception_index)) {
+ 		/*
+ 		 * The SError is handled by handle_exit_early(). If the guest
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index e6ec72f49e11..2fdc69bb3055 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -44,8 +44,6 @@
+ 
+ #define KVM_PTE_LEAF_ATTR_HI_S2_XN	BIT(54)
+ 
+-#define KVM_PTE_LEAF_ATTR_HI_S2_DBM	BIT(51)
+-
+ #define KVM_PTE_LEAF_ATTR_HI_S1_GP	BIT(50)
+ 
+ #define KVM_PTE_LEAF_ATTR_S2_PERMS	(KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R | \
+@@ -705,11 +703,6 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 	if (prot & KVM_PGTABLE_PROT_W)
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (prot & KVM_PGTABLE_PROT_DBM)
+-		attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+-#endif
+-
+ 	attr |= FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S2_SH, sh);
+ 	attr |= KVM_PTE_LEAF_ATTR_LO_S2_AF;
+ 	attr |= prot & KVM_PTE_LEAF_ATTR_HI_SW;
+@@ -1314,11 +1307,6 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 	if (prot & KVM_PGTABLE_PROT_W)
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (prot & KVM_PGTABLE_PROT_DBM)
+-		set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+-#endif
+-
+ 	if (prot & KVM_PGTABLE_PROT_X)
+ 		clr |= KVM_PTE_LEAF_ATTR_HI_S2_XN;
+ 
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index c52b9b16fc28..b8ce5d6bda2c 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -224,9 +224,6 @@ static int __kvm_vcpu_run_vhe(struct kvm_vcpu *vcpu)
+ 	 * __activate_traps clear HCR_EL2.TGE (among other things).
+ 	 */
+ 	__load_stage2(vcpu->arch.hw_mmu, vcpu->arch.hw_mmu->arch);
+-#ifdef CONFIG_ARM64_HDBSS
+-	__load_hdbss(vcpu);
+-#endif
+ 	__activate_traps(vcpu);
+ 
+ 	__kvm_adjust_pc(vcpu);
+diff --git a/arch/arm64/kvm/hyp/vhe/sysreg-sr.c b/arch/arm64/kvm/hyp/vhe/sysreg-sr.c
+index 6af9196784a1..a633267a476e 100644
+--- a/arch/arm64/kvm/hyp/vhe/sysreg-sr.c
++++ b/arch/arm64/kvm/hyp/vhe/sysreg-sr.c
+@@ -92,10 +92,6 @@ void kvm_vcpu_load_sysregs_vhe(struct kvm_vcpu *vcpu)
+ 	__sysreg_restore_el1_state(guest_ctxt, ctxt_midr_el1(guest_ctxt));
+ 	__mpam_guest_load();
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	__load_hdbss(vcpu);
+-#endif
+-
+ 	vcpu_set_flag(vcpu, SYSREGS_ON_CPU);
+ 
+ 	activate_traps_vhe_load(vcpu);
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index fbc62b27adc8..2b49b8e9ce9a 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1678,11 +1678,6 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (writable)
+ 		prot |= KVM_PGTABLE_PROT_W;
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (kvm->enable_hdbss && logging_active)
+-		prot |= KVM_PGTABLE_PROT_DBM;
+-#endif
+-
+ 	if (exec_fault)
+ 		prot |= KVM_PGTABLE_PROT_X;
+ 
+@@ -1757,7 +1752,7 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+ 	unsigned long fault_status;
+ 	phys_addr_t fault_ipa;
+ 	struct kvm_memory_slot *memslot;
+-	unsigned long hva, iss2;
++	unsigned long hva;
+ 	bool is_iabt, write_fault, writable;
+ 	gfn_t gfn;
+ 	int ret, idx;
+@@ -1767,16 +1762,6 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+ 	fault_ipa = kvm_vcpu_get_fault_ipa(vcpu);
+ 	is_iabt = kvm_vcpu_trap_is_iabt(vcpu);
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	/*
+-	 * HDBSS buffer already flushed when enter handle_trap_exceptions().
+-	 * Nothing to do here.
+-	 */
+-	iss2 = ESR_ELx_ISS2(kvm_vcpu_get_esr(vcpu));
+-	if (fault_status == ESR_ELx_FSC_PERM && (iss2 & ESR_ELx_HDBSSF))
+-		return 1;
+-#endif
+-
+ 	if (fault_status == ESR_ELx_FSC_FAULT) {
+ 		/* Beyond sanitised PARange (which is the IPA limit) */
+ 		if (fault_ipa >= BIT_ULL(get_kvm_ipa_limit())) {
+diff --git a/arch/arm64/kvm/reset.c b/arch/arm64/kvm/reset.c
+index 905f5ef872b0..7bdf5c825c52 100644
+--- a/arch/arm64/kvm/reset.c
++++ b/arch/arm64/kvm/reset.c
+@@ -174,7 +174,6 @@ bool kvm_arm_vcpu_is_finalized(struct kvm_vcpu *vcpu)
+ void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu)
+ {
+ 	void *sve_state = vcpu->arch.sve_state;
+-	struct page *hdbss_pg;
+ 
+ 	kvm_vcpu_unshare_task_fp(vcpu);
+ 	kvm_unshare_hyp(vcpu, vcpu + 1);
+@@ -182,15 +181,10 @@ void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu)
+ 		kvm_unshare_hyp(sve_state, sve_state + vcpu_sve_state_size(vcpu));
+ 	kfree(sve_state);
+ 	kfree(vcpu->arch.ccsidr);
+-	kvm_destroy_rec(vcpu);
+-	kfree(vcpu->arch.rec);
+-
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (vcpu->arch.hdbss.br_el2) {
+-		hdbss_pg = phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2));
+-		if (hdbss_pg)
+-			__free_pages(hdbss_pg, HDBSSBR_SZ(vcpu->arch.hdbss.br_el2));
+-	}
++#ifdef CONFIG_HISI_VIRTCCA_HOST
++	if (vcpu_is_tec(vcpu))
++		kvm_destroy_tec(vcpu);
++#endif
+ #endif
+ }
+ 
+diff --git a/arch/arm64/tools/sysreg b/arch/arm64/tools/sysreg
+index 963177485fd8..baded26ab7d7 100644
+--- a/arch/arm64/tools/sysreg
++++ b/arch/arm64/tools/sysreg
+@@ -2477,34 +2477,6 @@ Sysreg	SMCR_EL2	3	4	1	2	6
+ Fields	SMCR_ELx
+ EndSysreg
+ 
+-Sysreg	HDBSSBR_EL2	3	4	2	3	2
+-Res0	63:56
+-Field	55:12	BADDR
+-Res0	11:4
+-Enum	3:0	SZ
+-	0b0001	8KB
+-	0b0010	16KB
+-	0b0011	32KB
+-	0b0100	64KB
+-	0b0101	128KB
+-	0b0110	256KB
+-	0b0111	512KB
+-	0b1000	1MB
+-	0b1001	2MB
+-EndEnum
+-EndSysreg
+-
+-Sysreg	HDBSSPROD_EL2	3	4	2	3	3
+-Res0	63:32
+-Enum	31:26	FSC
+-	0b000000	OK
+-	0b010000	ExternalAbort
+-	0b101000	GPF
+-EndEnum
+-Res0	25:19
+-Field	18:0	INDEX
+-EndSysreg
+-
+ Sysreg	DACR32_EL2	3	4	3	0	0
+ Res0	63:32
+ Field	31:30	D15
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 4cea2db862a6..ef266055f911 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -859,9 +859,6 @@ struct kvm {
+ 	struct notifier_block pm_notifier;
+ #endif
+ 	char stats_id[KVM_STATS_NAME_SIZE];
+-#ifdef CONFIG_ARM64_HDBSS
+-	KABI_EXTEND(bool enable_hdbss)
+-#endif
+ };
+ 
+ #define kvm_err(fmt, ...) \
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index aab5455bb645..d7e67a63decf 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -1244,8 +1244,6 @@ struct kvm_ppc_resize_hpt {
+ /* support request to inject secret to CSV3 guest */
+ #define KVM_CAP_HYGON_COCO_EXT_CSV3_INJ_SECRET    (1 << 2)
+ 
+-#define KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 502
+-
+ #define KVM_CAP_ARM_HISI_IPIV 798
+ #define KVM_CAP_ARM_VIRT_MSI_BYPASS 799
+ #define KVM_CAP_ARM_HISI_PVTIMER_STATUS 800
+diff --git a/tools/include/uapi/linux/kvm.h b/tools/include/uapi/linux/kvm.h
+index eedd0be8482b..d347c8a0bf73 100644
+--- a/tools/include/uapi/linux/kvm.h
++++ b/tools/include/uapi/linux/kvm.h
+@@ -1190,8 +1190,6 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES 229
+ #define KVM_CAP_ARM_WRITABLE_IMP_ID_REGS 239
+ 
+-#define KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 502
+-
+ #ifdef KVM_CAP_IRQ_ROUTING
+ 
+ struct kvm_irq_routing_irqchip {
+-- 
+2.43.0
+
