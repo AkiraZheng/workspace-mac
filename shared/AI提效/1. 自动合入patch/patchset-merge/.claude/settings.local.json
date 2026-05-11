@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:opencode.ai)",
+      "WebFetch(domain:apifox.com)",
+      "Bash(bash -n install.sh)",
+      "Bash(bash install.sh)",
+      "Bash(grep *)",
+      "Bash(bash -n \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/install.sh\")",
+      "Bash(awk 'BEGIN { n=0 } /^---$/ { n++; next } n>=2' \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/karpathy-guidelines-SKILL.md\")",
+      "Bash(command -v pip)",
+      "Bash(command -v pip3)",
+      "Bash(python3 -c \"import sysconfig; print\\(sysconfig.get_preferred_scheme\\('user'\\)\\)\")",
+      "Bash(python3 -c 'import sysconfig; print\\(sysconfig.get_path\\(\"stdlib\"\\)\\)')",
+      "Bash([ -f \"$\\(python3 -c 'import sysconfig; print\\(sysconfig.get_path\\(\"stdlib\"\\)\\)' 2>/dev/null\\)/../EXTERNALLY-MANAGED\" ])",
+      "Bash(bash \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/install.sh\")",
+      "Bash(sed -n '/@preamble-start/,/@preamble-end/p' \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/SKILL.md\")",
+      "Bash(sed -n '/@preamble-start/,/@preamble-end/p' \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/revert-patchset-SKILL.md\")",
+      "Read(//tmp/**)"
+    ]
+  }
+}

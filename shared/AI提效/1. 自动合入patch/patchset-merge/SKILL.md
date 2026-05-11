@@ -1,6 +1,7 @@
 ---
 name: merge-patchset
 description: Use when the user provides a lore.kernel.org patch URL, runs /merge-patchset, or asks to merge/apply/合入 a Linux kernel patchset into a source tree. Handles downloading patchsets with b4, applying patches one-by-one with escalating strategies, conflict resolution, compile verification, and diff reporting.
+compatibility: claude-code, opencode
 allowed-tools: Bash(b4:*), Bash(pip install b4), Bash(git:*), Bash(make:*), Bash(bash:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:*), Bash(cat:*), Bash(ls:*), Bash(find:*), Bash(rm:*), Bash(echo:*), Write(*)
 ---
 
@@ -8,49 +9,47 @@ allowed-tools: Bash(b4:*), Bash(pip install b4), Bash(git:*), Bash(make:*), Bash
 
 从 lore.kernel.org 下载 patchset，逐个合入到源码仓库，遇问题在对话中交互决策。
 
+<!-- @preamble-start -->
 ## 前置技能加载（必须）
 
-**开始任何合入工作前，验证并加载以下技能。不通过则不继续。**
+**开始任何合入工作前，验证并加载前置技能。不通过则不继续。**
 
-### 验证步骤
+按当前运行的平台执行对应步骤：
 
-先用 bash 检查两个前置技能是否已安装：
+### Claude Code
+
+验证 superpowers 插件和 karpathy-guidelines skill 已安装：
 
 ```bash
-# 验证 superpowers 插件
 test -d ~/.claude/plugins/cache/claude-plugins-official/superpowers && echo "✓ superpowers OK" || echo "✗ superpowers MISSING"
-
-# 验证 karpathy-guidelines skill
-test -f ~/.claude/skills/karpathy-guidelines/SKILL.md || test -f ~/.agents/skills/karpathy-guidelines/SKILL.md && echo "✓ karpathy-guidelines OK" || echo "✗ karpathy-guidelines MISSING"
+test -f ~/.claude/skills/karpathy-guidelines/SKILL.md && echo "✓ karpathy-guidelines OK" || echo "✗ karpathy-guidelines MISSING"
 ```
 
-### 缺少时安装
+有 "MISSING" 时：
+- 缺少 superpowers: 运行 `claude plugins install superpowers@claude-plugins-official`，安装后重启
+- 缺少 karpathy-guidelines: 运行 `./install.sh` 重新部署
 
-如果上面的检查有 "MISSING"，不要继续。按以下指引帮用户安装：
-
-**缺少 superpowers**:
-```bash
-claude plugins install superpowers@claude-plugins-official
-```
-安装后重启 Claude Code。
-
-如果 `claude` CLI 不可用，告诉用户手动在 Claude Code 中运行 `/plugin install superpowers@claude-plugins-official`。
-
-**缺少 karpathy-guidelines**:
-本项目已自带此 skill。告诉用户运行：
-```bash
-mkdir -p ~/.claude/skills/karpathy-guidelines && cp <项目目录>/karpathy-guidelines-SKILL.md ~/.claude/skills/karpathy-guidelines/SKILL.md
-```
-或重新运行 `./install.sh`。
-
-### 加载
-
-两个技能都验证存在后，用 Skill 工具加载它们：
-
+验证通过后，用 Skill 工具加载：
 1. `superpowers:using-superpowers` — 确保正确使用 skill 系统，遵循指令优先级
 2. `karpathy-guidelines` — 减少过度设计、避免猜测、面向数据做决策
 
-加载完成后，再继续执行下面的工作流。**缺少任何一个都不能继续。**
+### OpenCode
+
+karpathy-guidelines 由 OpenCode 自动发现并加载，无需手动验证。确保未被 opencode.json 的 `permission.skill` deny 即可：
+
+```bash
+grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpathy-guidelines is denied, check opencode.json" || echo "✓ OK"
+```
+
+确认后直接继续，OpenCode 原生 skill 发现机制会自动加载 karpathy-guidelines。
+
+### 其他平台
+
+本文件如果是 install.sh 生成的降级版本，karpathy-guidelines 行为准则已内联在文件头部。如你看到此段但头部没有内联准则，说明文件部署有误，请重新运行 `./install.sh`。
+
+**缺少前置技能或验证不通过则不能继续。**
+
+<!-- @preamble-end -->
 
 ## 核心约束
 

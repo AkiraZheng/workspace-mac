@@ -1,84 +1,149 @@
 #!/bin/bash
-# Patchset Merge Skill 一键安装脚本
-# 每次运行都会更新所有 skill 到最新版本
-set -e
+# Patchset Merge Skill 一键安装脚本（多平台支持）
+# 自动检测 Claude Code / OpenCode / Gemini CLI 并部署到对应路径
+# 同时生成 Copilot / Cursor / 通用 Markdown 降级版本到 dist/
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "=== Patchset Merge Skill 安装 ==="
+echo "=== Patchset Merge Skill 安装（多平台）==="
 
-# 1. 检查并安装 b4
-if command -v b4 &> /dev/null; then
+# --- 环境检测 ---
+DETECTED_PLATFORMS=()
+command -v claude &>/dev/null && DETECTED_PLATFORMS+=("claude")
+command -v opencode &>/dev/null && DETECTED_PLATFORMS+=("opencode")
+command -v gemini &>/dev/null && DETECTED_PLATFORMS+=("gemini")
+
+if [ ${#DETECTED_PLATFORMS[@]} -eq 0 ]; then
+    echo "[→] 未检测到 Claude Code / OpenCode / Gemini CLI"
+    echo "[→] 将仅生成降级版本到 dist/ 目录"
+fi
+
+echo "[→] 检测到平台: ${DETECTED_PLATFORMS[*]:-(仅生成降级版本)}"
+
+# --- 辅助函数 ---
+
+deploy_skill() {
+    local skill_name=$1
+    local source_file=$2
+    local target_dir=$3
+    mkdir -p "$target_dir"
+    cp "$SCRIPT_DIR/$source_file" "$target_dir/SKILL.md"
+    echo "  [✓] $skill_name → $target_dir/SKILL.md"
+}
+
+deploy_karpathy() {
+    local target_dir=$1
+    mkdir -p "$target_dir"
+    local updated=false
+    local remote="${KARPATHY_GUIDELINES_REPO:-https://raw.githubusercontent.com/karpathy/guidelines/main/SKILL.md}"
+    if command -v curl &>/dev/null; then
+        if curl -fsSL --connect-timeout 5 "$remote" -o "$target_dir/SKILL.md.tmp" 2>/dev/null; then
+            if grep -q "karpathy-guidelines" "$target_dir/SKILL.md.tmp" 2>/dev/null; then
+                mv "$target_dir/SKILL.md.tmp" "$target_dir/SKILL.md"
+                echo "  [✓] karpathy-guidelines (远程) → $target_dir/SKILL.md"
+                updated=true
+            else
+                rm -f "$target_dir/SKILL.md.tmp"
+            fi
+        fi
+    fi
+    if [ "$updated" = false ]; then
+        cp "$SCRIPT_DIR/karpathy-guidelines-SKILL.md" "$target_dir/SKILL.md"
+        echo "  [✓] karpathy-guidelines (本地) → $target_dir/SKILL.md"
+    fi
+}
+
+generate_degraded() {
+    local skill_name=$1
+    local source_file=$2
+    local platform=$3
+    local output_dir="$SCRIPT_DIR/dist/$platform"
+    mkdir -p "$output_dir"
+    local output="$output_dir/${skill_name}.md"
+
+    {
+        echo "# ${skill_name} (${platform} 自包含版本)"
+        echo ""
+        echo "> 自动生成于 $(date '+%Y-%m-%d %H:%M')，内联 karpathy-guidelines 行为准则"
+        echo "> 适用于没有 skill 系统的 AI 编码平台"
+        echo ""
+        echo "---"
+        echo ""
+        # Inline karpathy-guidelines body (skip YAML frontmatter between --- markers)
+        awk 'BEGIN { n=0 } /^---$/ { n++; next } n>=2' "$SCRIPT_DIR/karpathy-guidelines-SKILL.md"
+        echo ""
+        echo "---"
+        echo ""
+        # Insert skill content without preamble section
+        sed '/<!-- @preamble-start -->/,/<!-- @preamble-end -->/d' "$SCRIPT_DIR/$source_file"
+    } > "$output"
+    echo "  [✓] ${skill_name} → $output"
+}
+
+# --- b4 检查 ---
+echo ""
+if command -v b4 &>/dev/null; then
     echo "[✓] b4 已安装: $(b4 --version 2>&1)"
 else
     echo "[→] 安装 b4..."
-    pip install b4
-    echo "[✓] b4 安装完成"
-fi
-
-# 2. 部署 merge-patchset skill
-SKILL_DIR="$HOME/.claude/skills/merge-patchset"
-mkdir -p "$SKILL_DIR"
-cp "$SCRIPT_DIR/SKILL.md" "$SKILL_DIR/"
-echo "[✓] merge-patchset → $SKILL_DIR/SKILL.md"
-
-# 3. 部署/更新 karpathy-guidelines skill
-#    优先尝试从已知源获取最新版本，失败则使用项目自带版本
-KARPA_DIR="$HOME/.claude/skills/karpathy-guidelines"
-mkdir -p "$KARPA_DIR"
-
-KARPA_UPDATED=false
-KARPA_REPO="${KARPATHY_GUIDELINES_REPO:-https://raw.githubusercontent.com/karpathy/guidelines/main/SKILL.md}"
-
-# 尝试从远程拉取最新版本
-if command -v curl &> /dev/null; then
-    echo "[→] 尝试获取最新 karpathy-guidelines..."
-    if curl -fsSL --connect-timeout 5 "$KARPA_REPO" -o "$KARPA_DIR/SKILL.md.tmp" 2>/dev/null; then
-        if grep -q "karpathy-guidelines" "$KARPA_DIR/SKILL.md.tmp" 2>/dev/null; then
-            mv "$KARPA_DIR/SKILL.md.tmp" "$KARPA_DIR/SKILL.md"
-            echo "[✓] karpathy-guidelines 已从远程更新 → $KARPA_DIR/SKILL.md"
-            KARPA_UPDATED=true
-        else
-            rm -f "$KARPA_DIR/SKILL.md.tmp"
-            echo "[!] 远程内容无效，回退到本地版本"
-        fi
+    if pip install --break-system-packages b4 2>/dev/null; then
+        echo "[✓] b4 安装完成"
+    elif pip install --user b4 2>/dev/null; then
+        echo "[✓] b4 安装完成 (--user)"
     else
-        echo "[!] 远程获取失败（网络不可达或仓库不存在），使用本地版本"
+        echo "[!] b4 安装失败，请手动安装: pip install b4"
     fi
 fi
 
-# 远程获取失败则使用项目自带版本
-if [ "$KARPA_UPDATED" = false ]; then
-    cp "$SCRIPT_DIR/karpathy-guidelines-SKILL.md" "$KARPA_DIR/SKILL.md"
-    echo "[✓] karpathy-guidelines → $KARPA_DIR/SKILL.md (本地版本)"
-fi
+# --- 部署到检测到的平台 ---
+for platform in "${DETECTED_PLATFORMS[@]}"; do
+    echo ""
+    echo "--- 部署到 $platform ---"
+    case "$platform" in
+        claude)
+            deploy_skill "merge-patchset" "SKILL.md" "$HOME/.claude/skills/merge-patchset"
+            deploy_skill "revert-patchset" "revert-patchset-SKILL.md" "$HOME/.claude/skills/revert-patchset"
+            deploy_karpathy "$HOME/.claude/skills/karpathy-guidelines"
+            if [ -d "$HOME/.claude/plugins/cache/claude-plugins-official/superpowers" ]; then
+                echo "  [✓] superpowers 插件已安装"
+            else
+                echo "  [!] 请安装 superpowers 插件:"
+                echo "      claude plugins install superpowers@claude-plugins-official"
+            fi
+            ;;
+        opencode)
+            deploy_skill "merge-patchset" "SKILL.md" "$HOME/.config/opencode/skills/merge-patchset"
+            deploy_skill "revert-patchset" "revert-patchset-SKILL.md" "$HOME/.config/opencode/skills/revert-patchset"
+            deploy_karpathy "$HOME/.config/opencode/skills/karpathy-guidelines"
+            echo "  [✓] OpenCode 自动发现 skill，在 opencode.json 中可通过 permission.skill 控制"
+            ;;
+        gemini)
+            generate_degraded "merge-patchset" "SKILL.md" "gemini"
+            generate_degraded "revert-patchset" "revert-patchset-SKILL.md" "gemini"
+            mkdir -p "$HOME/.agents/skills/merge-patchset" "$HOME/.agents/skills/revert-patchset"
+            cp "$SCRIPT_DIR/dist/gemini/merge-patchset.md" "$HOME/.agents/skills/merge-patchset/SKILL.md"
+            cp "$SCRIPT_DIR/dist/gemini/revert-patchset.md" "$HOME/.agents/skills/revert-patchset/SKILL.md"
+            echo "  [✓] merge-patchset → ~/.agents/skills/merge-patchset/SKILL.md"
+            echo "  [✓] revert-patchset → ~/.agents/skills/revert-patchset/SKILL.md"
+            ;;
+    esac
+done
 
-# 4. 部署 revert-patchset skill
-REVERT_DIR="$HOME/.claude/skills/revert-patchset"
-mkdir -p "$REVERT_DIR"
-cp "$SCRIPT_DIR/revert-patchset-SKILL.md" "$REVERT_DIR/SKILL.md"
-echo "[✓] revert-patchset → $REVERT_DIR/SKILL.md"
-
-# 5. 确保 superpowers 插件已安装
+# --- 生成所有 Tier 2 降级版本（排除已被 Tier 1 处理的平台） ---
 echo ""
-echo "[→] 检查 superpowers 插件..."
-if [ -d "$HOME/.claude/plugins/cache/claude-plugins-official/superpowers" ]; then
-    echo "[✓] superpowers 插件已安装"
-else
-    if command -v claude &> /dev/null; then
-        echo "[→] 安装 superpowers..."
-        if claude plugins install superpowers@claude-plugins-official 2>&1; then
-            echo "[✓] superpowers 安装完成"
-        else
-            echo "[!] 自动安装失败，请在 Claude Code 中运行:"
-            echo "    /plugin install superpowers@claude-plugins-official"
-        fi
-    else
-        echo "[!] claude CLI 不可用，请在 Claude Code 中运行:"
-        echo "    /plugin install superpowers@claude-plugins-official"
-    fi
+echo "--- 生成 Tier 2 降级版本 ---"
+TIER2_PLATFORMS=(copilot cursor generic)
+# 如果 gemini 作为 Tier 1 已处理则跳过，否则补生成
+if ! printf '%s\n' "${DETECTED_PLATFORMS[@]}" | grep -qx "gemini"; then
+    TIER2_PLATFORMS+=(gemini)
 fi
+for platform in "${TIER2_PLATFORMS[@]}"; do
+    generate_degraded "merge-patchset" "SKILL.md" "$platform"
+    generate_degraded "revert-patchset" "revert-patchset-SKILL.md" "$platform"
+done
 
+# --- 总结 ---
 echo ""
 echo "=== 安装完成 ==="
 echo ""
@@ -87,14 +152,23 @@ echo "  - merge-patchset  (合入 patchset)"
 echo "  - revert-patchset (回退 commit)"
 echo "  - karpathy-guidelines (行为准则)"
 echo ""
+if [ ${#DETECTED_PLATFORMS[@]} -gt 0 ]; then
+    echo "支持平台:"
+    for platform in "${DETECTED_PLATFORMS[@]}"; do
+        echo "  - $platform ✓"
+    done
+    echo ""
+fi
+echo "Tier 2 降级版本（手动部署）:"
+echo "  - dist/generic/   → 通用 Markdown"
+echo "  - dist/copilot/   → GitHub Copilot (.github/copilot-instructions.md)"
+echo "  - dist/cursor/    → Cursor (.cursorrules)"
+echo "  - dist/gemini/    → Gemini CLI"
+echo ""
+echo "使用方式:"
+echo "  Claude Code: /merge-patchset <url>    /revert-patchset <commit>"
+echo "  OpenCode:    直接描述需求，skill 自动加载"
+echo "  Copilot:     将 dist/copilot/*.md 内容复制到 .github/copilot-instructions.md"
+echo "  Cursor:      将 dist/cursor/*.md 内容复制到 .cursorrules"
+echo ""
 echo "如需更新 skill，重新运行此脚本即可。"
-echo "如果 superpowers 插件是首次安装，请重启 Claude Code 后使用。"
-echo ""
-echo "使用方式 (在 Claude Code 中):"
-echo "  /merge-patchset <patch_url> [--source <源码目录>] [--branch <分支名>]"
-echo "  /revert-patchset <commit|范围|关键词> [--source <源码目录>] [--branch <分支名>]"
-echo ""
-echo "示例:"
-echo "  /merge-patchset https://lore.kernel.org/lkml/xxx/"
-echo "  /revert-patchset abc123..def456 --source /root/openeuler/kernel"
-echo "  /revert-patchset hdbss --source /root/openeuler/kernel --branch revert-hdbss"
