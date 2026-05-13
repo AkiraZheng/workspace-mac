@@ -1,0 +1,64 @@
+name: migration
+description: 热迁移配置模板
+version: "1.0"
+
+params:
+  machine: virt
+  accel: kvm
+  cpu: host
+  smp: 4
+  memory: 4G
+  bios: edk2-aarch64-code.fd
+  
+  migration:
+    role: target
+    protocol: tcp
+    address: "0:4444"
+    parameters:
+      max_bandwidth: "100M"
+      downtime_limit: "300ms"
+
+roles:
+  target:
+    description: 迁移目标端，等待接收
+    extra_params: "-incoming {protocol}:{address}"
+    
+  source:
+    description: 迁移源端，发起迁移
+    monitor_command: "migrate {protocol}:{address}"
+
+cmd_template_target: |
+  qemu-system-aarch64 \
+    -machine {machine},accel={accel} \
+    -cpu {cpu} \
+    -smp {smp} \
+    -m {memory} \
+    -bios {bios} \
+    -drive file={drive},if=none,id=hd0,format=qcow2 \
+    -device virtio-blk-pci,drive=hd0 \
+    -incoming tcp:0:{port} \
+    -nographic
+
+cmd_template_source: |
+  qemu-system-aarch64 \
+    -machine {machine},accel={accel} \
+    -cpu {cpu} \
+    -smp {smp} \
+    -m {memory} \
+    -bios {bios} \
+    -drive file={drive},if=none,id=hd0,format=qcow2 \
+    -device virtio-blk-pci,drive=hd0 \
+    -monitor stdio \
+    -nographic
+
+migration_commands: |
+  # 在源端QEMU monitor中执行
+  migrate tcp:<target_ip>:4444
+  migrate_set_parameter max-bandwidth 100M
+  migrate_set_parameter downtime-limit 300
+  info migrate
+
+notes: |
+  - 目标端和源端需要相同配置
+  - 存储需要共享或同时迁移
+  - 迁移期间Guest继续运行

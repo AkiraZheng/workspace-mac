@@ -1,0 +1,48 @@
+name: numa
+description: NUMA拓扑配置模板
+version: "1.0"
+
+params:
+  machine: virt
+  accel: kvm
+  cpu: host
+  smp: 8
+  memory: 8G
+  bios: edk2-aarch64-code.fd
+  
+  numa:
+    nodes:
+      - nodeid: 0
+        cpus: "0-3"
+        mem: "4G"
+      - nodeid: 1
+        cpus: "4-7"
+        mem: "4G"
+    distances:
+      - src: 0
+        dst: 1
+        val: 20
+
+defaults:
+  node_count: 2
+  cpus_per_node: 4
+
+cmd_template: |
+  qemu-system-aarch64 \
+    -machine {machine},accel={accel} \
+    -cpu {cpu} \
+    -smp {smp} \
+    -m {memory} \
+    {numa_params} \
+    -bios {bios} \
+    -drive file={drive},if=none,id=hd0,format=qcow2 \
+    -device virtio-blk-pci,drive=hd0 \
+    -nographic
+
+numa_param_template: |
+  -numa node,nodeid={nodeid},cpus={cpus},mem={mem}
+
+notes: |
+  - NUMA节点数量建议不超过8个
+  - CPU分配不能重叠
+  - 节点距离可选配置

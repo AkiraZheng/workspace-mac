@@ -1,0 +1,52 @@
+name: direct-kernel
+description: 直接内核启动模板（适用于鲲鹏定制QEMU或UEFI异常）
+version: "1.0"
+
+params:
+  machine: virt
+  cpu: cortex-a72
+  smp: 4
+  memory: 4G
+  kernel: vmlinuz
+  initrd: initramfs.img
+  kernel_append: "console=ttyAMA0 root=/dev/vda2 rw"
+  drive_format: qcow2
+  ssh_port: 2222
+  display: nographic
+
+defaults:
+  cpu: cortex-a72
+  smp: 4
+  memory: 4G
+  ssh_port: 2222
+
+cmd_template: |
+  qemu-system-aarch64 \
+    -machine {machine} \
+    -cpu {cpu} \
+    -smp {smp} \
+    -m {memory} \
+    -kernel {kernel} \
+    -initrd {initrd} \
+    -append "{kernel_append}" \
+    -drive file={drive},if=virtio,format={drive_format} \
+    -netdev user,id=net0,hostfwd=tcp::{ssh_port}-:22 \
+    -device virtio-net-pci,netdev=net0 \
+    {display}
+
+kernel_extraction: |
+  # 从镜像中提取内核
+  modprobe nbd max_part=8
+  qemu-nbd --connect=/dev/nbd0 {drive}
+  mount /dev/nbd0p1 /mnt
+  cp /mnt/vmlinuz-* ./vmlinuz
+  cp /mnt/initramfs-* ./initramfs.img
+  umount /mnt
+  qemu-nbd --disconnect /dev/nbd0
+
+notes: |
+  - 适用场景: 华为鲲鹏定制QEMU、UEFI固件异常
+  - cpu: cortex-a72为通用选择，鲲鹏可用Kunpeng-920
+  - kernel_append: console=ttyAMA0为ARM64标准串口
+  - root=/dev/vda2: virtio磁盘第二分区为根分区
+  - 无需bios参数，直接加载内核

@@ -1,0 +1,42 @@
+name: basic
+description: 基础虚机启动模板
+version: "1.0"
+
+params:
+  machine: virt
+  accel: kvm
+  cpu: host
+  smp: 4
+  memory: 4G
+  bios: edk2-aarch64-code.fd
+  drive_format: qcow2
+  drive_interface: virtio-blk-pci
+  net_backend: user
+  net_device: virtio-net-pci
+  ssh_port: 2222
+  display: nographic
+
+defaults:
+  accel: kvm
+  cpu: host
+  smp: 4
+  memory: 4G
+  ssh_port: 2222
+
+cmd_template: |
+  qemu-system-aarch64 \
+    -machine {machine},accel={accel} \
+    -cpu {cpu} \
+    -smp {smp} \
+    -m {memory} \
+    -bios {bios} \
+    -drive file={drive},if=none,id=hd0,format={drive_format} \
+    -device {drive_interface},drive=hd0 \
+    -netdev user,id=net0,hostfwd=tcp::{ssh_port}-:22 \
+    -device {net_device},netdev=net0 \
+    {display}
+
+notes: |
+  - accel: kvm需要/dev/kvm支持，tcg为纯软件模拟
+  - bios: 需要UEFI固件，查找路径见qemu-reference.md
+  - ssh_port: Host端口转发到Guest 22端口

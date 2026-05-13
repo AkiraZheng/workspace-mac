@@ -1,0 +1,71 @@
+name: virtio
+description: VIRTIO设备配置模板
+version: "1.0"
+
+params:
+  machine: virt
+  accel: kvm
+  cpu: host
+  smp: 4
+  memory: 4G
+  bios: edk2-aarch64-code.fd
+  
+  virtio:
+    storage:
+      type: virtio-blk-pci
+      drive_format: qcow2
+    
+    network:
+      type: virtio-net-pci
+      backend: user
+      ssh_port: 2222
+    
+    balloon: true
+    rng: true
+    serial: false
+
+devices:
+  virtio-blk-pci:
+    description: VIRTIO块设备
+    params: "-device virtio-blk-pci,drive=<id>"
+    
+  virtio-net-pci:
+    description: VIRTIO网卡
+    params: "-device virtio-net-pci,netdev=<id>"
+    
+  virtio-balloon:
+    description: 内存气球，动态调整内存
+    params: "-device virtio-balloon"
+    
+  virtio-rng:
+    description: 随机数生成器
+    params: "-device virtio-rng"
+    
+  virtio-serial:
+    description: VIRTIO串口
+    params: "-device virtio-serial"
+
+cmd_template: |
+  qemu-system-aarch64 \
+    -machine {machine},accel={accel} \
+    -cpu {cpu} \
+    -smp {smp} \
+    -m {memory} \
+    -bios {bios} \
+    -drive file={drive},if=none,id=hd0,format={drive_format} \
+    -device virtio-blk-pci,drive=hd0 \
+    -netdev user,id=net0,hostfwd=tcp::{ssh_port}-:22 \
+    -device virtio-net-pci,netdev=net0 \
+    {virtio_extra_devices} \
+    -nographic
+
+extra_devices_template: |
+  {balloon}  # -device virtio-balloon
+  {rng}      # -device virtio-rng
+  {serial}   # -device virtio-serial
+
+notes: |
+  - VIRTIO设备性能优于模拟设备
+  - balloon: 动态调整Guest内存
+  - rng: 提供随机数，加速启动
+  - serial: 用于串口通信

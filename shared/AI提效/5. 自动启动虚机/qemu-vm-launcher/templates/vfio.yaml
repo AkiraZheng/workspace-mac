@@ -1,0 +1,54 @@
+name: vfio
+description: VFIO设备直通模板
+version: "1.0"
+
+params:
+  machine: virt
+  accel: kvm
+  cpu: host
+  smp: 4
+  memory: 4G
+  bios: edk2-aarch64-code.fd
+  
+  vfio:
+    devices:
+      - bdf: "0000:04:00.0"
+        id: "vfio0"
+
+prerequisites:
+  - IOMMU支持
+  - vfio-pci模块加载
+  - 设备绑定到vfio-pci
+
+cmd_template: |
+  qemu-system-aarch64 \
+    -machine {machine},accel={accel} \
+    -cpu {cpu} \
+    -smp {smp} \
+    -m {memory} \
+    -bios {bios} \
+    {vfio_params} \
+    -drive file={drive},if=none,id=hd0,format=qcow2 \
+    -device virtio-blk-pci,drive=hd0 \
+    -nographic
+
+vfio_param_template: |
+  -device vfio-pci,host={bdf},id={id}
+
+host_preparation: |
+  # 加载vfio-pci模块
+  modprobe vfio_pci
+  
+  # 查看设备BDF
+  lspci -nn | grep <设备名>
+  
+  # 解绑原驱动
+  echo <bdf> > /sys/bus/pci/devices/<bdf>/driver/unbind
+  
+  # 绑定vfio-pci
+  echo vfio-pci > /sys/bus/pci/devices/<bdf>/driver_override
+
+notes: |
+  - VFIO直通需要IOMMU支持
+  - 设备必须先绑定到vfio-pci驱动
+  - BDF格式: DDDD:BB:DD.F

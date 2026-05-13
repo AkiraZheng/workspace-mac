@@ -1,0 +1,96 @@
+machine:
+  type: virt
+  accel:
+    - kvm
+    - tcg
+  default_accel: kvm
+
+cpu:
+  types:
+    - host
+    - cortex-a57
+    - cortex-a72
+    - max
+  default_type: host
+  smp:
+    default: 4
+    min: 1
+    max: 128
+
+memory:
+  default: 4G
+  units:
+    - M
+    - G
+  min: 128M
+  max: 256G
+
+bios:
+  default: edk2-aarch64-code.fd
+  search_paths:
+    - /usr/share/qemu
+    - /usr/share/AAVMF
+    - /opt/homebrew/Cellar/qemu
+
+drive:
+  formats:
+    - qcow2
+    - raw
+    - img
+  interfaces:
+    - virtio-blk-pci
+    - virtio-scsi-pci
+    - none
+  default_interface: virtio-blk-pci
+
+network:
+  backends:
+    - user
+    - tap
+    - socket
+  default_backend: user
+  devices:
+    - virtio-net-pci
+  default_device: virtio-net-pci
+  ssh_port:
+    default: 2222
+    min: 1024
+    max: 65535
+
+numa:
+  max_nodes: 8
+
+hugepages:
+  sizes:
+    - 2M
+    - 1G
+
+virtio_devices:
+  storage:
+    - virtio-blk-pci
+    - virtio-scsi-pci
+  network:
+    - virtio-net-pci
+  balloon:
+    - virtio-balloon
+  rng:
+    - virtio-rng
+  serial:
+    - virtio-serial
+    - virtconsole
+
+vfio:
+  device_type: vfio-pci
+
+migration:
+  protocols:
+    - tcp
+    - unix
+    - exec
+  default_port: 4444
+
+communication:
+  types:
+    - network
+    - 9p
+    - minifs_embed
