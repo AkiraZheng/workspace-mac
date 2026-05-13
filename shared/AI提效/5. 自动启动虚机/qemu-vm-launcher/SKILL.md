@@ -115,12 +115,15 @@ rpm -qa | grep edk2-aarch64 && echo "✓ 固件已安装" || echo "⚠ 需安装
   ↓
 步骤3: 镜像准备（根据用户选择）
   ↓
-步骤4: 测试验证（必须通过）
+步骤4: 启动虚机 + SSH连接验证（强制成功）
   ↓
-步骤5: 生成脚本
+步骤5: 生成脚本（验证通过后）
 ```
 
-**重要**: 步骤2的配置向导是强制性的，必须完成所有问题询问后才能进入步骤3。
+**重要**: 
+- 步骤2的配置向导是强制性的，必须完成所有问题询问后才能进入步骤3
+- 步骤4是任务结束条件，必须SSH成功连接虚机才能进入步骤5生成脚本
+- 步骤4会启动虚机进行实际验证，步骤5生成的脚本可直接用于后续启动
 
 ---
 
@@ -284,25 +287,80 @@ rpm -qa | grep edk2-aarch64 || yum install edk2-aarch64
 
 ---
 
-## 步骤4: 测试验证（强制）
+## 步骤4: 启动虚机 + SSH连接验证（强制成功）
 
-**在生成启动脚本前必须执行自测验证**
+**⚠️ 这是任务关键验证步骤，必须SSH成功连接虚机才能进入步骤5生成脚本。**
+
+本步骤会实际启动虚机并验证SSH连接，避免后续重复启动。验证通过后，生成的脚本可直接用于后续启动。
+
+---
+
+### 4-1: 启动虚机
 
 根据启动模式设置超时：
-- **KVM模式**: `timeout 30`
-- **TCG模式**: `timeout 60-90`
+- **KVM模式**: 启动时间约30秒
+- **TCG模式**: 启动时间约60-120秒
 
+**qcow2方案启动命令**：
+
+**UEFI启动**（适用于标准QEMU）：
 ```bash
-# 方案A测试（UEFI或直接内核）
-timeout 30 qemu-system-aarch64 -machine virt,accel=<kvm/tcg> <其他参数> 2>&1 | tail -50
-
-# 方案B测试（Minimal）
-timeout 60 qemu-system-aarch64 -kernel <KERNEL> -initrd initrd-minimal.img <其他参数> 2>&1 | tail -50
+qemu-system-aarch64 \
+  -machine virt,accel=<kvm/tcg> \
+  -cpu <host/cortex-a72> \
+  -smp <CORES> \
+  -m <MEMORY> \
+  -bios <FIRMWARE> \
+  -drive file=<IMAGE>,if=virtio,format=qcow2 \
+  -netdev user,id=net0,hostfwd=tcp::<SSH_PORT>-:22 \
+  -device virtio-net-pci,netdev=net0 \
+  -nographic
 ```
 
-**成功标志**：
-- 方案A：systemd启动、网络初始化、看到登录提示
-- 方案B：显示 "Welcome to Minimal VM!" 和 shell提示符
+**直接内核启动**（鲲鹏定制QEMU）：
+```bash
+qemu-system-aarch64 \
+  -machine virt \
+  -cpu cortex-a72 \
+  -smp <CORES> \
+  -m <MEMORY> \
+  -kernel vmlinuz \
+  -initrd initramfs.img \
+  -append "console=ttyAMA0 root=/dev/vda2 rw" \
+  -drive file=<IMAGE>,if=virtio,format=qcow2 \
+  -netdev user,id=net0,hostfwd=tcp::<SSH_PORT>-:22 \
+  -device virtio-net-pci,netdev=net0 \
+  -nographic
+```
+
+**Minimal方案启动命令**：
+```bash
+qemu-system-aarch64 \
+  -machine virt \
+  -cpu cortex-a72 \
+  -smp <CORES> \
+  -m <MEMORY> \
+  -kernel <KERNEL_PATH> \
+  -initrd initrd-minimal.img \
+  -append "console=ttyAMA0" \
+  -drive file=minifs.img,if=virtio,format=raw \
+  -nographic
+```
+
+---
+
+### 4-2: 观察启动过程
+
+启动虚机后，观察串口输出判断启动状态：
+
+**qcow2方案成功标志**：
+- systemd启动完成
+- 网络初始化完成
+- 看到 "localhost login:" 提示
+
+**Minimal方案成功标志**：
+- 显示 "Welcome to Minimal VM!"
+- 显示 shell 提示符
 
 **失败标志**：
 - "Synchronous Exception" → 切换到直接内核启动方案
@@ -311,7 +369,125 @@ timeout 60 qemu-system-aarch64 -kernel <KERNEL> -initrd initrd-minimal.img <其�
 
 ---
 
+### 4-3: 等待虚机完全启动
+
+根据启动模式等待足够时间：
+
+| 模式 | 等待时间 | 说明 |
+|------|---------|------|
+| KVM | 30-60秒 | 硬件加速，启动快 |
+| TCG | 60-120秒 | 纯软件模拟，启动慢 |
+
+```bash
+MODE=<kvm/tcg>
+if [ "$MODE" == "kvm" ]; then
+    WAIT_TIME=45
+else
+    WAIT_TIME=90
+fi
+
+echo "等待虚机启动... ($WAIT_TIME秒)"
+sleep $WAIT_TIME
+```
+
+---
+
+### 4-4: SSH连接验证（qcow2方案）
+
+使用 `ssh-test.sh` 进行连接测试：
+
+```bash
+# 基础测试（自动重试10次，间隔5秒）
+$SKILL_DIR/scripts/ssh-test.sh -h localhost -p <SSH_PORT> -u root -P '{VM_PASSWORD}'
+
+# TCG模式建议增加重试次数
+$SKILL_DIR/scripts/ssh-test.sh -h localhost -p <SSH_PORT> -u root -P '{VM_PASSWORD}' -r 20 -i 10
+```
+
+**参数说明**：
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `-h` | 目标主机 | localhost |
+| `-p` | SSH端口 | 2222 |
+| `-u` | 用户名 | root |
+| `-P` | 密码 | {VM_PASSWORD} |
+| `-r` | 重试次数 | 10 |
+| `-i` | 重试间隔(秒) | 5 |
+
+---
+
+### 4-5: 验证连接成功标志
+
+**成功标志**：
+```bash
+# 成功输出示例
+SSH连接成功！
+主机名: localhost.localdomain
+```
+
+执行远程命令验证：
+```bash
+sshpass -p '{VM_PASSWORD}' ssh -o StrictHostKeyChecking=no root@localhost -p <SSH_PORT> 'hostname; whoami; uname -a'
+
+# 预期输出
+localhost.localdomain
+root
+Linux localhost.localdomain 5.10.0-xxx aarch64 GNU/Linux
+```
+
+**失败标志**：
+```bash
+# 失败输出示例
+SSH连接失败: Permission denied (publickey,gssapi-with-mic)
+SSH连接失败: Connection reset by peer
+SSH连接失败: Connection refused
+```
+
+---
+
+### 4-6: 连接失败排查
+
+若SSH连接失败，按以下顺序排查：
+
+| 错误 | 排查步骤 |
+|------|---------|
+| Permission denied | 1. 确认fix-ssh-config.sh已执行<br>2. 确认cloud.cfg和ssh_deletekeys已修复<br>3. 停止虚机，重新修复镜像后重启 |
+| Connection reset by peer | 1. 等待更长时间（TCG需90-120秒）<br>2. 检查虚机串口输出是否正常启动<br>3. 增加重试次数 |
+| Connection refused | 1. 确认虚机已启动<br>2. 确认端口映射正确<br>3. 等待sshd服务启动 |
+| REMOTE HOST IDENTIFICATION HAS CHANGED | 1. 清理known_hosts: `ssh-keygen -R "[localhost]:2222"`<br>2. 若频繁出现，检查ssh_deletekeys配置 |
+
+---
+
+### 4-7: 验证通过判定
+
+**必须满足以下条件才能进入步骤5生成脚本**：
+
+1. ✅ SSH连接成功（无报错）
+2. ✅ 能执行远程命令并返回结果
+3. ✅ `hostname` 命令返回主机名
+
+**若无法满足，需要继续排查直到SSH连接成功，才能生成最终脚本。**
+
+---
+
+### Minimal方案验证（无SSH）
+
+Minimal方案无SSH功能，验证方式不同：
+
+**成功标志**：
+- 串口输出显示 "Welcome to Minimal VM!"
+- 能在控制台执行命令
+- PS1显示当前路径
+
+**退出方式**：Ctrl+A 然后按 X
+
+---
+
 ## 步骤5: 生成启动脚本
+
+**⚠️ 只有步骤4验证通过后才能生成脚本。**
+
+生成的脚本可直接用于后续启动，无需再次验证。
 
 ### 脚本注释模板（必须遵循）
 
@@ -425,7 +601,7 @@ $SKILL_DIR/scripts/check-kvm.sh
 | check-port.sh | 端口可用性检查 | `-p <port>` |
 | ssh-test.sh | SSH连接测试（自动清理known_hosts） | `-h <host> -p <port>` |
 | download-image.sh | 下载镜像 | `-o <path> -v <version>` |
-| fix-ssh-config.sh | SSH密码认证修复（镜像内） | `-i <image>` |
+| fix-ssh-config.sh | SSH密码认证完整修复（含cloud.cfg） | `-i <image>` |
 | extract-kernel.sh | 内核提取 | `-i <image>` |
 | build-minifs.sh | 构建minifs | `-o <path> -s <size>` |
 | pin-cpu-1v1.sh | 1v1绑核 | `<pid> <cpu_list>` |
@@ -486,17 +662,37 @@ $SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
 
 **问题3: Permission denied (publickey,gssapi-with-mic)**
 
-原因：SSH禁止密码登录（openEuler默认配置）
+原因：SSH禁止密码登录（openEuler默认配置）或cloud.cfg未修复
 
 解决：修复镜像SSH配置（必须停止虚机后执行）
 ```bash
 # 停止虚机
 pkill -f qemu-system-aarch64
 
-# 修复SSH配置
+# 修复SSH配置（含cloud.cfg修复）
 $SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
 
 # 重启虚机后SSH可正常登录
+```
+
+**问题4: SSH每次重启后失败（关键问题）**
+
+原因：cloud-init每次启动都会重置配置：
+- ssh_pwauth: false → 禁用密码认证
+- ssh_deletekeys: true → 删除并重新生成SSH keys
+
+解决：确保fix-ssh-config.sh完整执行（含cloud.cfg修复）
+```bash
+# fix-ssh-config.sh已包含以下修复：
+# 1. sed -i 's/ssh_pwauth: false/ssh_pwauth: true/' /etc/cloud/cloud.cfg
+# 2. echo "ssh_deletekeys: false" > /etc/cloud/cloud.cfg.d/99-ssh-keys.cfg
+
+# 验证修复是否生效（挂载镜像后检查）
+grep ssh_pwauth /mnt/etc/cloud/cloud.cfg
+# 应输出: ssh_pwauth: true
+
+cat /mnt/etc/cloud/cloud.cfg.d/99-ssh-keys.cfg
+# 应输出: ssh_deletekeys: false
 ```
 
 ### SSH连接方式
@@ -547,7 +743,9 @@ ssh -o StrictHostKeyChecking=no root@localhost -p 2222
 | 问题 | 解决方法 |
 |------|---------|
 | UEFI "Synchronous Exception" | 使用直接内核启动，提取镜像中的vmlinuz/initramfs |
-| SSH无法密码登录 | 执行 scripts/fix-ssh-config.sh 修复 |
+| SSH无法密码登录 | 执行 scripts/fix-ssh-config.sh（含cloud.cfg修复） |
+| SSH每次重启后失败 | 检查cloud.cfg的ssh_pwauth和ssh_deletekeys配置 |
+| SSH host key每次变化 | 检查ssh_deletekeys是否设置为false |
 | Minimal虚拟机命令找不到 | 检查busybox支持哪些命令：`busybox --list`，添加链接 |
 | busybox不支持vi | 使用ed或hexedit替代 |
 | Shell不显示当前路径 | 使用 `PS1='$(pwd)# '` |
@@ -559,8 +757,10 @@ ssh -o StrictHostKeyChecking=no root@localhost -p 2222
 ## 重要经验总结
 
 1. **配置向导是强制性的**：不询问完所有问题就跳过会导致配置不完整
-2. **SSH修复必须执行**：openEuler云镜像默认禁用密码认证
-3. **自测验证必须通过**：生成脚本前必须测试启动命令能正常运行
-4. **TCG模式超时要长**：纯软件模拟启动慢，需要60-120秒
-5. **鲲鹏定制QEMU特殊性**：UBIOS不兼容标准固件，必须用直接内核启动
-6. **脚本注释模板**：生成的脚本必须包含SSH连接信息和密码
+2. **SSH修复必须完整执行**：fix-ssh-config.sh已包含cloud.cfg和ssh_deletekeys修复，必须执行
+3. **cloud.cfg修复是关键**：不修复ssh_pwauth和ssh_deletekeys会导致每次启动SSH失败
+4. **SSH验证在生成脚本前**：步骤4验证通过后才能生成脚本，避免重复启动虚机
+5. **TCG模式超时要长**：纯软件模拟启动慢，需要60-120秒
+6. **鲲鹏定制QEMU特殊性**：UBIOS不兼容标准固件，必须用直接内核启动
+7. **脚本注释模板**：生成的脚本必须包含SSH连接信息和密码
+8. **验证通过的脚本可直接使用**：步骤5生成的脚本经过步骤4验证，无需再次验证

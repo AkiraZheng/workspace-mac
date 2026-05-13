@@ -91,9 +91,25 @@ chmod 600 "$SSH_DIR"/ssh_host_*_key
 
 echo "步骤2: 启用密码认证..."
 rm -f "$SSH_DIR/sshd_config.d/50-cloud-init.conf"
+mkdir -p "$SSH_DIR/sshd_config.d"
 echo "PasswordAuthentication yes" > "$SSH_DIR/sshd_config.d/01-password.conf"
+chmod 644 "$SSH_DIR/sshd_config.d/01-password.conf"
 
-echo "步骤3: 设置root密码..."
+echo "步骤3: 修改cloud.cfg防止重置密码认证..."
+CLOUD_CFG="$MOUNT_DIR/etc/cloud/cloud.cfg"
+if [ -f "$CLOUD_CFG" ]; then
+    sed -i 's/ssh_pwauth: false/ssh_pwauth: true/' "$CLOUD_CFG"
+    echo "已修改 ssh_pwauth: true"
+else
+    echo "警告: cloud.cfg 不存在"
+fi
+
+echo "步骤4: 防止cloud-init删除SSH keys..."
+mkdir -p "$MOUNT_DIR/etc/cloud/cloud.cfg.d"
+echo "ssh_deletekeys: false" > "$MOUNT_DIR/etc/cloud/cloud.cfg.d/99-ssh-keys.cfg"
+chmod 644 "$MOUNT_DIR/etc/cloud/cloud.cfg.d/99-ssh-keys.cfg"
+
+echo "步骤5: 设置root密码..."
 HASH=$(openssl passwd -6 "$PASSWORD")
 SHADOW_FILE="$MOUNT_DIR/etc/shadow"
 
