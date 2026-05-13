@@ -1,5 +1,35 @@
 # QEMU VM Launcher Skill 使用说明
 
+## ⚠️ 重要：脚本定位方法
+
+**执行任何脚本前必须先定位skill目录！**
+
+所有文档中的脚本路径都是相对路径，实际执行时需要加上skill目录前缀：
+
+```bash
+# 定位skill目录
+SKILL_DIR=$(find ~ -type d -name qemu-vm-launcher 2>/dev/null | head -1)
+
+# 如果找不到，检查常见安装位置
+for dir in ~/.config/opencode/skills ~/.claude/skills ~/.agents/skills; do
+    if [ -d "$dir/qemu-vm-launcher" ]; then
+        SKILL_DIR="$dir/qemu-vm-launcher"
+        break
+    fi
+done
+
+# 验证
+echo "Skill目录: $SKILL_DIR"
+ls "$SKILL_DIR/scripts/"
+
+# 执行脚本示例（必须加前缀）
+$SKILL_DIR/scripts/check-kvm.sh
+$SKILL_DIR/scripts/download-image.sh -o . -v 24.03-LTS
+$SKILL_DIR/scripts/ssh-test.sh
+```
+
+---
+
 ## 简介
 
 本skill帮助用户快速启动QEMU aarch64虚拟机，提供：
@@ -92,17 +122,17 @@ cp -r qemu-vm-launcher /root/.agents/skills/
 2. **镜像准备**
    ```bash
    # 下载openEuler镜像
-   ./scripts/download-image.sh -o . -v 24.03-LTS
+   $SKILL_DIR/scripts/download-image.sh -o . -v 24.03-LTS
    ```
 
 3. **内核提取**（鲲鹏定制QEMU必须）
    ```bash
-   ./scripts/extract-kernel.sh -i openEuler.qcow2
+   $SKILL_DIR/scripts/extract-kernel.sh -i openEuler.qcow2
    ```
 
 4. **SSH配置修复**（必须）
    ```bash
-   ./scripts/fix-ssh-config.sh -i openEuler.qcow2
+   $SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
    ```
 
 5. **自测验证**
@@ -121,42 +151,40 @@ cp -r qemu-vm-launcher /root/.agents/skills/
    sshpass -p '{VM_PASSWORD}' ssh -o StrictHostKeyChecking=no root@localhost -p 2222
    ```
 
-### 示例1：基础启动
+### 示例1：基础启动（完整流程）
+
+> ⚠️ **注意**：执行脚本前必须先定位skill目录！
+> ```bash
+> SKILL_DIR=$(find ~ -type d -name qemu-vm-launcher 2>/dev/null | head -1)
+> ```
 
 **用户输入**：
 > 帮我启动一个QEMU虚拟机，4核4G内存
 
-**AI响应**：
-1. 检查环境（调用check-kvm.sh）
-2. 检查镜像文件
-3. 修复SSH配置
-4. 生成QEMU启动命令
-5. 自测验证
-6. 提供SSH登录信息
+**AI完整执行流程**：
 
-### 示例2：NUMA拓扑
+1. **环境检查**
+   ```bash
+   rpm -qa | grep qemu-system-aarch64
+   rpm -qa | grep edk2-aarch64
+   qemu-system-aarch64 -cpu help | grep Kunpeng
+   ```
 
-**用户输入**：
-> 启动一个8核8G的虚机，配置2节点NUMA拓扑
+2. **镜像准备**
+   ```bash
+   # 下载openEuler镜像
+   $SKILL_DIR/scripts/download-image.sh -o . -v 24.03-LTS
+   ```
 
-**AI响应**：
-1. 生成NUMA配置参数
-2. 提供完整启动命令
+3. **内核提取**（鲲鹏定制QEMU必须）
+   ```bash
+   $SKILL_DIR/scripts/extract-kernel.sh -i openEuler.qcow2
+   ```
 
-### 示例3：VFIO直通
-
-**用户输入**：
-> 我要直通一个PCI设备，BDF是0000:04:00.0
-
-**AI响应**：
-1. 提示VFIO准备工作
-2. 生成VFIO直通命令
-
----
-
-## 文件结构
-
-```
+4. **SSH配置修复**（必须）
+   ```bash
+   $SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
+   ```
 qemu-vm-launcher/
 ├── SKILL.md              # 主skill文件（必须有）
 ├── README.md             # 使用说明（本文件）
@@ -174,6 +202,7 @@ qemu-vm-launcher/
 ├── scripts/
 │   ├── install-deps.sh   # 安装依赖包（openEuler）
 │   ├── check-kvm.sh      # 环境检查脚本
+│   ├── check-port.sh     # 端口可用性检查脚本
 │   ├── download-image.sh # 镜像下载脚本
 │   ├── build-minifs.sh   # minifs构建脚本
 │   ├── extract-kernel.sh # 内核提取脚本
@@ -189,51 +218,129 @@ qemu-vm-launcher/
 
 ## 快速开始
 
+> ⚠️ **执行前必须定位skill目录！**
+> ```bash
+> # 定位skill目录
+> SKILL_DIR=$(find ~ -type d -name qemu-vm-launcher 2>/dev/null | head -1)
+> 
+> # 若找不到，检查常见位置
+> for dir in ~/.config/opencode/skills ~/.claude/skills ~/.agents/skills; do
+>     [ -d "$dir/qemu-vm-launcher" ] && SKILL_DIR="$dir/qemu-vm-launcher" && break
+> done
+> 
+> # 验证
+> echo "Skill目录: $SKILL_DIR"
+> ls "$SKILL_DIR/scripts/"
+> ```
+
 ### 1. 安装依赖
 
 ```bash
-./scripts/install-deps.sh
+$SKILL_DIR/scripts/install-deps.sh
 ```
 
 ### 2. 环境检查
 
 ```bash
-./scripts/check-kvm.sh
+$SKILL_DIR/scripts/check-kvm.sh
 ```
 
-### 3. 下载镜像
+### 3. 端口检查
 
 ```bash
-./scripts/download-image.sh -o . -v 24.03-LTS
+# 检查SSH端口是否可用，若占用自动寻找可用端口
+$SKILL_DIR/scripts/check-port.sh -p 2222
+# 输出: {"available_port": 2222, "original_port": 2222, "changed": false}
+# 若端口2222被占用，自动返回下一个可用端口
+```
+
+参数说明：
+- `-p`: 起始检查端口（默认2222）
+- `-m`: 最大端口范围（默认65535）
+
+### 4. 下载镜像
+
+```bash
+$SKILL_DIR/scripts/download-image.sh -o . -v 24.03-LTS
 ```
 
 ### 4. 提取内核（鲲鹏定制QEMU必须）
 
 ```bash
-./scripts/extract-kernel.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/extract-kernel.sh -i openEuler.qcow2
 ```
 
 ### 5. 修复SSH配置（必须）
 
 ```bash
-./scripts/fix-ssh-config.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
 ```
 
 ### 6. 启动虚拟机
 
 ```bash
-./examples/start-basic.sh
+$SKILL_DIR/examples/start-basic.sh
 ```
 
-### 7. SSH登录
+### 7. SSH连接测试
 
 ```bash
-# 等待60秒让虚拟机完全启动
-sleep 60
+# 测试SSH连接（自动重试）
+$SKILL_DIR/scripts/ssh-test.sh
 
-# SSH登录
+# 或手动测试
 sshpass -p '{VM_PASSWORD}' ssh -o StrictHostKeyChecking=no root@localhost -p 2222
 ```
+
+### 8. SSH连接测试
+
+```bash
+# 使用ssh-test.sh自动测试（自动清理known_hosts）
+$SKILL_DIR/scripts/ssh-test.sh
+```
+
+---
+
+## SSH连接问题排查
+
+### 问题：REMOTE HOST IDENTIFICATION HAS CHANGED
+
+**原因**：之前连接过该端口但主机已更换（不同虚机使用同一端口）
+
+**解决**：
+```bash
+# 方法1：使用ssh-test.sh（推荐，自动清理）
+$SKILL_DIR/scripts/ssh-test.sh
+
+# 方法2：手动清理
+ssh-keygen -R "[localhost]:2222"
+sshpass -p '{VM_PASSWORD}' ssh -o StrictHostKeyChecking=no root@localhost -p 2222
+```
+
+### 问题：Connection refused
+
+**原因**：虚机未启动或sshd未运行
+
+**排查**：
+```bash
+# 检查虚机是否运行
+ps aux | grep qemu
+
+# 检查端口是否监听
+ss -tlnp | grep 2222
+```
+
+### 问题：Permission denied
+
+**原因**：密码错误或SSH配置问题
+
+**解决**：
+```bash
+# 修复SSH配置（需要重新挂载镜像）
+$SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
+```
+
+---
 qemu-vm-launcher/
 ├── SKILL.md              # 主skill文件（必须有）
 ├── README.md             # 使用说明（本文件）
@@ -250,6 +357,9 @@ qemu-vm-launcher/
 │   └── virtio.yaml       # VIRTIO设备模板
 ├── scripts/
 │   ├── check-kvm.sh      # 环境检查脚本
+│   ├── check-port.sh     # 端口可用性检查
+│   ├── ssh-test.sh       # SSH连接测试
+│   ├── ssh-config.sh     # SSH配置脚本
 │   ├── download-image.sh # 镜像下载脚本
 │   ├── build-minifs.sh   # minifs构建脚本
 │   ├── extract-kernel.sh # 内核提取脚本
@@ -267,7 +377,7 @@ qemu-vm-launcher/
 ### install-deps.sh - 安装依赖包（openEuler）
 
 ```bash
-./scripts/install-deps.sh
+$SKILL_DIR/scripts/install-deps.sh
 ```
 
 自动安装：
@@ -280,7 +390,7 @@ qemu-vm-launcher/
 ### check-kvm.sh - 环境检查
 
 ```bash
-./scripts/check-kvm.sh
+$SKILL_DIR/scripts/check-kvm.sh
 ```
 
 输出JSON格式环境报告，包含：
@@ -293,7 +403,7 @@ qemu-vm-launcher/
 ### download-image.sh - 下载openEuler镜像
 
 ```bash
-./scripts/download-image.sh -o ./images -v 24.03-LTS
+$SKILL_DIR/scripts/download-image.sh -o ./images -v 24.03-LTS
 ```
 
 参数：
@@ -303,7 +413,7 @@ qemu-vm-launcher/
 ### extract-kernel.sh - 提取内核
 
 ```bash
-./scripts/extract-kernel.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/extract-kernel.sh -i openEuler.qcow2
 ```
 
 参数：
@@ -317,7 +427,7 @@ qemu-vm-launcher/
 **重要**: openEuler云镜像默认禁用SSH密码登录，必须运行此脚本修复。
 
 ```bash
-./scripts/fix-ssh-config.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
 ```
 
 参数：
@@ -334,7 +444,7 @@ qemu-vm-launcher/
 ### build-minifs.sh - 构建minifs
 
 ```bash
-./scripts/build-minifs.sh -o ./minifs.img -s 200M
+$SKILL_DIR/scripts/build-minifs.sh -o ./minifs.img -s 200M
 ```
 
 参数：
@@ -349,13 +459,13 @@ qemu-vm-launcher/
 ps aux | grep qemu
 
 # 绑核
-./scripts/pin-cpu-1v1.sh <pid> 0,2,4,6
+$SKILL_DIR/scripts/pin-cpu-1v1.sh <pid> 0,2,4,6
 ```
 
 ### pin-cpu-range.sh - 范围绑核
 
 ```bash
-./scripts/pin-cpu-range.sh <pid> 0-3
+$SKILL_DIR/scripts/pin-cpu-range.sh <pid> 0-3
 ```
 
 输出JSON格式环境报告。
@@ -363,7 +473,7 @@ ps aux | grep qemu
 ### download-image.sh - 下载openEuler镜像
 
 ```bash
-./scripts/download-image.sh -o ./images -v 24.03-LTS
+$SKILL_DIR/scripts/download-image.sh -o ./images -v 24.03-LTS
 ```
 
 参数：
@@ -373,7 +483,7 @@ ps aux | grep qemu
 ### build-minifs.sh - 构建minifs
 
 ```bash
-./scripts/build-minifs.sh -o ./minifs.img -s 200M
+$SKILL_DIR/scripts/build-minifs.sh -o ./minifs.img -s 200M
 ```
 
 参数：
@@ -384,7 +494,7 @@ ps aux | grep qemu
 ### extract-kernel.sh - 提取内核
 
 ```bash
-./scripts/extract-kernel.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/extract-kernel.sh -i openEuler.qcow2
 ```
 
 参数：
@@ -396,7 +506,7 @@ ps aux | grep qemu
 **重要**: openEuler云镜像默认禁用SSH密码登录，需要运行此脚本修复。
 
 ```bash
-./scripts/fix-ssh-config.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
 ```
 
 参数：
@@ -417,13 +527,13 @@ ps aux | grep qemu
 ps aux | grep qemu
 
 # 绑核
-./scripts/pin-cpu-1v1.sh <pid> 0,2,4,6
+$SKILL_DIR/scripts/pin-cpu-1v1.sh <pid> 0,2,4,6
 ```
 
 ### pin-cpu-range.sh - 范围绑核
 
 ```bash
-./scripts/pin-cpu-range.sh <pid> 0-3
+$SKILL_DIR/scripts/pin-cpu-range.sh <pid> 0-3
 ```
 
 ---
@@ -434,17 +544,17 @@ ps aux | grep qemu
 
 ```bash
 # 修复SSH
-./scripts/fix-ssh-config.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
 
 # 提取内核（鲲鹏定制QEMU）
-./scripts/extract-kernel.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/extract-kernel.sh -i openEuler.qcow2
 
 # 直接启动示例脚本
 cd qemu-vm-launcher
-./examples/start-basic.sh
+$SKILL_DIR/examples/start-basic.sh
 
 # 或后台启动
-nohup ./examples/start-basic.sh > vm.log 2>&1 &
+nohup $SKILL_DIR/examples/start-basic.sh > vm.log 2>&1 &
 
 # 等待启动完成（约60秒）
 sleep 60
@@ -497,7 +607,7 @@ openEuler云镜像默认SSH host keys为空文件，需要修复：
 
 ```bash
 # 使用修复脚本
-./scripts/fix-ssh-config.sh -i openEuler.qcow2
+$SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2
 ```
 
 ### Q: 密码登录被拒绝？
@@ -506,7 +616,7 @@ openEuler云镜像默认禁用SSH密码认证，需要修复：
 
 ```bash
 # 启用密码认证并设置root密码
-./scripts/fix-ssh-config.sh -i openEuler.qcow2 -p {VM_PASSWORD}
+$SKILL_DIR/scripts/fix-ssh-config.sh -i openEuler.qcow2 -p {VM_PASSWORD}
 
 # 测试SSH
 sshpass -p '{VM_PASSWORD}' ssh -o StrictHostKeyChecking=no root@localhost -p 2222
@@ -536,11 +646,11 @@ chmod 666 /dev/kvm
 - `templates/*.yaml`: 配置模板
 
 **openEuler专属问题**：
-- SSH密码认证：运行 `./scripts/fix-ssh-config.sh`
+- SSH密码认证：运行 `$SKILL_DIR/scripts/fix-ssh-config.sh`
 - 鲲鹏定制QEMU：使用直接内核启动（`-kernel vmlinuz -initrd initramfs.img`）
 - 固件问题：安装 `edk2-aarch64` 包
 
 **依赖包安装**：
 ```bash
-./scripts/install-deps.sh
+$SKILL_DIR/scripts/install-deps.sh
 ```

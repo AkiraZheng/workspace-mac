@@ -1,0 +1,28 @@
+{
+  "skill_name": "qemu-vm-launcher",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我在 ./.test_qcow2/ 目录下启动一个QEMU虚拟机，使用openEuler qcow2镜像，4核4G内存。要求能够通过SSH连接。工作目录: /mnt/shared/AI提效/5. 自动启动虚机",
+      "expected_output": "虚机启动成功，SSH可以连接到localhost:2222",
+      "files": [],
+      "assertions": [
+        {
+          "id": 1,
+          "name": "镜像下载成功",
+          "description": "qcow2镜像文件下载到.test_qcow2目录"
+        },
+        {
+          "id": 2,
+          "name": "虚机启动成功",
+          "description": "QEMU进程在运行"
+        },
+        {
+          "id": 3,
+          "name": "SSH连接成功",
+          "description": "可以通过sshpass连接到localhost:2222"
+        }
+      ]
+    }
+  ]
+}
