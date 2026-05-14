@@ -157,7 +157,21 @@ qemu-system-aarch64 --version | grep -i "kunpeng\|huawei\|ubios"
 
 # 4. 固件包（用于UEFI方案）
 rpm -qa | grep edk2-aarch64 || yum install edk2-aarch64
+
+# 5. SSH端口自动调度（无需用户选择）
+SKILL_DIR=$(find ~ -type d -name qemu-vm-launcher 2>/dev/null | head -1)
+PORT_RESULT=$($SKILL_DIR/scripts/check-port.sh)
+SSH_PORT=$(echo $PORT_RESULT | python3 -c "import sys,json; print(json.load(sys.stdin)['available_port'])")
+echo "自动分配SSH端口: $SSH_PORT"
+# 记录端口用于后续命令生成
 ```
+
+**端口调度逻辑**:
+- 起始端口: 2222（默认SSH转发端口）
+- 检查方法: ss + lsof双重检查
+- 自动递增: 若2222被占用,自动尝试2223、2224...直到找到可用端口
+- 最大范围: 65535
+- **无需用户选择端口,skill完全自动管理**
 
 ---
 
@@ -229,17 +243,7 @@ rpm -qa | grep edk2-aarch64 || yum install edk2-aarch64
 
 ---
 
-### □ 问题5: SSH端口配置
-
-- 询问SSH端口（默认 2222）
-- **自动检查端口可用性**: 调用 scripts/check-port.sh
-  - 若端口被占用: 自动递增寻找可用端口（2222 → 2223 → 2224...）
-  - 提示用户: `端口 2222 已被占用,将使用端口 2223`
-  - 记录最终端口用于后续命令生成
-
----
-
-### □ 问题6: 是否需要高级配置
+### □ 问题5: 是否需要高级配置
 
 询问: **是否需要高级配置？**
 
