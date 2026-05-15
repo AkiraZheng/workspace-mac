@@ -1,0 +1,117 @@
+From: Fix VFIO migration cmask validation failure
+Subject: [BUGFIX] Add pre_load callback to limit cmask for normal migration
+Date: 2026-05-15
+
+Bug Description:
+VFIO normal migration fails with PCI config space validation error when
+hardware read-only bits differ between source and target devices.
+
+Error example:
+  get_pci_config_device: Bad config data: i=0x4a read: 0 device: 8 cmask: ff wmask: 0
+
+Root Cause:
+VFIO migration checks config space bits using cmask. Hardware read-only
+bits (wmask=0) should not be checked because:
+1. Source and target are different physical devices
+2. Hardware bits naturally differ (device state, capabilities)
+3. Checking them causes false validation failures
+
+CPR migration handles this correctly via vfio_cpr_pci_pre_load() which
+limits cmask to emulated_config_bits only. Normal migration lacks this.
+
+Fix:
+Add pre_load callback to vmstate_vfio_pci_config that limits cmask to
+only check emulated bits, ignoring hardware read-only bits.
+
+Note:
+This mirrors the CPR fix in cpr.c:99-111. The comment there explains:
+"The kernel may change non-emulated config bits. Exclude them from
+the changed-bits check."
+
+---
+
+ hw/vfio/pci.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/hw/vfio/pci.c b/hw/vfio/pci.c
+index xxx..xxx 100644
+--- a/hw/vfio/pci.c
++++ b/hw/vfio/pci.c
+@@ -2860,6 +2860,27 @@ static const VMStateDescription vmstate_vfio_display = {
+ };
+ #endif
+ 
++/*
++ * vfio_pci_pre_load - Prepare for config space loading
++ *
++ * The kernel/hardware may change non-emulated config bits between
++ * source and target devices. These are hardware read-only bits that
++ * reflect device state and capabilities, which naturally differ.
++ *
++ * We limit cmask to only check emulated_config_bits, excluding
++ * hardware bits from validation to prevent false failures.
++ *
++ * This mirrors vfio_cpr_pci_pre_load() for normal migration.
++ */
++static int vfio_pci_pre_load(void *opaque)
++{
++    VFIOPCIDevice *vdev = opaque;
++    PCIDevice *pdev = PCI_DEVICE(vdev);
++    int size = MIN(pci_config_size(pdev), vdev->config_size);
++    int i;
++
++    for (i = 0; i < size; i++) {
++        pdev->cmask[i] &= vdev->emulated_config_bits[i];
++    }
++
++    return 0;
++}
++
+ static const VMStateDescription vmstate_vfio_pci_config = {
+     .name = "VFIOPCIDevice",
+     .version_id = 1,
+     .minimum_version_id = 1,
++    .pre_load = vfio_pci_pre_load,
+     .fields = (const VMStateField[]) {
+         VMSTATE_PCI_DEVICE(parent_obj, VFIOPCIDevice),
+         VMSTATE_MSIX_TEST(parent_obj, VFIOPCIDevice, vfio_msix_present),
+         VMSTATE_END_OF_LIST()
+     },
+     .subsections = (const VMStateDescription * const []) {
+         &vmstate_vfio_display,
+         NULL
+     }
+ };
+ 
+ static int vfio_pci_save_config(VFIODevice *vbasedev, QEMUFile *f, Error **errp)
+
+---
+
+Technical Details:
+
+cmask (change mask): Which bits to check for changes during migration
+wmask (write mask): Which bits are writable by guest (0 = hardware bits)
+emulated_config_bits: Which bits are emulated by QEMU (vs read from hardware)
+
+Validation logic (pci.c:815-816):
+    if ((config[i] ^ s->config[i]) &
+        s->cmask[i] & ~s->wmask[i] & ~s->w1cmask[i])
+
+This checks: cmask bits that are hardware read-only.
+
+Problem: If cmask=ff and wmask=0, ALL bits are checked.
+Solution: Limit cmask to emulated bits only.
+
+Example scenario:
+- Source device: config[0x4a] = 0 (saved in migration file)
+- Target device: config[0x4a] = 8 (hardware state at init)
+- cmask[0x4a] = ff (check all bits) - BEFORE fix
+- cmask[0x4a] = emulated_bits (check emulated only) - AFTER fix
+- If emulated_bits[0x4a] = 0 (hardware bits only), validation passes
+
+This fix allows hardware read-only bits to differ naturally without
+causing migration failures, while still validating QEMU-emulated bits.
+
+---
+
+Signed-off-by: VFIO Team

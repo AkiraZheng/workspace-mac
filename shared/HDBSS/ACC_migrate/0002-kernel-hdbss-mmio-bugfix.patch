@@ -1,0 +1,73 @@
+From: Fix HDBSS DBM incorrectly applied to VFIO MMIO regions
+Subject: [BUGFIX] Add !device check to prevent DBM for MMIO memory
+Date: 2026-05-15
+
+Bug Description:
+HDBSS incorrectly adds DBM (Dirty Bit Modifier) to VFIO MMIO BAR regions,
+causing device access issues and migration failures.
+
+Root Cause:
+In user_mem_abort(), the DBM setting logic (mmu.c:1682) does not check
+if the fault is for device/MMIO memory. This causes:
+1. VFIO MMIO BAR Stage-2 PTEs get DBM bit
+2. HDBSS hardware attempts dirty tracking on MMIO regions
+3. MMIO is not real memory, hardware behavior becomes undefined
+4. Device state may become inconsistent
+5. Migration verification fails on PCI config space hardware bits
+
+Fix:
+Add !device check before setting DBM, ensuring DBM is only used for
+RAM memory, not for Device/MMIO memory.
+
+Tested:
+- Two-round VFIO migration with hisi_zip accelerator
+- Before fix: Second migration fails with PCI config mismatch
+- After fix: All migrations succeed
+
+---
+
+ arch/arm64/kvm/mmu.c | 2 +- 
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index xxx..xxx 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1681,7 +1681,7 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 
+ #ifdef CONFIG_ARM64_HDBSS
+-	if (kvm->enable_hdbss && logging_active)
++	if (!device && kvm->enable_hdbss && logging_active)
+ 		prot |= KVM_PGTABLE_PROT_DBM;
+ #endif
+ 
+---
+
+Explanation:
+
+The 'device' variable is set at line 1620:
+    if (kvm_is_device_pfn(pfn)) {
+        device = true;
+    }
+
+kvm_is_device_pfn() checks:
+    return !pfn_is_map_memory(pfn);
+
+VFIO MMIO BARs have PFNs that are NOT map memory (not in memblock),
+so device=true for all VFIO MMIO regions.
+
+DBM (Dirty Bit Modifier) is a hardware feature for tracking RAM dirty
+pages. It should NEVER be used for MMIO regions because:
+1. MMIO is device memory, not RAM
+2. HDBSS hardware behavior for MMIO is undefined
+3. MMIO writes are device operations, not memory modifications
+4. Dirty tracking MMIO causes no benefit and potential harm
+
+This fix ensures DBM is only applied when:
+- !device: Memory is RAM (not MMIO)
+- enable_hdbss: HDBSS feature is enabled
+- logging_active: Dirty logging is active (migration)
+
+---
+
+Signed-off-by: HDBSS Team

@@ -1,0 +1,193 @@
+From: VFIO Migration Debug Patch
+Subject: Add debug logging for VFIO PCI config space migration
+Date: 2026-05-15
+
+This patch adds comprehensive debug logging to track VFIO config space
+migration flow, specifically the cmask handling and validation that causes
+migration failures.
+
+Debug points:
+1. pci.c: get_pci_config_device - config space validation and cmask check
+2. vfio/pci.c: vfio_pci_read_config - config read and emulated bits
+3. vfio/cpr.c: vfio_cpr_pci_pre_load - cmask limitation (CPR only)
+
+---
+
+ hw/pci/pci.c           | 25 +++++++++++++++
+ hw/vfio/pci.c          | 30 ++++++++++++++++--
+ hw/vfio/cpr.c          | 15 +++++++++
+ 3 files changed, 70 insertions(+), 2 deletions(-)
+
+diff --git a/hw/pci/pci.c b/hw/pci/pci.c
+index xxx..xxx 100644
+--- a/hw/pci/pci.c
++++ b/hw/pci/pci.c
+@@ -803,6 +803,13 @@ static int get_pci_config_device(QEMUFile *f, void *pv, size_t size,
+ {
+     PCIDevice *s = container_of(pv, PCIDevice, config);
+     uint8_t *config;
+     int i;
++    
++    /* DEBUG: Track config space loading */
++    printf("VFIO_DEBUG_LOAD: Loading PCI config space for device %s, size=%zu\n",
++           s->name, size);
+ 
+     assert(size == pci_config_size(s));
+     config = g_malloc(size);
+@@ -813,6 +820,15 @@ static int get_pci_config_device(QEMUFile *f, void *pv, size_t size,
+     for (i = 0; i < size; ++i) {
+         if ((config[i] ^ s->config[i]) &
+             s->cmask[i] & ~s->wmask[i] & ~s->w1cmask[i]) {
++            
++            /* DEBUG: Detailed mismatch information */
++            printf("VFIO_DEBUG_VALIDATION_FAIL: "
++                   "Config mismatch at offset 0x%x: "
++                   "read(source)=0x%x device(target)=0x%x "
++                   "cmask=0x%x wmask=0x%x w1cmask=0x%x "
++                   "check_result=0x%x\n",
++                   i, config[i], s->config[i],
++                   s->cmask[i], s->wmask[i], s->w1cmask[i],
++                   (config[i] ^ s->config[i]) & s->cmask[i] & ~s->wmask[i]);
++
+             error_report("%s: Bad config data: i=0x%x read: %x device: %x "
+                          "cmask: %x wmask: %x w1cmask:%x", __func__,
+                          i, config[i], s->config[i],
+@@ -823,6 +840,11 @@ static int get_pci_config_device(QEMUFile *f, void *pv, size_t size,
+ 
+     memcpy(s->config, config, size);
+ 
++    /* DEBUG: Track successful load */
++    printf("VFIO_DEBUG_LOAD_SUCCESS: Config space loaded successfully\n");
++
+     pci_update_mappings(s);
+     if (IS_PCI_BRIDGE(s)) {
+         pci_bridge_update_mappings(PCI_BRIDGE(s));
+diff --git a/hw/vfio/pci.c b/hw/vfio/pci.c
+index xxx..xxx 100644
+--- a/hw/vfio/pci.c
++++ b/hw/vfio/pci.c
+@@ -1385,6 +1385,15 @@ uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
+ {
+     VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(pdev);
+     VFIODevice *vbasedev = &vdev->vbasedev;
+     uint32_t emu_bits = 0, emu_val = 0, phys_val = 0, val;
++    
++    /* DEBUG: Track config space reads */
++    if (addr == 0x4a) {
++        printf("VFIO_DEBUG_READ_0x4a: "
++               "Reading config offset 0x4a, len=%d\n", len);
++    }
+ 
+     memcpy(&emu_bits, vdev->emulated_config_bits + addr, len);
+     emu_bits = le32_to_cpu(emu_bits);
+@@ -1398,6 +1407,16 @@ uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
+     if (~emu_bits & (0xffffffffU >> (32 - len * 8))) {
+         ssize_t ret;
+ 
++        /* DEBUG: Track physical reads from VFIO device */
++        if (addr == 0x4a) {
++            printf("VFIO_DEBUG_READ_0x4a_PHYS: "
++                   "Reading from VFIO hardware, emu_bits=0x%x, "
++                   "need_phys_read=%d\n",
++                   emu_bits, (~emu_bits & (0xffffffffU >> (32 - len * 8))) != 0);
++        }
++
+         ret = vfio_pci_config_space_read(vdev, addr, len, &phys_val);
+         if (ret != len) {
+             error_report("%s(%s, 0x%x, 0x%x) failed: %s",
+@@ -1408,6 +1427,15 @@ uint32_t vfio_pci_read_config(PCIDevice *pdev, uint32_t addr, int len)
+         phys_val = le32_to_cpu(phys_val);
+     }
+ 
++    /* DEBUG: Show final value */
++    if (addr == 0x4a) {
++        printf("VFIO_DEBUG_READ_0x4a_RESULT: "
++               "emu_val=0x%x phys_val=0x%x emu_bits=0x%x "
++               "final_val=0x%x\n",
++               emu_val, phys_val, emu_bits,
++               (emu_val & emu_bits) | (phys_val & ~emu_bits));
++    }
++
+     val = (emu_val & emu_bits) | (phys_val & ~emu_bits);
+ 
+     trace_vfio_pci_read_config(vdev->vbasedev.name, addr, len, val);
+@@ -2877,6 +2905,13 @@ static int vfio_pci_save_config(VFIODevice *vbasedev, QEMUFile *f, Error **errp)
+ {
+     VFIOPCIDevice *vdev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
+ 
++    /* DEBUG: Track config space saving */
++    printf("VFIO_DEBUG_SAVE: Saving VFIO config space for %s, "
++           "config_size=%d\n",
++           vbasedev->name, vdev->config_size);
++
+     return vmstate_save_state(f, &vmstate_vfio_pci_config, vdev, NULL,
+                               errp);
+ }
+@@ -2885,6 +2920,13 @@ static int vfio_pci_load_config(VFIODevice *vbasedev, QEMUFile *f)
+ {
+     VFIOPCIDevice *vdev = container_of(vbasedev, VFIOPCIDevice, vbasedev);
+     PCIDevice *pdev = PCI_DEVICE(vdev);
++    
++    /* DEBUG: Track config space loading start */
++    printf("VFIO_DEBUG_LOAD_START: Loading VFIO config space for %s, "
++           "current config[0x4a]=0x%x\n",
++           vbasedev->name, pdev->config[0x4a]);
+ 
+     pcibus_t old_addr[PCI_NUM_REGIONS - 1];
+     int bar, ret;
+diff --git a/hw/vfio/cpr.c b/hw/vfio/cpr.c
+index xxx..xxx 100644
+--- a/hw/vfio/cpr.c
++++ b/hw/vfio/cpr.c
+@@ -99,6 +99,14 @@ static int vfio_cpr_pci_pre_load(void *opaque)
+ {
+     VFIOPCIDevice *vdev = opaque;
+     PCIDevice *pdev = PCI_DEVICE(vdev);
+     int size = MIN(pci_config_size(pdev), vdev->config_size);
+     int i;
++    
++    /* DEBUG: Track CPR pre_load invocation */
++    printf("VFIO_DEBUG_CPR_PRELOAD: vfio_cpr_pci_pre_load called, "
++           "will limit cmask for %d bytes\n", size);
+ 
+     for (i = 0; i < size; i++) {
+         pdev->cmask[i] &= vdev->emulated_config_bits[i];
+@@ -107,6 +115,13 @@ static int vfio_cpr_pci_pre_load(void *opaque)
+         if (i == 0x4a) {
++            printf("VFIO_DEBUG_CPR_PRELOAD_0x4a: "
++                   "cmask[0x4a] BEFORE=0x%x, emulated_bits=0x%x, "
++                   "cmask AFTER=0x%x\n",
++                   old_cmask, vdev->emulated_config_bits[i],
++                   pdev->cmask[i]);
++        }
++
+     return 0;
+ }
+
+---
+
+Debug Output Analysis:
+
+Expected output for normal migration (without fix):
+1. VFIO_DEBUG_LOAD: Loading config space
+2. VFIO_DEBUG_READ_0x4a: Reading offset 0x4a
+3. VFIO_DEBUG_READ_0x4a_RESULT: phys_val shows hardware state
+4. VFIO_DEBUG_LOAD_START: Current config[0x4a] shows target device state
+5. VFIO_DEBUG_VALIDATION_FAIL: Mismatch detected!
+
+Expected output for CPR migration:
+1. VFIO_DEBUG_CPR_PRELOAD: cmask limitation applied
+2. VFIO_DEBUG_CPR_PRELOAD_0x4a: cmask reduced, validation passes
+
+Bug symptom:
+- VFIO_DEBUG_VALIDATION_FAIL shows mismatch at 0x4a
+- cmask=ff, wmask=0 (checking hardware read-only bits)
+- read=0, device=8 (source vs target mismatch)
+
+Usage:
+1. Apply this patch to QEMU
+2. Compile QEMU
+3. Run migration tests with debug output redirected to file
+4. Analyze output to confirm cmask issue
+
+---
