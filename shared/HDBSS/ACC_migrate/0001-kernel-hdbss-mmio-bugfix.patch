@@ -1,0 +1,50 @@
+From 84cf01dd97037bf369684a193173c65f70507f5c Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 16 May 2026 09:37:53 +0800
+Subject: [PATCH] KVM: arm64: Fix HDBSS DBM incorrectly applied to VFIO MMIO
+ regions
+
+Bug Description:
+HDBSS incorrectly adds DBM (Dirty Bit Modifier) to VFIO MMIO BAR regions,
+causing device access issues and migration failures.
+
+Root Cause:
+In user_mem_abort(), the DBM setting logic does not check if the fault
+is for device/MMIO memory. This causes VFIO MMIO BAR Stage-2 PTEs to
+get DBM bit, and HDBSS hardware attempts dirty tracking on MMIO regions.
+
+Since MMIO is not real memory, this leads to:
+- Undefined hardware behavior
+- Device state inconsistency
+- Migration verification failures on PCI config space hardware bits
+
+Fix:
+Add !device check before setting DBM, ensuring DBM is only used for
+RAM memory, not for Device/MMIO memory.
+
+Tested:
+- Two-round VFIO migration with hisi_zip accelerator
+- Before fix: Second migration fails with PCI config mismatch
+- After fix: All migrations succeed
+
+Signed-off-by: HDBSS Team <hdbss@example.com>
+---
+ arch/arm64/kvm/mmu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index fbc62b27adc8..b505936a2f64 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1679,7 +1679,7 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 		prot |= KVM_PGTABLE_PROT_W;
+ 
+ #ifdef CONFIG_ARM64_HDBSS
+-	if (kvm->enable_hdbss && logging_active)
++	if (!device && kvm->enable_hdbss && logging_active)
+ 		prot |= KVM_PGTABLE_PROT_DBM;
+ #endif
+ 
+-- 
+2.43.0
+
