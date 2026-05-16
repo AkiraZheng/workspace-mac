@@ -1,0 +1,32 @@
+From df775c185c9ff20e58fd9cb317d951b937d53c85 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sat, 16 May 2026 10:56:19 +0800
+Subject: [PATCH 1/2] KVM: arm64: HDBSS should not apply DBM to VFIO MMIO
+ regions
+
+HDBSS incorrectly adds DBM to VFIO MMIO BAR regions.
+DBM should only be used for RAM, not device memory.
+
+Fix: Add !device check before setting DBM bit.
+
+Signed-off-by: OpenEuler Kernel Team <kernel@openeuler.org>
+---
+ arch/arm64/kvm/mmu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 18ef806c8dc3..34061605e906 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1682,7 +1682,7 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (writable)
+ 		prot |= KVM_PGTABLE_PROT_W;
+ 
+-	if (writable && kvm->arch.enable_hdbss && logging_active)
++	if (!device && writable && kvm->arch.enable_hdbss && logging_active)
+ 		prot |= KVM_PGTABLE_PROT_DBM;
+ 
+ 	if (exec_fault)
+-- 
+2.43.0
+
