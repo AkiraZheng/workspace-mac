@@ -1,33 +1,14 @@
-From 84cf01dd97037bf369684a193173c65f70507f5c Mon Sep 17 00:00:00 2001
+From 7b35155128e2b8399776617681dc51a49f9d3ae0 Mon Sep 17 00:00:00 2001
 From: Super User <root@localhost.localdomain>
-Date: Sat, 16 May 2026 09:37:53 +0800
-Subject: [PATCH] KVM: arm64: Fix HDBSS DBM incorrectly applied to VFIO MMIO
- regions
+Date: Sat, 16 May 2026 10:14:11 +0800
+Subject: [PATCH] KVM: arm64: HDBSS should not apply DBM to VFIO MMIO regions
 
-Bug Description:
-HDBSS incorrectly adds DBM (Dirty Bit Modifier) to VFIO MMIO BAR regions,
-causing device access issues and migration failures.
+HDBSS incorrectly adds DBM to VFIO MMIO BAR regions.
+DBM should only be used for RAM, not device memory.
 
-Root Cause:
-In user_mem_abort(), the DBM setting logic does not check if the fault
-is for device/MMIO memory. This causes VFIO MMIO BAR Stage-2 PTEs to
-get DBM bit, and HDBSS hardware attempts dirty tracking on MMIO regions.
+Fix: Add !device check before setting DBM bit.
 
-Since MMIO is not real memory, this leads to:
-- Undefined hardware behavior
-- Device state inconsistency
-- Migration verification failures on PCI config space hardware bits
-
-Fix:
-Add !device check before setting DBM, ensuring DBM is only used for
-RAM memory, not for Device/MMIO memory.
-
-Tested:
-- Two-round VFIO migration with hisi_zip accelerator
-- Before fix: Second migration fails with PCI config mismatch
-- After fix: All migrations succeed
-
-Signed-off-by: HDBSS Team <hdbss@example.com>
+Signed-off-by: OpenEuler Kernel Team <kernel@openeuler.org>
 ---
  arch/arm64/kvm/mmu.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
