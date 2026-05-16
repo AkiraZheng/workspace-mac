@@ -1,61 +1,25 @@
-From 24304c4f6c112b91bc5bfc245b35c9fd68e3b7a2 Mon Sep 17 00:00:00 2001
+From 0c7ae6d4872635e30da453891e96fb1b1aa36812 Mon Sep 17 00:00:00 2001
 From: Super User <root@localhost.localdomain>
-Date: Sat, 16 May 2026 09:41:14 +0800
-Subject: [PATCH] vfio: Add pre_load callback to limit cmask for normal
- migration
+Date: Sat, 16 May 2026 10:58:35 +0800
+Subject: [PATCH 1/2] vfio/pci: Add pre_load to limit cmask validation
 
-Bug Description:
-VFIO normal migration fails with PCI config space validation error
-when hardware read-only bits differ between source and target devices.
+Hardware read-only bits should not be validated during migration.
+Fix: Limit cmask to only check emulated bits.
 
-Error example:
-  get_pci_config_device: Bad config data: i=0x4a read: 0 device: 8 cmask: ff wmask: 0
-
-Root Cause:
-VFIO migration checks config space bits using cmask. Hardware read-only
-bits (wmask=0) should not be checked because:
-- Source and target are different physical devices
-- Hardware bits naturally differ (device state, capabilities)
-- Checking them causes false validation failures
-
-CPR migration handles this correctly via vfio_cpr_pci_pre_load() which
-limits cmask to emulated_config_bits only. Normal migration lacks this.
-
-Fix:
-Add pre_load callback to vmstate_vfio_pci_config that limits cmask to
-only check emulated bits, ignoring hardware read-only bits.
-
-Note:
-This mirrors the CPR fix in cpr.c:99-111. The comment there explains:
-'The kernel may change non-emulated config bits. Exclude them from
-the changed-bits check.'
-
-Signed-off-by: VFIO Team <vfio@example.com>
+Signed-off-by: QEMU VFIO Team <vfio@qemu.org>
 ---
- hw/vfio/pci.c | 27 +++++++++++++++++++++++++++
- 1 file changed, 27 insertions(+)
+ hw/vfio/pci.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
 
 diff --git a/hw/vfio/pci.c b/hw/vfio/pci.c
-index b2a07f6bb4..c843163da3 100644
+index b2a07f6bb4..df2d5d775d 100644
 --- a/hw/vfio/pci.c
 +++ b/hw/vfio/pci.c
-@@ -2859,10 +2859,37 @@ static const VMStateDescription vmstate_vfio_display = {
+@@ -2859,10 +2859,25 @@ static const VMStateDescription vmstate_vfio_display = {
      }
  };
  
-+/*
-+ * vfio_pci_pre_load - Prepare for config space loading
-+ *
-+ * The kernel/hardware may change non-emulated config bits between
-+ * source and target devices. These are hardware read-only bits that
-+ * reflect device state and capabilities, which naturally differ.
-+ *
-+ * We limit cmask to only check emulated_config_bits, excluding
-+ * hardware bits from validation to prevent false failures.
-+ *
-+ * This mirrors vfio_cpr_pci_pre_load() for normal migration.
-+ */
-+static int vfio_pci_pre_load(void *opaque)
++static int vfio_pci_config_pre_load(void *opaque)
 +{
 +    VFIOPCIDevice *vdev = opaque;
 +    PCIDevice *pdev = PCI_DEVICE(vdev);
@@ -73,7 +37,7 @@ index b2a07f6bb4..c843163da3 100644
      .name = "VFIOPCIDevice",
      .version_id = 1,
      .minimum_version_id = 1,
-+    .pre_load = vfio_pci_pre_load,
++    .pre_load = vfio_pci_config_pre_load,
      .fields = (const VMStateField[]) {
          VMSTATE_PCI_DEVICE(parent_obj, VFIOPCIDevice),
          VMSTATE_MSIX_TEST(parent_obj, VFIOPCIDevice, vfio_msix_present),

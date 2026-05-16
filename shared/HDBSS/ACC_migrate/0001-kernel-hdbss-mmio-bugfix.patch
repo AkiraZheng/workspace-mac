@@ -1,7 +1,8 @@
-From 7b35155128e2b8399776617681dc51a49f9d3ae0 Mon Sep 17 00:00:00 2001
+From df775c185c9ff20e58fd9cb317d951b937d53c85 Mon Sep 17 00:00:00 2001
 From: Super User <root@localhost.localdomain>
-Date: Sat, 16 May 2026 10:14:11 +0800
-Subject: [PATCH] KVM: arm64: HDBSS should not apply DBM to VFIO MMIO regions
+Date: Sat, 16 May 2026 10:56:19 +0800
+Subject: [PATCH 1/2] KVM: arm64: HDBSS should not apply DBM to VFIO MMIO
+ regions
 
 HDBSS incorrectly adds DBM to VFIO MMIO BAR regions.
 DBM should only be used for RAM, not device memory.
@@ -14,18 +15,18 @@ Signed-off-by: OpenEuler Kernel Team <kernel@openeuler.org>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index fbc62b27adc8..b505936a2f64 100644
+index 18ef806c8dc3..34061605e906 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
-@@ -1679,7 +1679,7 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+@@ -1682,7 +1682,7 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (writable)
  		prot |= KVM_PGTABLE_PROT_W;
  
- #ifdef CONFIG_ARM64_HDBSS
--	if (kvm->enable_hdbss && logging_active)
-+	if (!device && kvm->enable_hdbss && logging_active)
+-	if (writable && kvm->arch.enable_hdbss && logging_active)
++	if (!device && writable && kvm->arch.enable_hdbss && logging_active)
  		prot |= KVM_PGTABLE_PROT_DBM;
- #endif
  
+ 	if (exec_fault)
 -- 
 2.43.0
 
