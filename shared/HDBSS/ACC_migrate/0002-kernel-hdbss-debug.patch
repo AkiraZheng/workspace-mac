@@ -1,6 +1,6 @@
-From 5f6a3febffdeab1504790bf7f0b79501d3393d44 Mon Sep 17 00:00:00 2001
+From 6872cc8e705ee5a9080dcded4827904cba235085 Mon Sep 17 00:00:00 2001
 From: Super User <root@localhost.localdomain>
-Date: Sat, 16 May 2026 10:56:40 +0800
+Date: Sat, 16 May 2026 11:53:07 +0800
 Subject: [PATCH 2/2] KVM: arm64: Add debug logging for HDBSS MMIO tracking
 
 Only print when DBM would be incorrectly added to MMIO.
