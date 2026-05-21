@@ -1,8 +1,8 @@
 # Patchset Merge Skill
 
-Claude Code / OpenCode skill，从用户指定的 patch 文件夹逐个合入 patchset。
+Claude Code / OpenCode skill，智能 patchset 合入。内置多场景检测：自动判断是否需要先 revert 旧代码、是否需要从上游拉取依赖 patch、是否部分已合入。
 
-纯指令驱动 —— `SKILL.md` 定义完整工作流，AI 读取后用 bash 直接执行，不依赖 Python 代码。
+纯指令驱动 —— `SKILL.md` 定义完整工作流，AI 读取后用 bash + Agent 直接执行，不依赖 Python 代码。
 
 ## 安装
 
@@ -11,28 +11,13 @@ cd patchset-merge
 ./install.sh
 ```
 
-安装脚本自动检测当前环境（Claude Code / OpenCode / Gemini CLI）并部署到对应路径。
-同时生成 Copilot、Cursor、通用 Markdown 降级版本到 `dist/` 目录。
-
-## 平台支持
-
-| 平台 | 支持级别 | 安装方式 |
-|------|---------|---------|
-| Claude Code | 原生（完整） | `install.sh` 自动部署到 `~/.claude/skills/` |
-| OpenCode | 原生（完整） | `install.sh` 自动部署到 `~/.config/opencode/skills/` |
-| Gemini CLI | 降级（自包含） | `install.sh` 生成到 `~/.agents/skills/` |
-| GitHub Copilot | 降级（自包含） | 将 `dist/copilot/*.md` 复制到 `.github/copilot-instructions.md` |
-| Cursor | 降级（自包含） | 将 `dist/cursor/*.md` 复制到 `.cursorrules` |
-| 通用 Markdown | 降级（自包含） | 使用 `dist/generic/*.md` |
-
-**原生**：保留 superpowers + karpathy-guidelines 完整体验，skill 间可互相调用。
-**降级**：自包含单文件，内联 karpathy-guidelines 行为准则，无外部依赖。
+安装脚本自动检测 Claude Code / OpenCode 并部署到对应路径。
 
 ## 依赖
 
 | 依赖 | 类型 | 说明 |
 |------|------|------|
-| `karpathy-guidelines` | Skill | AI 行为准则（install.sh 自动部署，降级版内联） |
+| `karpathy-guidelines` | Skill | AI 行为准则（install.sh 自动部署） |
 | `superpowers` | Claude Code 插件 | Claude Code 需要，OpenCode 不需要（install.sh 自动处理） |
 
 ## 使用
@@ -40,40 +25,51 @@ cd patchset-merge
 ### Claude Code
 
 ```
-/merge-patchset <patch_dir> [--source <源码目录>] [--branch <分支名>]
-/revert-patchset <commit|范围|关键词> [--source <源码目录>] [--branch <分支名>]
+/merge-patchset <patch_dir> [--source <目标仓库>] [--upstream <源仓库>] [--branch <分支名>]
 ```
 
 ### OpenCode
 
-直接描述需求，OpenCode 自动发现并加载对应 skill。例如：
+直接描述需求，OpenCode 自动发现并加载 skill。例如：
 
 ```
-帮我合入 /tmp/patches/ 下的 patchset
-回退 hdbss 相关的 commit --source /root/openeuler/kernel
+帮我合入 /tmp/patches/ 下的 patchset，目标仓库是 /root/openeuler/kernel
+这些 patch 来自 linux-stable，上游仓库在 /root/linux，帮我检查有没有缺失的依赖
 ```
-
-### 其他平台
-
-将 `dist/<platform>/` 下的 `.md` 文件内容作为 AI 的系统指令 / 规则文件使用。
 
 ## 工作流
 
-1. 加载前置 skill（平台感知：Claude Code 用 Skill 工具，OpenCode 自动发现）
-2. 验证 patch 文件夹有效性
-3. 解析 .patch 文件，按文件名排序
-4. 创建新分支（自动命名或用户指定）
-5. 按顺序逐个合入：`git apply --check` → `git am` → 解冲突 → `git apply --3way` → `git apply`
-6. 每个 patch 单独 commit + 编译验证
-7. 遇问题在对话中交互决策，不跳过
-8. 生成差异报告
+### 相位 0 — 前置检测（并行 agent）
+1. Agent A：冲突预检 — 扫描目标仓库，判断每个 patch 的冲突风险
+2. Agent B：依赖检测 — 在上游仓库查找缺失的依赖 commit（需 `--upstream`）
+3. Agent C：已合入检测 — 检查哪些 patch 已存在于目标仓库
+
+### 相位 1 — 场景判定
+汇总 agent 结果，判定场景（A~E），向用户展示确认：
+
+| 场景 | 触发条件 | 前置操作 |
+|------|---------|---------|
+| A — 干净合入 | 冲突风险低，无依赖缺失 | 直接 merge |
+| B — 先 Revert | 高冲突 + 有旧版本 commit | 逆序 revert 旧 commit |
+| C — 补依赖 | 上游有缺失的依赖 commit | 从上游拉取 patch |
+| D — 部分跳过 | 部分 patch 已合入 | 跳过已合入的 |
+| E — 路径适配 | patch 文件路径在目标仓库不存在 | 搜索实际路径并映射 |
+
+### 相位 2 — 执行 merge
+1. 按场景执行前置操作（revert / 拉依赖 / 路径适配）
+2. 创建新分支（自动命名或用户指定）
+3. 逐个合入：`git apply --check` → `git am` → 解冲突 → `git apply --3way` → `git apply`
+4. 每个 patch 单独 commit + 编译验证
+5. 遇问题在对话中交互决策
+6. 生成差异报告
 
 ## 核心约束
 
-- 逐个合入，不跳过任何 patch
-- 每个 patch 单独 commit
+- 逐个合入，不跳过任何 patch（除非确认已合入）
+- 每个 patch 单独 commit；revert 也单独 commit
 - 遇错即停，不擅自决定
 - 分支保留不删除
+- revert 时逆序执行
 - 所有输出中文
 
 ## 项目结构
@@ -81,14 +77,8 @@ cd patchset-merge
 ```
 patchset-merge/
 ├── SKILL.md                         # merge-patchset 源文件
-├── revert-patchset-SKILL.md         # revert-patchset 源文件
-├── karpathy-guidelines-SKILL.md     # 行为准则（Tier 1 独立部署，Tier 2 内联）
-├── install.sh                       # 多平台安装脚本
+├── karpathy-guidelines-SKILL.md     # 行为准则
+├── install.sh                       # 安装脚本
 ├── CLAUDE.md
-├── README.md
-└── dist/                            # 生成的 Tier 2 降级版本
-    ├── copilot/
-    ├── cursor/
-    ├── gemini/
-    └── generic/
+└── README.md
 ```
