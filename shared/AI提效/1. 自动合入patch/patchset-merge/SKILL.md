@@ -252,25 +252,48 @@ git checkout -b <branch_name>
 
 **前置检查**：用 `git apply --check <file.patch>` 检测是否已合入。
 
-通过检查后，按以下顺序尝试：
+通过检查后，按以下策略链条逐个尝试。策略按"保住 git 历史 → 降级到纯文件修改"的顺序排列：
 
-| 序号 | 策略 | 命令 | 成功时 | 失败时 |
-|------|------|------|--------|--------|
-| ① | `git am` | `git am <file.patch>` | 已自动 commit，继续下一个 | 检查冲突 → 进入② |
-| ② | 解冲突 | 读取冲突文件 → 优先保留 patchset 内容 → 目标仓库与patchset无关的冲突内容不能擅自删除 → `git add` + `git commit` | 继续下一个 | 进入③ |
-| ③ | `git apply --3way` | `git apply --3way <file.patch>` | `git add .` + `git commit` | 进入④ |
-| ④ | `git apply` | `git apply <file.patch>` | `git add .` + `git commit` | **报告用户** |
+| 序号 | 策略 | 命令 | 适用场景 | 成功时 | 失败时 |
+|------|------|------|---------|--------|--------|
+| ① | `git am` | `git am <file.patch>` | 默认首选，完整保留 commit 元信息 | 自动 commit，继续 | 进入② |
+| ② | `git am --3way` | `git am --3way <file.patch>` | 上下文轻微偏移；**非冲突文件的修改会被保留**，只标记冲突文件 | 自动 commit，继续 | 有冲突 → 进入③；完全失败 → 进入④ |
+| ③ | `git am --ignore-whitespace` | `git am --ignore-whitespace <file.patch>` | Tab/Space 不一致、行尾空格等空白字符差异导致的假冲突 | 自动 commit，继续 | 进入④ |
+| ④ | `patch --fuzz` | `patch -p1 --fuzz=3 < <file.patch>` | 上下文行号因无关变更偏移，但实际修改内容仍适用 | `git add .` + `git commit` | 进入⑤ |
+| ⑤ | `git apply --3way` | `git apply --3way <file.patch>` | 需要三路合并的更复杂场景 | `git add .` + `git commit` | 进入⑥ |
+| ⑥ | `git apply --reject` | `git apply --reject <file.patch>` | 部分 hunk 已合入、部分需合入 | 检查 `.rej` 文件内容 → 手动处理有效 .rej → `git add .` + `git commit` | 进入⑦ |
+| ⑦ | 手解冲突 | 见下方「手解冲突分类指南」 | 上述自动化策略全部失败 | 按冲突类型选择子策略 | 进入⑧ |
+| ⑧ | `git apply` | `git apply <file.patch>` | 最后手段，放弃 commit 元信息 | `git add .` + `git commit` | **报告用户** |
 
-**冲突解决规则**: 优先保留 patchset 的修改内容。
+**冲突解决规则**: 优先保留 patchset 的修改内容。目标仓库中与 patchset 无关的已有代码不能擅自删除。
+
+**手解冲突分类指南**（策略⑦的具体化）：
+
+| 冲突类型 | 诊断方法 | 解决方式 |
+|---------|---------|---------|
+| 上下文偏移 | patch hunk 行号与目标文件对不上，但上下文内容能部分匹配 | 手动调整 `@@` 行号，或回到策略④用 `patch --fuzz` |
+| 空白差异 | 内容相同但缩进/空白风格不同 | 回到策略③ `git am --ignore-whitespace` |
+| 函数签名变更 | 目标仓库中函数多了参数、返回值类型变了 | 提取目标仓库签名 → 适配 patch 中的调用 → `git add` + `git commit` |
+| 部分已合入 | 部分 hunk 的目标代码已存在 | 回到策略⑥ `git apply --reject`，忽略已合入的 .rej |
+| 文件被移动 | 文件在目标仓库的路径不同 | `find <source> -name "basename"` 找到实际路径 → `sed` 替换 patch 中路径 |
+| 头文件缺失 | patch 引用的 `#include` 在目标仓库不存在 | `find <source> -name "*.h" \| xargs grep -l "<符号>"` 找等价头文件，或从 `--upstream` 引入 |
+| 结构性冲突 | 目标仓库对该文件做了大规模重构 | 分析 patch 语义意图 → 展示分析结果给用户 → 用户决定方向 |
 
 每个 patch 合入后：
-1. 按「输出规范 → 相位 3 输出 → 每个 patch 合入后输出进度」模板展示结果
+1. 按「输出规范 → 相位 3 输出 → 每个 patch 合入后输出进度」模板展示结果（含所使用的策略序号）
 2. 对成功合入的 patch，立即生成 per-patch 分析文档到 `<source_dir>/.patchset-analysis/`（模板见「输出规范 → per-patch 分析文档」），避免事后遗忘细节
 
 **检测冲突文件**:
 ```bash
 git diff --name-only --diff-filter=U
 ```
+
+**策略② `git am --3way` 说明**：此策略的关键优势是**保留非冲突文件的修改**。即使部分文件有冲突，其他文件的变更已经被 stage，只需处理冲突文件即可。冲突解决后用 `git am --continue` 而非重新 commit。
+
+**策略⑥ `git apply --reject` 说明**：生成 `.rej` 文件包含无法自动合入的 hunk。对每个 `.rej`：
+- 如果内容是 patch 新增但目标仓库已有 → 删除 .rej
+- 如果内容是真正需要合入的 → 手动将该 hunk 写入源文件
+- 处理完后 `git add .` + `git commit`
 
 #### 3.6 每个 patch 合入后编译验证
 
@@ -306,7 +329,9 @@ fi
 | Revert 确认 | 要 revert 的 commit 列表（hash + 标题） | 确认 / 逐条选择 / 取消 |
 | 依赖拉取确认 | 推荐的依赖 commit 列表 | 全部拉取 / 逐条选择 / 取消 |
 | 路径映射 | 原始路径 → 目标路径的映射表 | 确认 / 手动修正 / 取消 |
-| 全部策略失败 | patch 编号和标题、错误信息、冲突文件 | 手动处理后继续 / 停止 |
+| 全部策略失败 | patch 编号和标题、已尝试策略、错误信息、冲突文件 | 手动处理后继续 / 停止 |
+| 结构性冲突 | 目标仓库大规模重构导致无法自动合入，AI 语义分析结果 | 指定适配方向 / 跳过 / 停止 |
+| 编译失败 | patch 编号、编译错误（前 20 行） | 跳过继续 / 停止 |
 | patch 已合入或无效 | patch 文件名、检测依据 | 跳过 / 停止 |
 
 ## 反模式
@@ -565,7 +590,7 @@ diff <(git -C <source_dir> show <commit_hash> --format=raw) <(cat <original_patc
 |----|-----|
 | 原始 patch 文件 | <filename> |
 | 合入 commit | <hash> |
-| 合入策略 | git am / 冲突解决 / git apply --3way / git apply |
+| 合入策略 | ① git am / ② git am --3way / ③ git am --ignore-whitespace / ④ patch --fuzz / ⑤ git apply --3way / ⑥ git apply --reject / ⑦ 手解冲突 / ⑧ git apply |
 | 涉及文件 | N 个 |
 | 编译结果 | ✓ 通过 / ✗ 失败 |
 | 分析时间 | <YYYY-MM-DD HH:MM> |
@@ -654,9 +679,9 @@ diff <(git -C <source_dir> show <commit_hash> --format=raw) <(cat <original_patc
 
 | # | Patch | 风险 | 差异行数 | 合入策略 | 涉及子系统 | 需关注点 |
 |---|-------|------|---------|---------|-----------|---------|
-| 1 | <title> | 🟢 LOW | 0/45 | git am | net/core | — |
-| 2 | <title> | 🟠 HIGH | 12/67 | 冲突解决 | drivers/hdbss | 函数签名变更 |
-| 3 | <title> | 🟡 MEDIUM | 3/30 | git apply --3way | fs/ext4 | 上下文偏移 |
+| 1 | <title> | 🟢 LOW | 0/45 | ① git am | net/core | — |
+| 2 | <title> | 🟠 HIGH | 12/67 | ⑦ 手解冲突 | drivers/hdbss | 函数签名变更 |
+| 3 | <title> | 🟡 MEDIUM | 3/30 | ⑤ git apply --3way | fs/ext4 | 上下文偏移 |
 
 ## 需重点关注的 patch
 
