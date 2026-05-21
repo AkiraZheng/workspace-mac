@@ -28,6 +28,12 @@ deploy_skill() {
     mkdir -p "$target_dir"
     cp "$SCRIPT_DIR/$source_file" "$target_dir/SKILL.md"
     echo "  [✓] $skill_name → $target_dir/SKILL.md"
+    # 复制 references/ 子目录（如果存在）
+    if [ -d "$SCRIPT_DIR/references" ]; then
+        mkdir -p "$target_dir/references"
+        cp "$SCRIPT_DIR/references/"* "$target_dir/references/"
+        echo "  [✓] $skill_name references → $target_dir/references/"
+    fi
 }
 
 # --- 拉取 karpathy-guidelines（只拉一次，各平台共享） ---

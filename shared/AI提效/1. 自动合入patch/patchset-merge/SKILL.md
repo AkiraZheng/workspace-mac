@@ -2,82 +2,51 @@
 name: merge-patchset
 description: Use when the user provides a patch folder path, runs /merge-patchset, or asks to merge/apply/合入/打补丁/回退 a patchset into a source tree. Handles multi-scenario intelligent merge: clean apply, revert-then-merge for conflicting old code, dependency auto-discovery from upstream repos, and partial-apply detection. Uses parallel sub-agents for pre-check analysis. Trigger on: 合入patch、合入补丁、打patch、apply patch、merge patch、回退旧代码再合入、/merge-patchset, and any mention of applying patches to a repo.
 compatibility: claude-code, opencode
-allowed-tools: Bash(git:*), Bash(make:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:*), Bash(cat:*), Bash(ls:*), Bash(find:*), Bash(echo:*), Write(*), Agent
+allowed-tools: Bash(git:*), Bash(make:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:*), Bash(cat:*), Bash(ls:*), Bash(find:*), Bash(echo:*), Write(*), Agent, LSP(*)
 ---
 
 # Patchset Merge
 
-从用户指定的 patch 文件夹逐个合入到源码仓库。内置多场景智能检测：自动判断是否需要先 revert 旧代码、是否需要从上游拉取依赖 patch、是否部分已合入。遇问题在对话中交互决策。
+从用户指定的 patch 文件夹逐个合入到源码仓库。内置多场景智能检测：自动判断是否需要先 revert 旧代码、是否需要从上游拉取依赖 patch。遇问题在对话中交互决策。
 
 ## 总流程
 
 ```text
 用户输入: patch_dir + --source + --upstream? + --branch?
 │
-├─ 前置: 加载 superpowers + karpathy-guidelines
+├─ LSP 环境准备 — clangd 安装与索引
+│   └─ 确保目标仓库有 compile_commands.json 且 LSP 可解析
 │
-├─ 相位 0 ── 并行 Agent 检测（只读，不改写）────────────────────────╮
-│   ├─ Agent A: 冲突预检 ── 每个 patch → none / low / high          │
-│   ├─ Agent B: 依赖检测 ── 上游仓库搜索缺失 commit  (if --upstream)  │
-│   └─ Agent C: 已合入检测 ── not_applied / already / partial       │
-│                                                                   │
-├─ 相位 1 ── 场景判定 ── 汇总 Agent 结果 → 输出执行计划 → 等用户确认 ─╯
-│   ├─ A: 干净合入        → 直接 merge
-│   ├─ B: 先 Revert      → 逆序 revert 旧 commit → merge
-│   ├─ C: 补依赖         → 强依赖拉取 / 弱依赖 stub 替代 → merge
-│   ├─ D: 部分跳过        → 跳过已合入的 → merge 剩余
-│   └─ E: 路径适配        → 映射文件路径 → merge
-│   （场景可组合，如 B+D）
+├─ 相位 0 — 并行 Agent 检测（只读，优先使用 LSP 导航）
+│   ├─ Agent A: 冲突预检 → none / low / high
+│   ├─ Agent B: 依赖检测 → 强/弱依赖分级 (if --upstream)
+│   └─ Agent C: 相似度检测 → 定位需要 revert 的 commit
 │
-├─ 相位 2 ── 前置操作 ── 按判定场景执行 ──────────────────────────────╮
-│   ├─ Revert: 逆序 git revert --no-edit → 解冲突 → 编译验证        │
-│   ├─ 拉依赖: git format-patch -1 → 追加到合入列表                  │
-│   └─ 路径适配: find → sed 替换 patch 路径 → 用户确认               │
-│                                                                   │
-├─ 相位 3 ── 核心 Merge ── 对每个 patch 逐个合入 ─────────────────────╯
-│   │
-│   ├─ 3.1 准备: git rev-parse + status --porcelain
-│   ├─ 3.2 验证: test -d patch_dir + ls *.patch
-│   ├─ 3.3 解析: 提取 Subject + 涉及文件 → 输出 patch 清单
-│   ├─ 3.4 分支: git checkout -b patch-<keyword>
-│   │
-│   └─ 3.5 逐个合入 ── 每个 patch 走 8 步策略链条 ──────────────────╮
-│       │                                                           │
-│       ├─ ① git am                    ← 首选，保 commit 元信息     │
-│       ├─ ② git am --3way             ← 上下文偏移，留非冲突文件    │
-│       ├─ ③ git am --ignore-whitespace ← 空白差异假冲突            │
-│       ├─ ④ patch --fuzz=3            ← 上下文行号偏移             │
-│       ├─ ⑤ git apply --3way          ← 三路合并                   │
-│       ├─ ⑥ git apply --reject        ← 部分合入 + .rej 文件       │
-│       ├─ ⑦ 手解冲突 ── 先分析再执行 ──────────────────┐      │
-│       │   ├─ 上下文偏移  → 调 @@ 行号 / 回退到④              │      │
-│       │   ├─ 空白差异    → 回退到③                          │      │
-│       │   ├─ 签名变更    → 提取签名 → 适配调用               │      │
-│       │   ├─ 部分已合入  → 回退到⑥                          │      │
-│       │   ├─ 文件移动    → find + sed 路径替换               │      │
-│       │   ├─ 头文件缺失  → find | xargs grep 找等价          │      │
-│       │   └─ 结构性冲突  → 语义分析 → 用户决策               │      │
-│       └─ ⑧ git apply                ← 最后手段               │      │
-│                                                               │      │
-│       ├─ 3.6 fix-compile loop ───────────────────────────╮│      │
-│       │   apply → compile → ✓ 通过 → commit → next patch     ││      │
-│       │                   → ✗ 失败 → 分析→修复→重编译 ───────┘│      │
-│       │   策略④~⑧: commit 推迟到编译通过后                    │      │
-│       │   策略①②③: 已自动 commit，失败则 git commit --amend   │      │
-│       └─ 3.7 生成分析文档 ─────────────────────────────────╮│      │
-│           ├─ 对每个成功合入的 patch 立即生成 per-patch 分析      ││      │
-│           │   → .patchset-analysis/0001-<slug>-analysis.md       ││      │
-│           │   → .patchset-analysis/0002-<slug>-analysis.md       ││      │
-│           └─ 全部合入后生成合并报告                              ││      │
-│               → .patchset-summary.md（含风险评级总结）            ││      │
-│                                                                   │
-└─ 输出 ────────────────────────────────────────────────────────────╯
-    ├─ 对话输出: 每阶段进度 + 最终总结表
-    ├─ .patchset-summary.md               ← 合入报告 + 风险评级总结（合并）
-    └─ .patchset-analysis/
-        ├─ 0001-<slug>-analysis.md     ← 逐行 diff 对比 + 思考过程
-        └─ 0002-<slug>-analysis.md
+├─ 相位 1 — 场景判定 → 汇总 → 展示执行计划 → 等用户确认
+│   ├─ A: 干净合入     B: 先 Revert 再合入
+│   ├─ C: 补依赖再合入
+│   └─ E: 路径适配     (场景可组合, 如 B+C)
+│
+├─ 相位 2 — 前置操作（按判定场景执行）
+│   ├─ Revert: 逆序 git revert → 解冲突 → 编译验证
+│   ├─ 拉依赖: git format-patch -1 → 追加到合入列表
+│   └─ 路径适配: find → sed 替换 → 用户确认
+│
+└─ 相位 3 — 核心 Merge → 逐个合入 → 编译验证 → 生成报告
+     ├─ 3.1~3.4: 准备 + 验证 + 解析 + 创建分支
+     ├─ 3.5: 8 步策略链条 (git am → ... → git apply)
+     ├─ 3.6: fix-compile loop (分析→修复→重编译→commit)
+     └─ 3.7: 生成 .patchset-summary.md + per-patch 分析
 ```
+
+## 参考文件
+
+本技能配有参考文件，按需加载：
+
+| 参考文件 | 何时使用 |
+|---------|---------|
+| `references/output-templates.md` | 需要输出格式化内容时（Phase 每个阶段的对话输出、per-patch 分析文档、汇总报告、风险评级标准） |
+| `references/diagnostic-guide.md` | 遇到冲突或编译失败时（冲突类型分类、编译错误分类与修复策略） |
 
 <!-- @preamble-start -->
 ## 前置技能加载（必须）
@@ -119,7 +88,7 @@ grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpath
 
 ## 核心约束
 
-1. **逐个合入**: 有多少个 patch 就处理多少个，不跳过（除非确认已合入）
+1. **逐个合入**: 有多少个 patch 就处理多少个，不跳过
 2. **逐个 commit**: 每个 patch 单独 git commit；revert 操作也单独 commit
 3. **保留分支**: 操作分支保留不删除，不在主干分支上操作
 4. **只取改动行**: 只应用以 `+`/`-` 开头的实际修改行，上下文行仅用于定位
@@ -137,7 +106,95 @@ grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpath
 
 ## 工作流
 
-整个流程分三个相位：前置检测 → 场景确认 → 执行 merge。
+整个流程分四个相位：前置检测 → 场景确认 → 前置操作 → 执行 merge。
+
+---
+
+### LSP 环境准备（相位 0 前置）
+
+**目的**：为目标仓库建立 LSP（Language Server）索引，使后续所有分析 agent 能用精确的符号级导航（跳转定义、查找引用、调用层级）替代粗糙的 grep 文本搜索。
+
+**默认 LSP**：`clangd`（C/C++ 项目首选，Linux 内核等大型项目适用）。
+
+#### 检查与安装
+
+```bash
+# 1. 检查 clangd 是否可用
+command -v clangd && clangd --version | head -1 || echo "clangd NOT FOUND"
+
+# 2. 如果不可用，尝试安装
+# Debian/Ubuntu:
+#   apt-get install -y clangd-12  # 或 clang-tools
+#   或下载最新版: https://github.com/clangd/clangd/releases
+# 如果无法安装，跳过 LSP，后续分析回退到 grep
+```
+
+#### 生成 compile_commands.json
+
+`clangd` 需要 `compile_commands.json` 才能正确解析项目。在目标仓库中检查并生成：
+
+```bash
+# 1. 检查是否已存在
+test -f <source_dir>/compile_commands.json && echo "✓ 已存在" || echo "需要生成"
+
+# 2. 如果不存在，尝试生成
+# Linux 内核:
+#   cd <source_dir> && scripts/clang-tools/gen_compile_commands.py
+# CMake 项目:
+#   cd <source_dir> && cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ..
+# 通用方法（bear）:
+#   cd <source_dir> && bear -- make
+# 如果均无法生成，创建最小 stub（仅包含源文件列表，LSP 功能降级但可用）:
+cd <source_dir> && python3 -c "
+import json, os
+compile_commands = []
+for root, dirs, files in os.walk('.'):
+    for f in files:
+        if f.endswith(('.c', '.cpp', '.cxx', '.cc')):
+            compile_commands.append({
+                'directory': os.path.abspath(root),
+                'command': 'gcc -c ' + os.path.join(root, f),
+                'file': os.path.join(root, f)
+            })
+with open('compile_commands.json', 'w') as out:
+    json.dump(compile_commands, out, indent=2)
+print(f'生成 stub compile_commands.json，包含 {len(compile_commands)} 个源文件')
+"
+```
+
+#### 验证 LSP 可用
+
+```bash
+# 用一个已知存在的 C 文件测试 LSP
+# 如果 compile_commands.json 存在且 clangd 在 PATH，LSP 工具会自动工作
+test -f <source_dir>/compile_commands.json && echo "✓ LSP 索引就绪" || echo "⚠ LSP 不可用，将使用 grep 回退"
+```
+
+#### 降级策略
+
+| 状态 | 处理 |
+|------|------|
+| clangd 已安装 + compile_commands.json 存在 | ✅ LSP 全功能可用 |
+| clangd 已安装 + 生成了 stub compile_commands.json | ⚠ LSP 降级可用（无宏展开、无 include 路径解析） |
+| clangd 不可用或 compile_commands.json 生成失败 | ⚠ 跳过 LSP，Agent 回退到 grep |
+
+**LSP 不可用时不影响合入流程**，仅分析精度降低。Agent A/C 在 LSP 不可用时使用 grep 搜索作为回退方案。
+
+#### Agent 如何使用 LSP
+
+LSP 就绪后，Agent A 和 Agent C 在分析时**优先使用 LSP 工具**进行以下操作：
+
+| 分析需求 | LSP 操作 | 替代 grep |
+|---------|---------|----------|
+| 查找符号定义 | `LSP goToDefinition` | `grep -r "symbol" -- "*.h"` |
+| 查找所有引用 | `LSP findReferences` | `grep -r "symbol"` |
+| 搜索全局符号 | `LSP workspaceSymbol` | `grep -r` 正则 |
+| 调用者分析 | `LSP incomingCalls` | 手动 grep 函数名 |
+| 被调用者分析 | `LSP outgoingCalls` | 手动读代码 |
+| 查看类型信息 | `LSP hover` | 手动查头文件 |
+| 查找实现 | `LSP goToImplementation` | `grep` 多文件 |
+
+**Agent C 的依赖链分析（Step 4）尤其受益**：`incomingCalls` 直接给出谁调用了候选 revert commit 引入的函数，比 `git grep <符号> <hash>..HEAD` 更精确。
 
 ---
 
@@ -145,11 +202,13 @@ grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpath
 
 同时启动 3 个检测 agent，各自独立工作，输出结构化结果。这是只读阶段，不做任何修改。
 
-所有 agent 返回后，按「输出规范 → 相位 0 输出」模板汇总展示。
+所有 agent 返回后，按 `references/output-templates.md` 中「相位 0 输出」模板汇总展示。
 
 #### Agent A — 冲突预检
 
 **任务**：扫描目标仓库，判断每个 patch 的冲突风险。
+
+**LSP 优先**：如果 LSP 环境就绪，优先使用 `LSP workspaceSymbol` 和 `LSP goToDefinition` 查找符号；LSP 不可用时回退到 grep。
 
 ```bash
 # 每个 patch 执行以下检查：
@@ -157,11 +216,14 @@ grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpath
 grep -oP '^(?:@@|diff|---|\+\+\+).*|^\+\s*(?:static\s+)?(?:void|int|struct|enum|unsigned|char|bool|long|size_t|ssize_t)\s+\w+\s*\(' <patch_file> | head -20
 
 # 2. 在目标仓库搜索这些标识符是否已存在
-grep -r -l "<提取的关键函数名>" <source_dir> --include="*.c" --include="*.h" 2>/dev/null
+#    LSP 可用时: LSP workspaceSymbol <symbol_name>
+#    回退: grep -r -l "<提取的关键函数名>" <source_dir> --include="*.c" --include="*.h" 2>/dev/null
 
 # 3. 检查 patch 中修改的文件在目标仓库是否存在
-# 对每个 +++ b/<filepath> 提取路径，检查目标仓库中是否存在
+#    对每个 +++ b/<filepath> 提取路径，检查目标仓库中是否存在
 test -f <source_dir>/<filepath> && echo "EXISTS" || echo "NOT_FOUND"
+
+# 4. (LSP 增强) 对关键函数用 findReferences 查看有多少调用点会被 patch 影响
 ```
 
 **输出**：每个 patch 的冲突风险评级（none / low / high）及依据：
@@ -203,21 +265,116 @@ git -C <upstream_dir> log --oneline -n 5000 --grep="<keyword>" -i
 
 **输出**：每个依赖 commit 的 hash + subject + 匹配理由 + **分级（强/弱）+ 推荐操作（拉取 / 建议冲突解决替代）**。
 
-#### Agent C — 已合入检测
+#### Agent C — 代码相似度检测与 Revert 定位
 
-**任务**：检测哪些 patch 的等效修改已经存在于目标仓库。
+**任务**：对 Agent A 标记为 high 风险的 patch，深度分析目标仓库中是否存在相似代码，定位需要 revert 的 commit。
 
-```bash
-# 对每个 patch：
-# 1. 用 Subject 关键词搜索目标仓库 commit log
-git -C <source_dir> log --oneline -n 200 -i --grep="<subject_keywords>"
+**LSP 优先**：LSP 就绪时，用 `LSP findReferences`/`LSP incomingCalls` 做调用链分析，比 `git grep` 更精确。LSP 不可用时回退到 grep。
 
-# 2. 用 git apply --check 试应用（干跑）
-git -C <source_dir> apply --check <patch_file> 2>&1
-# "already applied" 或 "patch does not apply"（所有 hunk 都已存在）= 已合入
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Step 1: 提取特征                                            │
+│    ├─ 从 patch 提取被修改的函数名、结构体名、宏名、关键变量名    │
+│    ├─ 提取 patch Subject 中的关键词                           │
+│    └─ 提取 patch 修改文件的相对路径                           │
+│                                                             │
+│  Step 2: 搜索相似代码                                         │
+│    ├─ 在目标仓库中 grep 提取的标识符                           │
+│    ├─ 对匹配文件，比对 patch 中的函数体/结构体与目标仓库的版本   │
+│    └─ 估算相似度：                                            │
+│        ├─ 高相似：同名函数/结构体，内容 70%+ 相同               │
+│        ├─ 中相似：同名但签名不同，或内容 40%~70% 相同            │
+│        └─ 低相似：仅部分变量/宏名匹配，结构差异大                │
+│                                                             │
+│  Step 3: 追溯引入 commit                                      │
+│    ├─ git log --all --oneline -n 500 -- <匹配文件路径>         │
+│    ├─ git blame -L <行范围> <匹配文件>                         │
+│    ├─ git log --all --oneline -n 1000 --grep="<关键词>"       │
+│    └─ 交叉验证：blame 行号 + log 关键词 → 定位最可能的 commit   │
+│                                                             │
+│  Step 4: Revert 依赖链分析 ⚠ 安全关键                          │
+│    ├─ 对每个候选 revert commit，检查其后是否有 commit 依赖它    │
+│    ├─ 判断方法：                                               │
+│    │   ├─ 查看该 commit 之后同一文件的修改历史                   │
+│    │   ├─ 检查该 commit 引入的符号（函数/结构体/宏）被谁使用     │
+│    │   └─ 构建依赖链：C1 ← C2 ← C3（C3 依赖 C2，C2 依赖 C1）  │
+│    ├─ 如果 revert C1 会导致 C2~C3 的代码编译失败                 │
+│    │   → 必须把 C2~C3 也列入 revert 清单，或标记为不可 revert    │
+│    └─ 输出：每个候选 commit 的依赖链 + revert 安全评估          │
+│                                                             │
+│  Step 5: 输出结论                                             │
+│    └─ 相似度 + revert 清单（含依赖链） + 安全评估 + 依据         │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**输出**：每个 patch 的状态（not_applied / already_applied / partially_applied）。
+**具体命令**：
+
+```bash
+# Step 1: 提取特征
+# 从 patch 中提取函数名（被修改的函数，即 @@ 上下文中的函数）
+grep -oP '^\s*(?:static\s+)?(?:inline\s+)?(?:void|int|char|bool|long|unsigned|size_t|ssize_t|struct\s+\w+)\s+\**(\w+)\s*\(' <patch_file> | sed 's/.*\s\+//' | sed 's/($//' | sort -u
+
+# 提取结构体名 / 宏名
+grep -oP '(?:struct|enum|union)\s+(\w+)' <patch_file> | awk '{print $2}' | sort -u
+grep -oP '#define\s+(\w+)' <patch_file> | awk '{print $2}' | sort -u
+
+# 提取 Subject 关键词（去掉 [PATCH] 等前缀，取有意义的词）
+grep '^Subject:' <patch_file> | sed 's/.*\[PATCH[^]]*\]\s*//' | tr ' ' '\n' | grep -v '^$' | head -10
+
+# Step 2: 在目标仓库搜索相似代码
+# 对每个提取的函数名，在目标仓库搜索
+grep -rn "<function_name>" <source_dir> --include="*.c" --include="*.h" 2>/dev/null
+
+# 对匹配的文件，提取同名函数的内容做对比
+grep -A 30 "^<function_name>" <matched_file> | head -40
+
+# Step 3: 追溯引入 commit
+# 对匹配文件运行 git blame 查看关键行是谁引入的
+git -C <source_dir> blame -L <start>,<end> <file_path>
+
+# 用关键词搜索相关 commit
+git -C <source_dir> log --all --oneline -n 1000 --grep="<keyword>" -i
+
+# 查看匹配文件的最近修改历史
+git -C <source_dir> log --all --oneline -n 100 -- <file_path>
+
+# Step 4: Revert 依赖链分析（安全关键）
+# 对每个候选 revert commit，检查其后是否有 commit 依赖它
+
+# 4a. 查看候选 commit 之后该文件的修改历史（按时间正序）
+git -C <source_dir> log --oneline --reverse <candidate_hash>..HEAD -- <file_path>
+
+# 4b. 查看候选 commit 引入了哪些符号（函数/结构体/宏）
+git -C <source_dir> diff <candidate_hash>^..<candidate_hash> -- <file_path> | grep '^+'
+
+# 4c. 检查后续 commit 是否使用了候选 commit 引入的符号
+# 对每个候选 commit 引入的符号，在候选 commit 之后的代码中搜索
+git -C <source_dir> grep "<符号名>" <candidate_hash>..HEAD -- <file_path_or_glob>
+
+# 4d. 构建依赖链
+# 对每个后续 commit，检查它是否修改了候选 commit 引入的代码行
+git -C <source_dir> log --oneline <candidate_hash>..HEAD --follow -p -- <file_path> | grep -E '^(commit|@@|^\+.*<符号>)'
+
+# 4e. 判断：如果 revert 候选 commit 会导致后续 commit 的代码编译失败
+#      → 该后续 commit 也必须一并 revert，或整个 revert 标记为不可行
+```
+
+**输出**：每个 high 风险 patch 的相似度分析 + revert 安全评估：
+
+| # | Patch | 相似度 | 匹配文件 | 引入 Commit | Commit 标题 | 依赖链（后续依赖它的 commit） | Revert 安全 | 依据 |
+|---|-------|--------|---------|-------------|------------|---------------------------|------------|------|
+| 1 | <title> | 高 | drivers/foo.c | abc123 | "add: foo driver" | 无 | ✅ 可 revert | 后续无 commit 依赖 foo_init，独立 revert 安全 |
+| 2 | <title> | 高 | kernel/bar.c | def456 | "add: bar core" | ghi789, jkl012 | ⚠ 高危 | bar_core_init() 被后续 2 个 commit 调用，需一并 revert ghi789 和 jkl012 |
+| 3 | <title> | 中 | mm/alloc.c | mno345 | "refactor: alloc" | pqr - vwx - bcd | 🔴 不可 revert | 形成 3 层依赖链（alloc page mem），revert 代价过大 |
+
+**Revert 安全分级**：
+- ✅ **可 revert**：该 commit 之后无其他 commit 依赖它引入的符号/代码，独立 revert 安全
+- ⚠ **高危 — 需链式 revert**：后续有 commit 依赖它，但依赖链较短（≤3 个），可以一并 revert
+- 🔴 **不可 revert**：依赖链超过 3 层，或依赖它的 commit 涉及其他子系统，revert 代价过大 → **放弃 revert，走冲突解决**
+
+> 相似度"低"的 patch 不需要 revert，走正常的冲突解决流程即可。
+> 未找到相似代码时显示: `目标仓库中未发现相似代码，无需 revert`
+> **仅 ✅ 可 revert 和 ⚠ 链式 revert（用户确认后）的 commit 才进入 Phase 2 的 revert 操作。🔴 不可 revert 的 patch 退回走冲突解决流程。**
 
 ---
 
@@ -227,32 +384,32 @@ git -C <source_dir> apply --check <patch_file> 2>&1
 
 | 场景 | 触发条件 | 前置操作 |
 |------|---------|---------|
-| **A — 干净合入** | 所有 patch 冲突风险 none/low，无依赖缺失，无已合入 | 无，直接 merge |
-| **B — 先 Revert 再合入** | 存在 high 风险 patch，且目标仓库有对应旧版本的 commit（Agent C 找到相关 commit） | 逆序 revert 旧 commit → merge |
+| **A — 干净合入** | 所有 patch 冲突风险 none/low，无依赖缺失 | 无，直接 merge |
+| **B — 先 Revert 再合入** | Agent A 标记 high 风险 + Agent C 确认存在高相似代码及可 revert 的 commit | 逆序 revert 旧 commit → merge |
 | **C — 补依赖再合入** | Agent B 找到强功能依赖 commit，不拉取则无法编译 | 从上游拉取强依赖 patch → merge；弱依赖通过创建 stub / 修改 patch 上下文解决，不拉取 |
-| **D — 部分跳过** | Agent C 检测到部分 patch 已合入 | 跳过已合入的，只 merge 剩余的；若全部已合入则直接结束，生成报告 |
 | **E — 路径适配** | Agent A 发现 patch 文件路径在目标仓库不存在（NOT_FOUND） | 找到实际路径映射 → 调整 patch → merge |
 
-场景可以组合（如 B + D：先 revert 旧代码，跳过已合入的，再 merge 剩余的）。
+场景可以组合（如 B + C：先 revert 旧代码，拉取强依赖，再 merge）。
 
-按「输出规范 → 相位 1 输出」模板展示场景判定和执行计划。**必须等用户确认后才进入 Phase 2。**
+按 `references/output-templates.md` 中「相位 1 输出」模板展示场景判定和执行计划。**必须等用户确认后才进入 Phase 2。**
 
 ---
 
 ### 相位 2：前置操作（按场景执行）
 
-每个前置操作按「输出规范 → 相位 2 输出」模板展示进度。
+每个前置操作按 `references/output-templates.md` 中「相位 2 输出」模板展示进度。
 
 #### 场景 B — Revert 旧代码
 
-对 Agent A 标记为 high 风险的 patch，在目标仓库中找到对应的旧 commit：
+Agent C 已输出 revert 候选及安全分级。按 Agent C 的安全分级分别处理：
 
-```bash
-# 用 patch 的关键函数名/文件名搜索相关 commit
-git -C <source_dir> log --oneline -n 500 -i --grep="<关键词>" -- <相关文件路径>
-```
+| 安全分级 | 处理方式 |
+|---------|---------|
+| ✅ 可 revert | 直接列入 revert 清单 |
+| ⚠ 高危 — 需链式 revert | 将整个依赖链（含后续依赖 commit）列入 revert 清单，**展示给用户确认** |
+| 🔴 不可 revert | **放弃 revert**，该 patch 退回走 Phase 3 的冲突解决流程 |
 
-将找到的 commit 列表展示给用户确认，确认后**逆序**逐个 revert：
+将最终确认的 revert 清单展示给用户，**逆序**逐个 revert（最新的先 revert）：
 
 | 序号 | 策略 | 命令 |
 |------|------|------|
@@ -282,12 +439,6 @@ git -C <upstream_dir> format-patch -1 <dependency_hash> -o /tmp/deps-patches/
 4. 原则：**宁可改 patch 一行上下文，也不拉一个改 15 个文件的依赖**
 
 示例：dep 3（debugfs for guest ID registers）→ 创建一个空壳函数在 arm.c 即可，无需拉取整个含 idregs debugfs 的 commit。
-
-```bash
-# 对于仅需函数骨架的弱依赖，直接编辑目标文件添加最小 stub
-# 例如：如果 patch 需要在 kvm_arch_create_vm_debugfs 中加一行调用，
-# 但该函数在目标仓库中不存在，就创建一个最小实现而不是拉整个 commit
-```
 
 在 Phase 1 向用户展示依赖清单时，**必须标注每个依赖的分级和推荐处理方式**，等用户确认后再执行。
 
@@ -339,7 +490,7 @@ ls <patch_dir>/*.patch <patch_dir>/*.mbox 2>/dev/null | sort
 
 检查是否有空文件或格式无效的 patch。
 
-解析完成后按「输出规范 → 相位 3 输出 → 3.3 解析完成后输出 patch 清单」展示。
+解析完成后按 `references/output-templates.md` 中「3.3 解析完成后输出 patch 清单」展示。
 
 #### 3.4 创建分支
 
@@ -382,7 +533,7 @@ git checkout -b <branch_name>
 ```
 Step 1 - 分析:
   1. 读取冲突文件，定位冲突标记 (<<<<<<< / ======= / >>>>>>>)
-  2. 按下表 7 种类型诊断冲突原因
+  2. 参考 references/diagnostic-guide.md 的冲突类型表诊断原因
   3. 确定解决方案（具体子策略，或回退到策略 ①~⑥），自行决策无需等用户确认
 
 Step 2 - 执行:
@@ -398,28 +549,7 @@ Step 3 - 验证:
 
 策略⑦失败或编译失败后可以回退到 ①~⑥ 重试。多次失败无法解决时 → 自行评估是否进入⑧。
 
----
-
-**手解冲突分类指南**（Step 1 的诊断参考）：
-
-| 冲突类型 | 诊断方法 | 解决方式 |
-|---------|---------|---------|
-| 上下文偏移 | patch hunk 行号与目标文件对不上，但上下文内容能部分匹配 | 手动调整 `@@` 行号，或回到策略④用 `patch --fuzz` |
-| 空白差异 | 内容相同但缩进/空白风格不同 | 回到策略③ `git am --ignore-whitespace` |
-| 函数签名变更 | 目标仓库中函数多了参数、返回值类型变了 | 提取目标仓库签名 → 适配 patch 中的调用 → `git add` + `git commit` |
-| 部分已合入 | 部分 hunk 的目标代码已存在 | 回到策略⑥ `git apply --reject`，忽略已合入的 .rej |
-| 文件被移动 | 文件在目标仓库的路径不同 | `find <source> -name "basename"` 找到实际路径 → `sed` 替换 patch 中路径 |
-| 头文件缺失 | patch 引用的 `#include` 在目标仓库不存在 | `find <source> -name "*.h" \| xargs grep -l "<符号>"` 找等价头文件，或从 `--upstream` 引入 |
-| 结构性冲突 | 目标仓库对该文件做了大规模重构 | 分析 patch 语义意图 → AI 自行分析 → 选择最优方案执行 |
-
-每个 patch 合入后：
-1. 按「输出规范 → 相位 3 输出 → 每个 patch 合入后输出进度」模板展示结果（含所使用的策略序号）
-2. 对成功合入的 patch，立即生成 per-patch 分析文档到 `<source_dir>/.patchset-analysis/`（模板见「输出规范 → per-patch 分析文档」），避免事后遗忘细节
-
-**检测冲突文件**:
-```bash
-git diff --name-only --diff-filter=U
-```
+发生冲突时，Read `references/diagnostic-guide.md` 查阅完整的冲突类型分类和解决方式。
 
 **策略② `git am --3way` 说明**：此策略的关键优势是**保留非冲突文件的修改**。即使部分文件有冲突，其他文件的变更已经被 stage，只需处理冲突文件即可。冲突解决后用 `git am --continue` 而非重新 commit。
 
@@ -427,6 +557,28 @@ git diff --name-only --diff-filter=U
 - 如果内容是 patch 新增但目标仓库已有 → 删除 .rej
 - 如果内容是真正需要合入的 → 手动将该 hunk 写入源文件
 - 处理完后 `git add .` + `git commit`
+
+每个 patch 合入后：
+1. 在对话中按模板展示合入进度：策略序号、commit hash、编译结果
+2. 对成功合入的 patch，**立即生成 per-patch 分析文档，不得事后补**：
+
+```bash
+mkdir -p <source_dir>/.patchset-analysis
+```
+
+然后用 Write 工具创建 `<source_dir>/.patchset-analysis/<序号>-<slug>-analysis.md`。
+
+**在生成分析文档前，必须先 Read `references/output-templates.md` 完整阅读「Per-patch 分析文档」章节**，按模板逐项填写。该文档的核心要求：
+
+- 基本信息（patch 文件、commit hash、合入策略、涉及文件数、编译结果）
+- **差异行数用 N/M 格式**（N=不同的行数，M=patch 总行数，如 "3/30"），不得只写绝对数字
+- 编译修复记录（每次修复的类型、摘要、修复方式、结果；一次通过则写"编译一次通过，无修复"）
+- 源 patch vs 实际合入 diff（每个涉及文件逐文件对比，用 `!` 标记被修改的行）
+- 逐行差异明细表格（原始内容、实际合入内容、差异原因）
+- 冲突解决过程（冲突文件列表、冲突类型、解决策略、思考过程记录）
+- 风险评级（按评级标准，附判定依据）
+
+生成方式：用 `git diff` 对比原始 patch 与合入后的 commit diff，提取差异。
 
 #### 3.6 编译验证（fix-compile loop）
 
@@ -460,7 +612,7 @@ fi
 │     ↓                                                     │
 │  3. 分析错误（必须做，写出分析结论）                         │
 │     ├─ 读取编译输出的前 40 行                               │
-│     ├─ 按「错误分类表」匹配错误类型                          │
+│     ├─ 参考 references/diagnostic-guide.md 的编译错误分类表  │
 │     ├─ 判断错误来源                                         │
 │     │   ├─ patch 自身代码问题 → 步骤 4（直接修复）          │
 │     │   └─ 环境/配置问题（非 patch 代码）→ 步骤 4a         │
@@ -468,7 +620,7 @@ fi
 │     │       → commit 后立即 git checkout 还原环境文件       │
 │     ↓                                                     │
 │  4. 修复源码                                               │
-│     ├─ 按「修复策略表」选择对应的修复方式                    │
+│     ├─ 按诊断参考中的修复策略选择对应的修复方式               │
 │     ├─ 修改源文件（只修改 patch 涉及的文件）                 │
 │     └─ 记录修改了什么、为什么这样改（供 per-patch 分析用）   │
 │     ↓                                                     │
@@ -489,23 +641,6 @@ fi
 
 ---
 
-**编译错误分类与修复策略**：
-
-| 错误类型 | 诊断特征 | 修复方式 |
-|---------|---------|---------|
-| 未声明的函数 | `implicit declaration of function` / `undefined reference to` | 搜索目标仓库中该函数的声明位置 → 添加 `#include` 或在源文件中添加 `extern` 声明 |
-| 类型不匹配 | `incompatible pointer type` / `expected 'X' but argument is of type 'Y'` | 检查目标仓库中函数签名的实际定义 → 在 patch 的调用处适配类型（加 cast、调整参数） |
-| 结构体成员不存在 | `has no member named` | 搜索目标仓库中该结构体的实际定义 → 找到等价成员名或移除对该成员的引用 |
-| 未定义的宏 | `'X' undeclared`（大写标识符） | 搜索目标仓库中该宏的定义位置 → 添加对应 `#include`，或就地 `#define`（仅当目标仓库确实没有） |
-| 语法错误 | `expected ';'` / `expected '}'` | 检查冲突解决时是否引入了多余/缺少的标记 → 逐行比对冲突标记位置 |
-| 重复定义 | `redefinition of` | patch 新增的符号在目标仓库已存在 → 删除 patch 中的重复定义，保留目标仓库版本 |
-| 变量未使用 | `unused variable` | 如果 patch 引入了但后续代码未引用 → 保留变量（可能被后续 patch 使用），注掉 warning；如果是残留代码 → 删除 |
-| 文件不存在 | `No such file or directory`（编译命令引用） | patch 新增/修改的文件未被 Makefile/Kconfig 正确引用 → 临时修改 Makefile 添加编译目标，commit 后 `git checkout -- Makefile` 还原 |
-| Kconfig 依赖缺失 | `depends on` 相关错误 | 检查目标仓库的 Kconfig 层级 → 添加缺失的 config 依赖项 |
-| 环境/配置问题 | `CONFIG_XXX` 未定义、Makefile 缺少目标、编译选项不兼容等，且**错误不是 patch 代码引起的** | **临时修改**：改 config/Makefile 使编译通过 → commit → 立即 `git checkout -- <被修改的配置文件>` 还原。在分析文档中记录临时修改了什么、为什么需要改 |
-
----
-
 **关键规则**：
 
 1. **必须先分析再修复**：每次编译失败时，先写出 "错误类型是 X，原因是 Y，修复方案是 Z"，再动手改代码
@@ -514,7 +649,7 @@ fi
    - **patch 自身代码问题**（如未声明函数、类型不匹配、语法错误等）→ 直接修复源码，记录到分析文档
    - **环境/配置问题**（如 CONFIG_XXX 未启用、Makefile 缺少编译目标、Kconfig 依赖不满足等，且错误不是 patch 代码引起的）→ 临时修改配置文件使编译通过，commit 后立即 `git checkout -- <配置文件>` 还原。**禁止以"配置未启用"为由跳过编译**
    
-   验证方法：将错误中的符号/函数名在合入前的代码中检查（`git show HEAD^:<file> | grep "<symbol>"` 或 `grep -r "<symbol>"` 对比前后差异），避免使用 `git stash`（stash pop 可能重新引入已解决的冲突）
+   验证方法：Read `references/diagnostic-guide.md` 中「区分错误来源的方法」了解如何判断错误归属。避免使用 `git stash`（stash pop 可能重新引入已解决的冲突）
 4. **记录修复过程**：每次修复都要记录到 per-patch 分析文档的「编译修复记录」中
 5. **commit 时机**：
    - 策略 ①②③：编译通过后不需要额外 commit（git am 已自动创建）；如有修复则 `git commit --amend --no-edit`
@@ -525,9 +660,42 @@ fi
 #### 3.7 生成报告、分析和总结
 
 合入过程中及完成后：
-1. **每个 patch 合入成功后立即**在 3.5 中按「输出规范 → per-patch 分析文档」模板生成分析文档，写入 `<source_dir>/.patchset-analysis/<序号>-<slug>-analysis.md`
-2. **全部 patch 合入后**按「输出规范 → 文件输出」模板生成合并报告（含风险评级总结），写入 `<source_dir>/.patchset-summary.md`
-3. 按「输出规范 → 相位 3 输出 → 全部完成后对话输出总结」模板在对话中展示总结
+
+1. **每个 patch 合入成功后立即**按 3.5 中的要求生成 per-patch 分析文档，写入 `<source_dir>/.patchset-analysis/<序号>-<slug>-analysis.md`
+2. **全部 patch 合入后**，先 Read `references/output-templates.md` → 「风险评级标准」对每个 patch 评级，然后按「文件输出：.patchset-summary.md」模板用 Write 生成 `<source_dir>/.patchset-summary.md`
+3. 在对话中按「3.7 全部完成后对话输出总结」模板展示总结表，模板内容见 `references/output-templates.md`
+
+#### 风险评级标准
+
+对每个 patch 的评级依据，**每次评级时必须对照此表逐条判断**：
+
+**🔴 CRITICAL — 必须人工 review**（触发任一）：
+- 合入后编译失败
+- 冲突解决时**删除了目标仓库已有的代码**（非 patch 意图删除的行）
+- 修改了核心数据结构定义（`struct`、`union`、`enum` 的成员变更）
+- 修改了导出函数签名（`EXPORT_SYMBOL` 的函数参数或返回值变更）
+- 涉及安全相关代码（权限检查、内存屏障、加密）
+
+**🟠 HIGH — 建议人工 review**（触发任一）：
+- 使用了冲突解决（策略②~⑦），实际合入与源 patch 差异 ≥ 10 行
+- 差异行数超过 patch 总行数的 20%
+- 涉及 Kconfig / Makefile / CMakeLists.txt 变更
+- 涉及多个子系统的交叉修改
+- 涉及设备树（.dts / .dtsi）变更
+
+**🟡 MEDIUM — 注意但不阻塞**（触发任一）：
+- 使用了策略③~⑥（非 `git am` 直接合入）
+- 差异行数在 5%~20% 之间
+- 涉及设备驱动代码（`drivers/`）
+- 上下文行偏移超过 10 行
+
+**🟢 LOW — 可直接合入**（满足全部）：
+- `git am` 直接成功（策略①）
+- 实际合入内容与源 patch 完全一致（0 行差异）
+- 编译通过
+- 不涉及核心数据结构或安全代码
+
+> 评级方法：从 CRITICAL 开始往下检查，命中第一档即停止。使用策略②但差异仅 2 行 → 不触发 HIGH（< 10 行），降级为 MEDIUM。使用策略①但改过 drivers/ 文件 → 仍为 LOW（策略① + 0 差异 > 其他条件）。
 
 ## 交互模式
 
@@ -537,11 +705,10 @@ fi
 |------|---------|---------|
 | 工作区不干净 | 未提交的文件列表 | 继续 / 取消 |
 | 场景判定结果 | 三个 agent 的检测摘要、推荐场景、将执行的操作 | 确认执行 / 调整参数 / 取消 |
-| Revert 确认 | 要 revert 的 commit 列表（hash + 标题） | 确认 / 逐条选择 / 取消 |
+| Revert 确认 | 要 revert 的 commit 列表（hash + 标题 + 安全分级 + 依赖链） | 确认（含链式 revert）/ 逐条选择 / 取消 |
 | 依赖拉取确认 | 推荐的依赖 commit 列表 | 全部拉取 / 逐条选择 / 取消 |
 | 路径映射 | 原始路径 → 目标路径的映射表 | 确认 / 手动修正 / 取消 |
 | 编译失败 | patch 编号、编译错误（前 20 行） | AI 自行分析修复 / 停止；需跳过时询问用户 |
-| patch 已合入或无效 | patch 文件名、检测依据 | 跳过 / 停止 |
 
 ## 反模式
 
@@ -557,451 +724,7 @@ fi
 - 跳过前置检测直接开始 merge
 - 不向用户展示场景判定结果就执行修改操作
 
-## 输出规范
-
-所有用户可见的输出必须遵循以下模板。分三种输出类型：
-
-- **对话输出**（Markdown 块）→ 直接展示给用户，简洁可扫读
-- **分析文档**（写入 `.patchset-analysis/` 目录）→ 每个 patch 的逐行 diff 对比和冲突解决过程
-- **汇总报告**（写入 `.patchset-summary.md`）→ 合入报告 + 风险评级总结（合并为一个文件）
-
----
-
-### 相位 0 输出：前置检测结果
-
-Agent 全部返回后，用此模板汇总。在 Phase 0 结束时输出。
-
-```markdown
-## 🔍 前置检测结果
-
-### 冲突预检
-| # | Patch 标题 | 风险 | 依据 |
-|---|-----------|------|------|
-| 1 | <title>   | HIGH | <具体原因，如：函数 foo_init 在目标仓库已存在> |
-| 2 | <title>   | LOW  | <原因> |
-| 3 | <title>   | NONE | <原因> |
-
-### 依赖检测
-> 仅在指定 --upstream 时展示
-
-| # | Upstream Commit | 标题 | 分级 | 匹配理由 | 推荐操作 |
-|---|-----------------|------|------|---------|---------|
-| 1 | abc123          | <title> | 强功能 | patch 多处使用依赖引入的宏 KVM_PGTABLE_LAST_LEVEL | 拉取 |
-| 2 | def456          | <title> | 弱上下文 | 仅需函数骨架，依赖引入的功能与本次合入无关 | 手工创建 stub |
-
-- **强功能依赖**：不拉取无法编译，拉取代价可接受 → 拉取
-- **弱上下文依赖**：可通过修改 patch 上下文或创建最小 stub 解决 → 不拉取，用冲突解决替代
-
-未找到依赖时显示: `未发现缺失的依赖 commit`
-
-### 已合入检测
-| # | Patch 标题 | 状态 | 依据 |
-|---|-----------|------|------|
-| 1 | <title>   | NOT_APPLIED | — |
-| 2 | <title>   | ALREADY_APPLIED | commit xyz789 标题匹配 |
-| 3 | <title>   | PARTIALLY_APPLIED | 2/4 hunk 已存在 |
-
-全部 NOT_APPLIED 时显示: `所有 patch 均未合入`
-```
-
----
-
-### 相位 1 输出：场景判定 + 执行计划
-
-在 Phase 1 结束时输出，**必须等用户确认后才进入 Phase 2**。
-
-```markdown
-## 📋 场景判定
-
-- **场景**: <A / B / C / D / E，可组合如 B + D>
-- **判定依据**:
-  - <场景 X>: <触发条件，如 patch #1 冲突风险 HIGH>
-  - <场景 Y>: <触发条件，如 patch #2 ALREADY_APPLIED>
-
-### 执行计划
-| 步骤 | 操作 | 详情 |
-|------|------|------|
-| 1 | 创建分支 | patch-<keyword> |
-| 2 | Revert 旧 commit | 逆序 revert N 个 commit（场景 B） |
-| 3 | 拉取强依赖 | 从上游拉取 N 个强依赖 patch（场景 C） |
-| 4 | 跳过已合入 | 跳过 patch #M（场景 D） |
-| 5 | Merge | 合入剩余 N 个 patch |
-| 6 | 编译验证 | 每个 patch 后编译 |
-| 7 | 生成报告 | .patchset-summary.md |
-
-### 依赖处理策略（场景 C 时展示）
-| # | 依赖 Commit | 分级 | 处理方式 | 理由 |
-|---|------------|------|---------|------|
-| 1 | abc123 | 强功能 | 拉取 | patch 0005 5 处使用其定义的宏，手工替代代价高 |
-| 2 | def456 | 弱上下文 | 手工创建 stub | 仅需函数骨架，拉取完整 commit 会引入不相关的 idregs 代码和结构性冲突 |
-
-> 弱依赖不拉取，在 Phase 2 通过创建最小化 stub / 调整 patch 上下文解决。
-
-确认以上计划后开始执行。
-```
-
----
-
-### 相位 2 输出：前置操作进度
-
-每个前置操作输出一行进度 + 结果。
-
-**场景 B — Revert**：
-```
-## ⏪ Revert 旧代码 (1/3)
-- Commit: abc123 "fix: hdbss init"
-- 策略: git revert --no-edit ✓
-- Revert Commit: def456
-```
-
-**场景 C — 拉取依赖**：
-```
-## 📥 拉取依赖 patch (1/2)
-- Upstream Commit: abc123 "add: bar_setup helper"
-- 已生成: /tmp/deps-patches/0001-add-bar_setup-helper.patch
-```
-
-**场景 E — 路径适配**：
-```
-## 🔀 路径适配
-| 原始路径 | 目标路径 |
-|---------|---------|
-| drivers/net/hdbss.c | drivers/net/ethernet/vendor/hdbss.c |
-| include/linux/hdbss.h | include/linux/hdbss.h (不变) |
-```
-
----
-
-### 相位 3 输出：Merge 进度
-
-#### 3.3 解析完成后输出 patch 清单
-
-```markdown
-## 📝 待合入 patch 清单
-| # | 文件 | 标题 | 涉及文件数 |
-|---|------|------|-----------|
-| 1 | 0001-xxx.patch | <title> | 3 |
-| 2 | 0002-yyy.patch | <title> | 1 |
-| 3 | 0003-zzz.patch | <title> | 2 |
-
-共 N 个 patch，开始逐个合入。
-```
-
-#### 3.5 每个 patch 合入后输出进度
-
-```markdown
-## 📝 Patch (N/M)
-- **标题**: <subject>
-- **策略**: git am ✓（或：解冲突 ✓ / git apply --3way ✓ / git apply ✓）
-- **Commit**: <hash>
-- **编译**: ✓ 通过（或：✗ 失败，见下方错误）
-```
-
-失败时追加错误详情：
-```
-- **错误**: 
-  ```
-  <编译错误前 5 行>
-  ```
-- **状态**: ⚠ 等待用户决策
-```
-
-#### 3.7 全部完成后对话输出总结
-
-```markdown
-## ✅ 合入完成
-
-| 项目 | 值 |
-|------|-----|
-| 分支 | <branch> (已保留) |
-| 场景 | <A~E 组合> |
-| 合入 | N 成功 / M 跳过 / K 失败 |
-| Revert | N 个旧 commit（如有） |
-| 依赖 | N 个拉取的依赖（如有） |
-| 报告 | <source_dir>/.patchset-summary.md |
-
-### 失败详情（如有）
-| # | Patch | 失败原因 |
-|---|-------|---------|
-| 3 | xxx   | 全部策略失败，冲突文件: a.c, b.h |
-```
-
----
-
-### 文件输出：`.patchset-summary.md`
-
-写入源码目录，保留完整记录（合入报告 + 风险评级总结合并在一个文件中）。用 Write 工具生成。
-
-```markdown
-# Patchset 合入报告
-
-## 概要
-- **日期**: <YYYY-MM-DD HH:MM>
-- **场景**: <A~E 组合>
-- **分支**: <branch> (已保留)
-- **目标仓库**: <source_dir>
-- **上游仓库**: <upstream_dir>（如有）
-- **总数**: N / **成功**: N / **跳过**: N / **失败**: N
-- **Revert 的旧 commit**: N 个
-- **拉取的依赖 patch**: N 个
-
-## 前置检测摘要
-### 冲突预检
-| # | Patch | 风险 | 依据 |
-|---|-------|------|------|
-...
-
-### 依赖检测
-...
-
-### 已合入检测
-...
-
-## 前置操作
-### Revert（如有）
-| # | 原始 Commit | 标题 | Revert Commit |
-|---|-------------|------|---------------|
-| 1 | abc123      | xxx  | def456        |
-
-### 拉取的依赖（如有）
-| # | Upstream Commit | 标题 | 本地 Patch 文件 |
-|---|-----------------|------|-----------------|
-| 1 | abc123          | xxx  | /tmp/deps-patches/0001-xxx.patch |
-
-## 各 patch 合入状态
-| # | Patch 文件 | 标题 | 状态 | 策略 | Commit |
-|---|-----------|------|------|------|--------|
-| 1 | 0001-xxx.patch | <title> | ✓ 成功 | git am | abc123 |
-| 2 | 0002-yyy.patch | <title> | ⊘ 跳过 | — | — |
-| 3 | 0003-zzz.patch | <title> | ✗ 失败 | — | — |
-
-## 关键冲突解决记录
-### <patch>: <冲突简述>
-- <具体解决过程>
-
-## 编译状态
-- **状态**: ✓ 全部通过 / ⚠ 无法验证 / ✗ 失败
-- **说明**: <详细说明>
-
-## 风险评级总结
-
-### 整体评估
-
-| 项 | 值 |
-|----|-----|
-| 整体风险等级 | 🟢 LOW / 🟡 MEDIUM / 🟠 HIGH / 🔴 CRITICAL |
-| 总 patch 数 | N |
-| CRITICAL | N |
-| HIGH | N |
-| MEDIUM | N |
-| LOW | N |
-
-### 风险热力图
-
-| # | Patch | 风险 | 差异行数 | 合入策略 | 涉及子系统 | 需关注点 |
-|---|-------|------|---------|---------|-----------|---------|
-| 1 | <title> | 🟢 LOW | 0/45 | ① git am | net/core | — |
-| 2 | <title> | 🟠 HIGH | 12/67 | ⑦ 手解冲突 | drivers/hdbss | 函数签名变更 |
-| 3 | <title> | 🟡 MEDIUM | 3/30 | ⑤ git apply --3way | fs/ext4 | 上下文偏移 |
-
-### 需重点关注的 patch
-
-> 仅列出 HIGH 和 CRITICAL 级别的 patch
-
-### patch #2: <title> (🟠 HIGH)
-- **差异原因**: 目标仓库中 `hdbss_init()` 多了一个 `flags` 参数
-- **潜在风险**: 如果未来上游 patch 修改同一函数，需要再次适配
-- **建议**: 合入后人工 review `drivers/hdbss/core.c` 的合入结果
-
-### 各 patch 分析文档
-
-| # | Patch | 分析文档 |
-|---|-------|---------|
-| 1 | <title> | [analysis](./.patchset-analysis/0001-<slug>-analysis.md) |
-| 2 | <title> | [analysis](./.patchset-analysis/0002-<slug>-analysis.md) |
-
-## 失败详情（如有）
-### patch #3: <title>
-- **失败原因**: <原因>
-- **尝试的策略**: git am → git apply --3way → git apply → git commit
-- **冲突文件**:
-  - drivers/net/example.c
-- **错误信息**:
-  ```
-  <具体错误>
-  ```
-```
-
----
-
-### Per-patch 分析文档
-
-每个 patch 合入成功后立即生成，写入 `<source_dir>/.patchset-analysis/<序号>-<slug>-analysis.md`。
-
-首先生成 `mkdir -p <source_dir>/patchset-analysis`。
-
-**核心要求**：必须包含源 patch 与实际合入 commit 之间的 diff 对比。用 `git diff` 生成：
-
-```bash
-# 获取原始 patch 和实际 commit 之间的差异
-diff <(git -C <source_dir> show <commit_hash> --format=raw) <(cat <original_patch_file>) || true
-```
-
-模板：
-
-```markdown
-# Patch 分析: <patch subject>
-
-## 基本信息
-| 项 | 值 |
-|----|-----|
-| 原始 patch 文件 | <filename> |
-| 合入 commit | <hash> |
-| 合入策略 | ① git am / ② git am --3way / ③ git am --ignore-whitespace / ④ patch --fuzz / ⑤ git apply --3way / ⑥ git apply --reject / ⑦ 手解冲突 / ⑧ git apply |
-| 涉及文件 | N 个 |
-| 编译结果 | ✓ 通过 (1次) / ✓ 通过 (修复 N 次) / ✗ 失败 |
-| 分析时间 | <YYYY-MM-DD HH:MM> |
-
-## 编译修复记录
-
-> 如果编译一次通过则写 "编译一次通过，无修复"。如果经历过 fix loop 则每轮记录。
-
-| 轮次 | 错误类型 | 错误摘要 | 修复方式 | 结果 |
-|------|---------|---------|---------|------|
-| 1 | 未声明的函数 | `implicit declaration of function 'hdbss_get_flags'` | 在 `core.c` 添加 `#include "hdbss.h"` | 仍失败 |
-| 2 | 类型不匹配 | `expected 'struct hdbss_ctx *' but argument is of type 'void *'` | 在调用处添加 `(struct hdbss_ctx *)` cast | ✓ 通过 |
-
-## 源 patch vs 实际合入 diff
-
-> 以下 diff 展示原始 patch（a/）与最终合入到仓库的代码（b/）之间的差异。
-> 标记 `!` 的行代表合入时被修改的内容。
-
-### 文件: <filepath>
-
-```diff
---- a/<filepath> (原始 patch 意图)
-+++ b/<filepath> (实际合入结果)
-@@ -<line>,<n> +<line>,<n> @@
-  <unchanged context>
-- <原始 patch 中要删除的行>
-+ <原始 patch 中要添加的行>
-! <合入时被修改的行 — 与原始 patch 不同>
-```
-
-> 对每个涉及文件重复 ### 块。
-
-## 逐行差异明细
-
-对每一处合入时产生的差异，列出原因：
-
-| 行号 | 原始 patch 内容 | 实际合入内容 | 差异原因 |
-|------|----------------|-------------|---------|
-| 42   | `foo(x)`       | `foo(x, y)` | 目标仓库中 `foo` 签名已变更，合入时适配了新签名 |
-| 87   | `return 0;`    | `return ret;` | 冲突解决：目标仓库要求返回错误码 |
-| —    | （不存在）       | `#include "compat.h"` | 冲突解决时新增的依赖头文件 |
-
-> 无差异则写 "合入内容与原始 patch 完全一致，无逐行差异。"
-
-## 冲突解决过程
-
-> 如果使用了 git am 直接成功且无差异，写 "未发生冲突，git am 直接合入成功。"
-
-- **冲突文件**: <列出有冲突的文件，无则写"无">
-- **冲突类型**: <函数签名不匹配 / 上下文行偏移 / 变量名冲突 / 新增代码冲突 / 无>
-- **解决策略**: <描述具体如何解决的>
-
-### 思考过程
-
-```
-<记录冲突解决时的分析思路：
-- 为什么选择这种解决方式？
-- 放弃了哪些替代方案？为什么？
-- 目标仓库中哪些已有代码影响了决策？
-- 是否有需要注意的隐患？>
-```
-
-## 风险评级
-
-| 项 | 评估 |
-|----|------|
-| **风险等级** | 🟢 LOW / 🟡 MEDIUM / 🟠 HIGH / 🔴 CRITICAL |
-| **差异程度** | N 行不同 / 总共 M 行（N/M = X%） |
-| **合入策略** | git am / 冲突解决 / git apply --3way / git apply |
-| **涉及子系统** | <kernel core / 驱动 / 文件系统 / 网络 / 架构相关 / ...> |
-| **判定依据** | <根据风险评级标准逐条说明> |
-
-## 附录
-
-> 原始 patch 文件与合入后实际 commit 之间的 diff 对比。
-
-生成方式：
-
-```bash
-# 提取原始 patch 中的纯 diff 部分（去掉邮件头），与合入后 commit 的 diff 做对比
-git -C <source_dir> show <commit_hash> --format="" > /tmp/actual_commit.diff
-diff <original_patch_file> /tmp/actual_commit.diff > /tmp/patch-vs-commit.diff 2>&1 || true
-```
-
-输出格式：
-
-```diff
---- a/<original_patch_file>  (原始 patch)
-+++ b/<commit_hash>         (合入后 commit)
-@@ -<line>,<n> +<line>,<n> @@
- <原始 patch 中存在的行，合入后 commit 中不存在 / 被修改>
- <合入后 commit 中新增的行，原始 patch 中不存在>
-```
-
-> 如果完全一致，则写 "原始 patch 与合入后 commit 完全一致，无差异。"
-
-> 附录 diff 由脚本自动生成，保留完整输出，不截断。
-```
-
----
-
-### 风险评级总结
-
-风险评级模板已合并到「文件输出：`.patchset-summary.md`」中（见上方"风险评级总结"子章节）。全部 patch 合入后，该文件同时包含合入报告和风险评级。
-
----
-
-### 风险评级标准
-
-对每个 patch 按以下标准评级：
-
-#### 🔴 CRITICAL — 必须人工 review
-触发任一条件：
-- 合入后编译失败
-- 冲突解决时**删除了目标仓库已有的代码**（非 patch 意图删除的行）
-- 修改了核心数据结构定义（`struct`、`union`、`enum` 的成员变更）
-- 修改了导出函数签名（`EXPORT_SYMBOL` 的函数参数或返回值变更）
-- 涉及安全相关代码（权限检查、内存屏障、加密）
-
-#### 🟠 HIGH — 建议人工 review
-触发任一条件：
-- 使用了冲突解决（策略②），实际合入与源 patch 差异 ≥ 10 行
-- 差异行数超过 patch 总行数的 20%
-- 涉及 Kconfig / Makefile / CMakeLists.txt 变更
-- 涉及多个子系统的交叉修改
-- 涉及设备树（.dts / .dtsi）变更
-
-#### 🟡 MEDIUM — 注意但不阻塞
-触发任一条件：
-- 使用了 `git apply --3way`（策略③）而非 `git am`
-- 差异行数在 5%~20% 之间
-- 涉及设备驱动代码（`drivers/`）
-- 上下文行偏移超过 10 行
-
-#### 🟢 LOW — 可直接合入
-满足全部条件：
-- `git am` 直接成功（策略①）
-- 实际合入内容与源 patch 完全一致（0 行差异）
-- 编译通过
-- 不涉及核心数据结构或安全代码
-
----
-
-### 输出规则
+## 输出规则
 
 1. **每个相位的输出必须在进入下一相位前完成**，不得省略
 2. **相位 1 场景判定**输出后必须等待用户确认，不得自动继续；相位 3 中的冲突解决和编译修复由 AI 自行分析决策，不需人工介入
@@ -1016,3 +739,5 @@ diff <original_patch_file> /tmp/actual_commit.diff > /tmp/patch-vs-commit.diff 2
 8. **每个 patch 合入后立即生成分析文档**，不得等到全部合入后再补（防止遗忘冲突解决细节）
 9. **源 patch vs 实际合入的 diff 必须逐文件展示**，不得省略或概括
 10. **思考过程必须用自然语言记录**分析时的判断依据，不得留空或写"无"
+
+> 完整的输出模板（Phase 0/1/2/3 对话输出、per-patch 分析文档、.patchset-summary.md、风险评级标准）见 `references/output-templates.md`。遇到冲突或编译失败时，诊断参考见 `references/diagnostic-guide.md`。

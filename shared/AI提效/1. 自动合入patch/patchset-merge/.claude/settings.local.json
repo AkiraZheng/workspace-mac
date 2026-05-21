@@ -28,7 +28,28 @@
       "Bash(timeout 10 curl -fsSL --max-time 8 \"https://raw.githubusercontent.com/multica-ai/andrej-karpathy-skills/main/SKILL.md\" -o /dev/null)",
       "Bash(timeout 10 curl *)",
       "Bash(timeout 15 git ls-remote --heads \"https://github.com/multica-ai/andrej-karpathy-skills.git\")",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "Read(//root/.claude/skills/**)",
+      "Bash(npm list *)",
+      "Read(//usr/local/lib/node_modules/**)",
+      "Bash(cp -r /root/.claude/skills/merge-patchset /root/.claude/skills/merge-patchset-backup)",
+      "Bash(mkdir -p /root/.claude/skills/merge-patchset/references)",
+      "Bash(yes)",
+      "Bash(cp -f /root/.claude/skills/merge-patchset/SKILL.md \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/SKILL.md\")",
+      "Bash(/bin/cp -f /root/.claude/skills/merge-patchset/SKILL.md \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/SKILL.md\")",
+      "Bash(cp *)",
+      "Bash(cat /root/.claude/skills/merge-patchset/SKILL.md)",
+      "Bash(sudo chown *)",
+      "Read(//root/code/openeuler/kernel/**)",
+      "Read(//root/code/openeuler/kernel/.patchset-analysis/**)",
+      "Bash(mkdir -p ~/.claude/skills/merge-patchset/references)",
+      "Bash(cat /root/.claude/skills/merge-patchset/references/output-templates.md)",
+      "Bash(cat /root/.claude/skills/merge-patchset/references/diagnostic-guide.md)",
+      "Bash(cp /root/.claude/skills/merge-patchset/references/diagnostic-guide.md /root/.claude/skills/merge-patchset/references/diagnostic-guide.md.bak)",
+      "Bash(cp /root/.claude/skills/merge-patchset/references/output-templates.md /tmp/output-templates.md)",
+      "Bash(cp /tmp/output-templates.md /root/.claude/skills/merge-patchset/references/output-templates.md)",
+      "Bash(cp /root/.claude/skills/merge-patchset/references/diagnostic-guide.md /tmp/diagnostic-guide.md)",
+      "Bash(cp /tmp/diagnostic-guide.md /root/.claude/skills/merge-patchset/references/diagnostic-guide.md)"
     ]
   }
 }
