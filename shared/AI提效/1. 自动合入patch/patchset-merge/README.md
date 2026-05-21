@@ -28,6 +28,11 @@ cd patchset-merge
 /merge-patchset <patch_dir> [--source <目标仓库>] [--upstream <源仓库>] [--branch <分支名>]
 ```
 
+- `patch_dir`: patchset 目录
+- `--source`: 目标仓库，默认为当前仓库
+- `--upstream`: 上游仓库，用于自动查找是否缺少相关的依赖patches
+- `--branch`: merge操作的目标分支名
+
 ### OpenCode
 
 直接描述需求，OpenCode 自动发现并加载 skill。例如：

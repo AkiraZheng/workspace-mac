@@ -66,15 +66,15 @@ allowed-tools: Bash(git:*), Bash(make:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:
 │       │   策略①②③: 已自动 commit，失败则 git commit --amend   │      │
 │       └─ 3.7 生成分析文档 ─────────────────────────────────╮│      │
 │           ├─ 对每个成功合入的 patch 立即生成 per-patch 分析      ││      │
-│           │   → patchset-analysis/0001-<slug>-analysis.md       ││      │
-│           │   → patchset-analysis/0002-<slug>-analysis.md       ││      │
+│           │   → .patchset-analysis/0001-<slug>-analysis.md       ││      │
+│           │   → .patchset-analysis/0002-<slug>-analysis.md       ││      │
 │           └─ 全部合入后生成合并报告                              ││      │
-│               → patchset-summary.md（含风险评级总结）            ││      │
+│               → .patchset-summary.md（含风险评级总结）            ││      │
 │                                                                   │
 └─ 输出 ────────────────────────────────────────────────────────────╯
     ├─ 对话输出: 每阶段进度 + 最终总结表
-    ├─ patchset-summary.md               ← 合入报告 + 风险评级总结（合并）
-    └─ patchset-analysis/
+    ├─ .patchset-summary.md               ← 合入报告 + 风险评级总结（合并）
+    └─ .patchset-analysis/
         ├─ 0001-<slug>-analysis.md     ← 逐行 diff 对比 + 思考过程
         └─ 0002-<slug>-analysis.md
 ```
@@ -121,11 +121,10 @@ grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpath
 
 1. **逐个合入**: 有多少个 patch 就处理多少个，不跳过（除非确认已合入）
 2. **逐个 commit**: 每个 patch 单独 git commit；revert 操作也单独 commit
-3. **遇错即停**: 当前操作失败时停止，报告用户，不跳到下一个
-4. **保留分支**: 操作分支保留不删除，不在主干分支上操作
-5. **只取改动行**: 只应用以 `+`/`-` 开头的实际修改行，上下文行仅用于定位
-6. **逆序 revert**: 如需 revert 旧代码，从最新到最旧逆序执行
-7. **中文输出**: 所有思考、解释、输出使用中文
+3. **保留分支**: 操作分支保留不删除，不在主干分支上操作
+4. **只取改动行**: 只应用以 `+`/`-` 开头的实际修改行，上下文行仅用于定位
+5. **逆序 revert**: 如需 revert 旧代码，从最新到最旧逆序执行
+6. **中文输出**: 所有思考、解释、输出使用中文
 
 ## 参数
 
@@ -415,7 +414,7 @@ Step 3 - 验证:
 
 每个 patch 合入后：
 1. 按「输出规范 → 相位 3 输出 → 每个 patch 合入后输出进度」模板展示结果（含所使用的策略序号）
-2. 对成功合入的 patch，立即生成 per-patch 分析文档到 `<source_dir>/patchset-analysis/`（模板见「输出规范 → per-patch 分析文档」），避免事后遗忘细节
+2. 对成功合入的 patch，立即生成 per-patch 分析文档到 `<source_dir>/.patchset-analysis/`（模板见「输出规范 → per-patch 分析文档」），避免事后遗忘细节
 
 **检测冲突文件**:
 ```bash
@@ -473,7 +472,7 @@ fi
 │     ↓                                                     │
 │  5. 重新编译 → 回到步骤 2                                   │
 │     ↓ (多次失败无法解决)                                    │
-│     └─ 自行评估：跳过此 patch / 继续尝试 / 停止合入          │
+│     └─ 需跳过时报告用户决策；否则继续尝试或停止合入            │
 │                                                           │
 │  6. Commit                                                 │
 │     ├─ 策略 ①②③（已自动 commit）→ git add -u &&           │
@@ -504,7 +503,7 @@ fi
 **关键规则**：
 
 1. **必须先分析再修复**：每次编译失败时，先写出 "错误类型是 X，原因是 Y，修复方案是 Z"，再动手改代码
-2. **多次失败时自行决策**：同一 patch 编译多次失败无法解决时，自行评估是否跳过、继续尝试或停止合入
+2. **禁止自行跳过 patch**：同一 patch 编译多次失败无法解决时，AI 可继续尝试修复或停止合入，但**跳过 patch 必须经用户确认**（跳过 patch 是硬性禁止操作）
 3. **不修复已有错误**：如果编译错误在合入 patch 之前就存在，不修复，报告用户。验证方法：将错误中的符号/函数名在合入前的代码中检查（`git show HEAD^:<file> | grep "<symbol>"` 或 `grep -r "<symbol>"` 对比前后差异），避免使用 `git stash`（stash pop 可能重新引入已解决的冲突）
 4. **记录修复过程**：每次修复都要记录到 per-patch 分析文档的「编译修复记录」中
 5. **commit 时机**：
@@ -515,8 +514,8 @@ fi
 #### 3.7 生成报告、分析和总结
 
 合入过程中及完成后：
-1. **每个 patch 合入成功后立即**在 3.5 中按「输出规范 → per-patch 分析文档」模板生成分析文档，写入 `<source_dir>/patchset-analysis/<序号>-<slug>-analysis.md`
-2. **全部 patch 合入后**按「输出规范 → 文件输出」模板生成合并报告（含风险评级总结），写入 `<source_dir>/patchset-summary.md`
+1. **每个 patch 合入成功后立即**在 3.5 中按「输出规范 → per-patch 分析文档」模板生成分析文档，写入 `<source_dir>/.patchset-analysis/<序号>-<slug>-analysis.md`
+2. **全部 patch 合入后**按「输出规范 → 文件输出」模板生成合并报告（含风险评级总结），写入 `<source_dir>/.patchset-summary.md`
 3. 按「输出规范 → 相位 3 输出 → 全部完成后对话输出总结」模板在对话中展示总结
 
 ## 交互模式
@@ -530,7 +529,7 @@ fi
 | Revert 确认 | 要 revert 的 commit 列表（hash + 标题） | 确认 / 逐条选择 / 取消 |
 | 依赖拉取确认 | 推荐的依赖 commit 列表 | 全部拉取 / 逐条选择 / 取消 |
 | 路径映射 | 原始路径 → 目标路径的映射表 | 确认 / 手动修正 / 取消 |
-| 编译失败 | patch 编号、编译错误（前 20 行） | AI 自行分析修复 / 跳过 / 停止 |
+| 编译失败 | patch 编号、编译错误（前 20 行） | AI 自行分析修复 / 停止；需跳过时询问用户 |
 | patch 已合入或无效 | patch 文件名、检测依据 | 跳过 / 停止 |
 
 ## 反模式
@@ -552,8 +551,8 @@ fi
 所有用户可见的输出必须遵循以下模板。分三种输出类型：
 
 - **对话输出**（Markdown 块）→ 直接展示给用户，简洁可扫读
-- **分析文档**（写入 `patchset-analysis/` 目录）→ 每个 patch 的逐行 diff 对比和冲突解决过程
-- **汇总报告**（写入 `patchset-summary.md`）→ 合入报告 + 风险评级总结（合并为一个文件）
+- **分析文档**（写入 `.patchset-analysis/` 目录）→ 每个 patch 的逐行 diff 对比和冲突解决过程
+- **汇总报告**（写入 `.patchset-summary.md`）→ 合入报告 + 风险评级总结（合并为一个文件）
 
 ---
 
@@ -617,7 +616,7 @@ Agent 全部返回后，用此模板汇总。在 Phase 0 结束时输出。
 | 4 | 跳过已合入 | 跳过 patch #M（场景 D） |
 | 5 | Merge | 合入剩余 N 个 patch |
 | 6 | 编译验证 | 每个 patch 后编译 |
-| 7 | 生成报告 | patchset-summary.md |
+| 7 | 生成报告 | .patchset-summary.md |
 
 ### 依赖处理策略（场景 C 时展示）
 | # | 依赖 Commit | 分级 | 处理方式 | 理由 |
@@ -708,7 +707,7 @@ Agent 全部返回后，用此模板汇总。在 Phase 0 结束时输出。
 | 合入 | N 成功 / M 跳过 / K 失败 |
 | Revert | N 个旧 commit（如有） |
 | 依赖 | N 个拉取的依赖（如有） |
-| 报告 | <source_dir>/patchset-summary.md |
+| 报告 | <source_dir>/.patchset-summary.md |
 
 ### 失败详情（如有）
 | # | Patch | 失败原因 |
@@ -718,7 +717,7 @@ Agent 全部返回后，用此模板汇总。在 Phase 0 结束时输出。
 
 ---
 
-### 文件输出：`patchset-summary.md`
+### 文件输出：`.patchset-summary.md`
 
 写入源码目录，保留完整记录（合入报告 + 风险评级总结合并在一个文件中）。用 Write 工具生成。
 
@@ -807,8 +806,8 @@ Agent 全部返回后，用此模板汇总。在 Phase 0 结束时输出。
 
 | # | Patch | 分析文档 |
 |---|-------|---------|
-| 1 | <title> | [analysis](./patchset-analysis/0001-<slug>-analysis.md) |
-| 2 | <title> | [analysis](./patchset-analysis/0002-<slug>-analysis.md) |
+| 1 | <title> | [analysis](./.patchset-analysis/0001-<slug>-analysis.md) |
+| 2 | <title> | [analysis](./.patchset-analysis/0002-<slug>-analysis.md) |
 
 ## 失败详情（如有）
 ### patch #3: <title>
@@ -826,7 +825,7 @@ Agent 全部返回后，用此模板汇总。在 Phase 0 结束时输出。
 
 ### Per-patch 分析文档
 
-每个 patch 合入成功后立即生成，写入 `<source_dir>/patchset-analysis/<序号>-<slug>-analysis.md`。
+每个 patch 合入成功后立即生成，写入 `<source_dir>/.patchset-analysis/<序号>-<slug>-analysis.md`。
 
 首先生成 `mkdir -p <source_dir>/patchset-analysis`。
 
@@ -925,7 +924,7 @@ diff <(git -C <source_dir> show <commit_hash> --format=raw) <(cat <original_patc
 
 ### 风险评级总结
 
-风险评级模板已合并到「文件输出：`patchset-summary.md`」中（见上方"风险评级总结"子章节）。全部 patch 合入后，该文件同时包含合入报告和风险评级。
+风险评级模板已合并到「文件输出：`.patchset-summary.md`」中（见上方"风险评级总结"子章节）。全部 patch 合入后，该文件同时包含合入报告和风险评级。
 
 ---
 
@@ -973,8 +972,8 @@ diff <(git -C <source_dir> show <commit_hash> --format=raw) <(cat <original_patc
 4. **所有表格必须用 Markdown 表格**，不得用纯文本罗列
 5. **三种输出职责分离**：
    - 对话输出：给用户即时看，简洁可扫读
-   - 分析文档（`patchset-analysis/`）：每个 patch 的逐行 diff 对比和思考过程，供事后审计
-   - 汇总报告（`patchset-summary.md`）：合入报告 + 风险评级总结（合并为一个文件）
+   - 分析文档（`.patchset-analysis/`）：每个 patch 的逐行 diff 对比和思考过程，供事后审计
+   - 汇总报告（`.patchset-summary.md`）：合入报告 + 风险评级总结（合并为一个文件）
 6. **状态图标统一**：✓ 成功 / ✗ 失败 / ⊘ 跳过 / ⚠ 等待决策 / — 不适用
 7. **风险图标统一**：🟢 LOW / 🟡 MEDIUM / 🟠 HIGH / 🔴 CRITICAL
 8. **每个 patch 合入后立即生成分析文档**，不得等到全部合入后再补（防止遗忘冲突解决细节）

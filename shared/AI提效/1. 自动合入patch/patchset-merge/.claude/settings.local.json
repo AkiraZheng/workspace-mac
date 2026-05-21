@@ -19,7 +19,16 @@
       "Bash(sed -n '/@preamble-start/,/@preamble-end/p' \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/revert-patchset-SKILL.md\")",
       "Read(//tmp/**)",
       "Read(//root/.claude/skills/merge-patchset/**)",
-      "Read(//root/.claude/skills/revert-patchset/**)"
+      "Read(//root/.claude/skills/revert-patchset/**)",
+      "Bash(command -v opencode)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(command -v claude)",
+      "Bash(timeout 5 curl -fsSL --connect-timeout 3 --max-time 5 \"https://raw.githubusercontent.com/karpathy/guidelines/main/SKILL.md\" -o /dev/null)",
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(timeout 10 curl -fsSL --max-time 8 \"https://raw.githubusercontent.com/multica-ai/andrej-karpathy-skills/main/SKILL.md\" -o /dev/null)",
+      "Bash(timeout 10 curl *)",
+      "Bash(timeout 15 git ls-remote --heads \"https://github.com/multica-ai/andrej-karpathy-skills.git\")",
+      "Bash(echo \"EXIT=$?\")"
     ]
   }
 }
