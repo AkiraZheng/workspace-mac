@@ -1,6 +1,6 @@
 ---
 name: revert-patchset
-description: Use when the user wants to revert commits from a git repository, runs /revert-patchset, or asks to revert/回退/撤销 a commit range, topic keyword, or patchset. Handles identifying commits, reverting one-by-one in reverse order with conflict resolution, compile verification, and diff reporting.
+description: Use when the user wants to revert commits from a git repository, runs /revert-patchset, or asks to revert/回退/撤销/还原 a commit range, topic keyword, or patchset. Handles identifying commits, reverting one-by-one in reverse order with conflict resolution, compile verification, and diff reporting. Trigger on: 回退commit、撤销commit、还原commit、revert commit、revert patchset、/revert-patchset.
 compatibility: claude-code, opencode
 allowed-tools: Bash(git:*), Bash(make:*), Bash(bash:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:*), Bash(cat:*), Bash(ls:*), Bash(find:*), Bash(rm:*), Bash(echo:*), Write(*)
 ---
@@ -107,7 +107,8 @@ git log --oneline -n 100000 -i --grep="<keyword>"
 
 ```bash
 # 自动生成分支名: revert-<关键词或hash前缀>
-# 分支已存在则追加时间戳
+# 移除所有非字母数字连字符下划线的字符，取前 50 字符
+# 分支已存在则追加 -$(date +%m%d%H%M)
 
 git checkout -b <branch_name>
 ```
@@ -122,7 +123,7 @@ git checkout -b <branch_name>
 | ② | 解冲突 | 读取冲突文件 → 分析两边差异 → 优先保留 revert 后的内容 → `git add` + `git commit` | 继续下一个 | 进入③ |
 | ③ | `git revert --abort` + 手动 | `git revert --abort` → 手动 `git diff <hash>^..<hash> \| git apply -R` | `git add .` + `git commit` | **报告用户** |
 
-**冲突解决规则**: 优先保留 revert 后的内容（即去掉被 revert commit 引入的修改）。**关键：只取 patch 中以 `+`/`-` 开头的行，不以 `+`/`-` 开头的上下文行（diff 中不带前缀的行）不得写入源码文件。**
+**冲突解决规则**: 优先保留 revert 后的内容（即去掉被 revert commit 引入的修改）。
 
 **检测冲突文件**:
 ```bash
@@ -133,7 +134,16 @@ git diff --name-only --diff-filter=U
 
 **编译验证**:
 ```bash
-test -f build.sh && bash build.sh || make -j$(nproc)
+# 按优先级尝试编译命令
+if test -f build.sh; then
+    bash build.sh
+elif test -f Makefile; then
+    make -j$(nproc)
+elif test -f CMakeLists.txt; then
+    mkdir -p build && cd build && cmake .. && make -j$(nproc)
+else
+    echo "未找到 build.sh / Makefile / CMakeLists.txt，跳过编译验证"
+fi
 ```
 编译失败 → 向用户展示错误（前 20 行），询问继续或停止。
 

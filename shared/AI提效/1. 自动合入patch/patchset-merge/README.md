@@ -1,6 +1,6 @@
 # Patchset Merge Skill
 
-Claude Code / OpenCode skill，从 lore.kernel.org 下载并逐个合入 Linux kernel patchset。
+Claude Code / OpenCode skill，从用户指定的 patch 文件夹逐个合入 patchset。
 
 纯指令驱动 —— `SKILL.md` 定义完整工作流，AI 读取后用 bash 直接执行，不依赖 Python 代码。
 
@@ -32,7 +32,6 @@ cd patchset-merge
 
 | 依赖 | 类型 | 说明 |
 |------|------|------|
-| `b4` | CLI 工具 | 下载 lore.kernel.org patchset（install.sh 自动安装） |
 | `karpathy-guidelines` | Skill | AI 行为准则（install.sh 自动部署，降级版内联） |
 | `superpowers` | Claude Code 插件 | Claude Code 需要，OpenCode 不需要（install.sh 自动处理） |
 
@@ -41,7 +40,7 @@ cd patchset-merge
 ### Claude Code
 
 ```
-/merge-patchset <patch_url> [--source <源码目录>] [--branch <分支名>]
+/merge-patchset <patch_dir> [--source <源码目录>] [--branch <分支名>]
 /revert-patchset <commit|范围|关键词> [--source <源码目录>] [--branch <分支名>]
 ```
 
@@ -50,7 +49,7 @@ cd patchset-merge
 直接描述需求，OpenCode 自动发现并加载对应 skill。例如：
 
 ```
-帮我合入这个 patchset: https://lore.kernel.org/lkml/xxx/
+帮我合入 /tmp/patches/ 下的 patchset
 回退 hdbss 相关的 commit --source /root/openeuler/kernel
 ```
 
@@ -61,10 +60,10 @@ cd patchset-merge
 ## 工作流
 
 1. 加载前置 skill（平台感知：Claude Code 用 Skill 工具，OpenCode 自动发现）
-2. 检查 b4 → 下载 patchset mbox
-3. 拆分 mbox 为单个 patch
+2. 验证 patch 文件夹有效性
+3. 解析 .patch 文件，按文件名排序
 4. 创建新分支（自动命名或用户指定）
-5. 按顺序逐个合入：`git am` → 解冲突 → `git apply --3way` → `git apply`
+5. 按顺序逐个合入：`git apply --check` → `git am` → 解冲突 → `git apply --3way` → `git apply`
 6. 每个 patch 单独 commit + 编译验证
 7. 遇问题在对话中交互决策，不跳过
 8. 生成差异报告

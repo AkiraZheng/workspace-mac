@@ -81,21 +81,6 @@ generate_degraded() {
     echo "  [✓] ${skill_name} → $output"
 }
 
-# --- b4 检查 ---
-echo ""
-if command -v b4 &>/dev/null; then
-    echo "[✓] b4 已安装: $(b4 --version 2>&1)"
-else
-    echo "[→] 安装 b4..."
-    if pip install --break-system-packages b4 2>/dev/null; then
-        echo "[✓] b4 安装完成"
-    elif pip install --user b4 2>/dev/null; then
-        echo "[✓] b4 安装完成 (--user)"
-    else
-        echo "[!] b4 安装失败，请手动安装: pip install b4"
-    fi
-fi
-
 # --- 部署到检测到的平台 ---
 for platform in "${DETECTED_PLATFORMS[@]}"; do
     echo ""
@@ -166,7 +151,7 @@ echo "  - dist/cursor/    → Cursor (.cursorrules)"
 echo "  - dist/gemini/    → Gemini CLI"
 echo ""
 echo "使用方式:"
-echo "  Claude Code: /merge-patchset <url>    /revert-patchset <commit>"
+echo "  Claude Code: /merge-patchset <patch_dir>    /revert-patchset <commit>"
 echo "  OpenCode:    直接描述需求，skill 自动加载"
 echo "  Copilot:     将 dist/copilot/*.md 内容复制到 .github/copilot-instructions.md"
 echo "  Cursor:      将 dist/cursor/*.md 内容复制到 .cursorrules"

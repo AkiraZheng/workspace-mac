@@ -1,13 +1,13 @@
 ---
 name: merge-patchset
-description: Use when the user provides a lore.kernel.org patch URL, runs /merge-patchset, or asks to merge/apply/合入 a Linux kernel patchset into a source tree. Handles downloading patchsets with b4, applying patches one-by-one with escalating strategies, conflict resolution, compile verification, and diff reporting.
+description: Use when the user provides a patch folder path, runs /merge-patchset, or asks to merge/apply/合入/打补丁 a patchset into a source tree — especially Linux kernel patches. Handles applying patches one-by-one from a folder with escalating strategies, conflict resolution, compile verification, and diff reporting. Trigger on: 合入patch、合入补丁、打patch、apply patchset、merge patchset、/merge-patchset.
 compatibility: claude-code, opencode
-allowed-tools: Bash(b4:*), Bash(pip install b4), Bash(git:*), Bash(make:*), Bash(bash:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:*), Bash(cat:*), Bash(ls:*), Bash(find:*), Bash(rm:*), Bash(echo:*), Write(*)
+allowed-tools: Bash(git:*), Bash(make:*), Bash(bash:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:*), Bash(cat:*), Bash(ls:*), Bash(find:*), Bash(rm:*), Bash(echo:*), Write(*)
 ---
 
 # Merge Patchset
 
-从 lore.kernel.org 下载 patchset，逐个合入到源码仓库，遇问题在对话中交互决策。
+从用户指定的 patch 文件夹逐个合入到源码仓库，遇问题在对话中交互决策。
 
 <!-- @preamble-start -->
 ## 前置技能加载（必须）
@@ -64,50 +64,65 @@ grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpath
 
 | 参数 | 必需 | 说明 | 默认值 |
 |------|------|------|--------|
-| `patch_url` | 是 | lore.kernel.org 上 patch series 的 URL | — |
+| `patch_dir` | 是 | 包含 .patch 文件的文件夹路径 | — |
 | `--source` | 否 | 源码 git 仓库路径 | 当前目录 `.` |
-| `--branch` | 否 | 合入使用的分支名 | 从 patch 主题自动生成 |
+| `--branch` | 否 | 合入使用的分支名 | 从首个 patch 主题自动生成 |
 
 ## 工作流
 
 ### 1. 准备
 
 ```bash
-# 检查 b4
-b4 --version || pip install b4
-
 # 确认是 git 仓库
 git -C <source_dir> rev-parse --git-dir
-```
 
-### 2. 下载 patchset
+# 确认工作区干净
+git -C <source_dir> status --porcelain
+```
+工作区不干净时警告用户，展示未提交文件列表，询问是否继续。
+
+### 2. 验证 patch 文件夹
 
 ```bash
-mkdir -p /tmp/patchset-merge
-cd /tmp/patchset-merge
-b4 am <patch_url>
-# 找到生成的 .mbox 文件: ls *.mbox
+# 确认文件夹存在且包含 .patch 文件
+test -d <patch_dir> && echo "✓ 文件夹存在" || echo "✗ 文件夹不存在"
+ls <patch_dir>/*.patch 2>/dev/null | wc -l
 ```
 
-### 3. 拆分 patch
+没有找到 .patch 文件 → 报告用户并停止。
 
-读取 mbox 文件内容，按 `^From \S+@\S+` 行拆分为单个 patch。
-用 `^Subject:\s*(.+)$` 提取每个 patch 标题，用 `^\+\+\+ b/(.+)$` 提取涉及文件。
+### 3. 解析 patch 文件
+
+列出文件夹中所有 .patch 文件，按文件名排序：
+
+```bash
+ls <patch_dir>/*.patch | sort
+```
+
+读取每个 .patch 文件内容，用 `^Subject:\s*(.+)$` 提取标题，用 `^\+\+\+ b/(.+)$` 提取涉及文件。检查是否有空文件或格式无效的 patch。
 
 ### 4. 创建分支
 
 ```bash
 # 从首个 patch 的 Subject 生成分支名
-# 去掉 [PATCH] [RFC] 等前缀 → 空格换连字符 → 取前40字符 → 去掉特殊字符
+# 1. 去掉 [PATCH] [RFC] [vN] 等前缀
+# 2. 空格/特殊字符换连字符
+# 3. 移除所有非字母数字连字符下划线的字符
+# 4. 取前 50 字符
+# 5. 确保不以数字开头（git 允许但避免混乱），以数字开头则加 "patch-" 前缀
 # 格式: patch-<关键词>
-# 分支已存在则追加时间戳
+# 分支已存在则追加 -$(date +%m%d%H%M)
 
 git checkout -b <branch_name>
 ```
 
 ### 5. 逐个合入
 
-对每个 patch，将内容写入临时 .patch 文件，按以下顺序尝试：
+对每个 patch：
+
+**前置检查**：先用 `git apply --check <file.patch>` 检测 patch 是否已合入。如果提示 "already applied" 或 "patch does not apply"，向用户报告该 patch 状态并询问是否跳过。
+
+通过检查后，将内容写入临时 .patch 文件，按以下顺序尝试：
 
 | 序号 | 策略 | 命令 | 成功时 | 失败时 |
 |------|------|------|--------|--------|
@@ -116,7 +131,7 @@ git checkout -b <branch_name>
 | ③ | `git apply --3way` | `git apply --3way <file.patch>` | `git add .` + `git commit` | 进入④ |
 | ④ | `git apply` | `git apply <file.patch>` | `git add .` + `git commit` | **报告用户** |
 
-**冲突解决规则**: 优先保留 patchset 的修改内容。**关键：只取 patch 中以 `+`/`-` 开头的行，不以 `+`/`-` 开头的上下文行（diff 中不带前缀的行）不得写入源码文件。**
+**冲突解决规则**: 优先保留 patchset 的修改内容。
 
 **检测冲突文件**:
 ```bash
@@ -127,13 +142,18 @@ git diff --name-only --diff-filter=U
 
 **编译验证**:
 ```bash
-# 优先使用项目自带的 build.sh
-test -f build.sh && bash build.sh || make -j$(nproc)
+# 按优先级尝试编译命令
+if test -f build.sh; then
+    bash build.sh
+elif test -f Makefile; then
+    make -j$(nproc)
+elif test -f CMakeLists.txt; then
+    mkdir -p build && cd build && cmake .. && make -j$(nproc)
+else
+    echo "未找到 build.sh / Makefile / CMakeLists.txt，跳过编译验证"
+fi
 ```
 编译失败 → 向用户展示错误（前 20 行），询问继续或停止。
-
-**接口变化检测**（可选，C/C++/Python 文件）:
-对比 patch 合入前后文件的函数签名变化（返回值、参数列表），发现新增/修改的函数，报告用户确认。
 
 ### 7. 生成差异报告
 
@@ -162,9 +182,10 @@ test -f build.sh && bash build.sh || make -j$(nproc)
 
 | 场景 | 展示内容 | 用户选项 |
 |------|---------|---------|
+| 工作区不干净 | 未提交的文件列表 | 继续 / 取消 |
 | 全部策略失败 | patch 编号和标题、已尝试的 4 种策略、具体错误信息、冲突文件列表 | 手动处理后继续 / 停止整个流程 |
 | 编译失败 | patch 编号、编译错误（前 20 行） | 跳过继续 / 停止 |
-| 接口变化 | 函数名、旧签名 → 新签名 | 确认继续 / 停止 |
+| patch 已合入或无效 | patch 文件名、`git apply --check` 输出 | 跳过 / 停止 |
 
 ## 反模式
 
