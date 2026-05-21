@@ -24,7 +24,7 @@ allowed-tools: Bash(git:*), Bash(make:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:
 ├─ 相位 1 ── 场景判定 ── 汇总 Agent 结果 → 输出执行计划 → 等用户确认 ─╯
 │   ├─ A: 干净合入        → 直接 merge
 │   ├─ B: 先 Revert      → 逆序 revert 旧 commit → merge
-│   ├─ C: 补依赖         → 从上游拉依赖 patch → merge
+│   ├─ C: 补依赖         → 强依赖拉取 / 弱依赖 stub 替代 → merge
 │   ├─ D: 部分跳过        → 跳过已合入的 → merge 剩余
 │   └─ E: 路径适配        → 映射文件路径 → merge
 │   （场景可组合，如 B+D）
@@ -168,7 +168,7 @@ test -f <source_dir>/<filepath> && echo "EXISTS" || echo "NOT_FOUND"
 
 #### Agent B — 依赖检测（仅在指定 `--upstream` 时启动）
 
-**任务**：在上游仓库中查找 patchset 可能依赖但未包含在文件夹中的 commit。
+**任务**：在上游仓库中查找 patchset 可能依赖但未包含在文件夹中的 commit，**并按代价/收益分级**。
 
 ```bash
 # 1. 提取 patch 中引用的 commit hash（Fixes: / Depends-on: / 正文中的 hash）
@@ -179,7 +179,26 @@ grep -oP '(?:Fixes|Depends-on|commit|cherry.picked.from|upstream.commit)[:\s]+\K
 git -C <upstream_dir> log --oneline -n 5000 --grep="<keyword>" -i
 ```
 
-**输出**：推荐拉取的依赖 commit 列表（hash + subject），以及匹配理由。
+##### 依赖分级：强依赖 vs 弱依赖
+
+对每个候选依赖 commit，按以下标准分级：
+
+**强功能依赖（必须拉取）** — 满足任一条件：
+- patch 使用了依赖引入的**新数据类型/结构体/宏定义**，且这些符号在目标仓库完全不存在（如 `KVM_PGTABLE_LAST_LEVEL`），不能通过简单 `#define` 替代
+- patch 使用了依赖引入的**新函数/API**，且该函数在目标仓库完全不存在，也不能用一两行代码模拟
+- 依赖删除了某个**旧宏/旧定义**，该旧定义会与 patch 的新定义产生编译冲突（如旧 `KVM_PGTABLE_MAX_LEVELS 4U` 与新 `KVM_PGTABLE_MAX_LEVELS (LAST+1)` 冲突）
+- patch **多处**（≥3 处）使用了依赖引入的符号，手工适配工作量过大
+
+**弱上下文依赖（优先冲突解决，避免拉取）** — 满足任一条件：
+- 依赖仅提供 **patch hunk 的上下文**（如 patch 要往一个函数里加一行，但该函数在目标仓库不存在）—— 应当通过创建最小化 stub、修改 patch hunk 的上下文行来适配，而非拉取整个依赖
+- 依赖引入的功能**与当前 patchset 目标无关**（如 ptdump patchset 不需要 ID 寄存器 debugfs 的完整实现，只需 `kvm_arch_create_vm_debugfs` 的函数骨架）
+- 依赖在目标仓库中**与已有代码存在结构性冲突的子系统**（patch 涉及大量函数重命名/重构的），拉取会导致比原始 patchset 更复杂的冲突
+- 依赖涉及的**文件数远大于原始 patchset**（如原始 5 个 patch 改 6 个文件，依赖改了 15 个文件），代价收益比失衡
+- 依赖仅改变了**类型签名**（如 `u32` → `s8`），而 `git am --3way` 可以自动适应类型差异
+
+**分级决策原则**：拉取依赖的前提是 **"不拉取就无法通过编译"且"拉取引入的冲突小于手工适配的代价"**。如果不确定，在 Phase 1 向用户展示分级理由并询问。
+
+**输出**：每个依赖 commit 的 hash + subject + 匹配理由 + **分级（强/弱）+ 推荐操作（拉取 / 建议冲突解决替代）**。
 
 #### Agent C — 已合入检测
 
@@ -207,8 +226,8 @@ git -C <source_dir> apply --check <patch_file> 2>&1
 |------|---------|---------|
 | **A — 干净合入** | 所有 patch 冲突风险 none/low，无依赖缺失，无已合入 | 无，直接 merge |
 | **B — 先 Revert 再合入** | 存在 high 风险 patch，且目标仓库有对应旧版本的 commit（Agent C 找到相关 commit） | 逆序 revert 旧 commit → merge |
-| **C — 补依赖再合入** | Agent B 找到依赖 commit，且 Agent C 确认目标仓库缺少这些依赖 | 从上游拉取依赖 patch → merge |
-| **D — 部分跳过** | Agent C 检测到部分 patch 已合入 | 跳过已合入的，只 merge 剩余的 |
+| **C — 补依赖再合入** | Agent B 找到强功能依赖 commit，不拉取则无法编译 | 从上游拉取强依赖 patch → merge；弱依赖通过创建 stub / 修改 patch 上下文解决，不拉取 |
+| **D — 部分跳过** | Agent C 检测到部分 patch 已合入 | 跳过已合入的，只 merge 剩余的；若全部已合入则直接结束，生成报告 |
 | **E — 路径适配** | Agent A 发现 patch 文件路径在目标仓库不存在（NOT_FOUND） | 找到实际路径映射 → 调整 patch → merge |
 
 场景可以组合（如 B + D：先 revert 旧代码，跳过已合入的，再 merge 剩余的）。
@@ -240,16 +259,34 @@ git -C <source_dir> log --oneline -n 500 -i --grep="<关键词>" -- <相关文�
 
 每个 revert 后必须编译验证。
 
-#### 场景 C — 拉取依赖 patch
+#### 场景 C — 处理依赖
 
-根据 Agent B 的推荐列表，对每个依赖 commit：
+根据 Agent B 的分级结果，分两种路径处理：
 
+**强功能依赖 — 拉取**：
 ```bash
 # 从上库生成 patch 文件
 git -C <upstream_dir> format-patch -1 <dependency_hash> -o /tmp/deps-patches/
 ```
-
 将生成的 .patch 文件追加到合入列表的最前面，确保依赖先合入。
+
+**弱上下文依赖 — 冲突解决替代**（不拉取）：
+
+不拉取整个依赖 commit，而是：
+1. 分析 patch 对依赖的具体需求（需要什么符号/函数/声明）
+2. 在目标仓库中手工创建**最小化 stub**（一两行即可）
+3. 如果 patch hunk 的上下文不匹配，修改 patch 文件中的上下文行使其匹配目标仓库的实际情况
+4. 原则：**宁可改 patch 一行上下文，也不拉一个改 15 个文件的依赖**
+
+示例：dep 3（debugfs for guest ID registers）→ 创建一个空壳函数在 arm.c 即可，无需拉取整个含 idregs debugfs 的 commit。
+
+```bash
+# 对于仅需函数骨架的弱依赖，直接编辑目标文件添加最小 stub
+# 例如：如果 patch 需要在 kvm_arch_create_vm_debugfs 中加一行调用，
+# 但该函数在目标仓库中不存在，就创建一个最小实现而不是拉整个 commit
+```
+
+在 Phase 1 向用户展示依赖清单时，**必须标注每个依赖的分级和推荐处理方式**，等用户确认后再执行。
 
 #### 场景 E — 路径适配
 
@@ -283,17 +320,21 @@ git -C <source_dir> status --porcelain
 
 ```bash
 test -d <patch_dir> && echo "✓ 文件夹存在" || echo "✗ 文件夹不存在"
-ls <patch_dir>/*.patch 2>/dev/null | wc -l
+ls <patch_dir>/*.patch <patch_dir>/*.mbox 2>/dev/null | wc -l
 ```
-没有找到 .patch 文件 → 报告用户并停止。
+没有找到 .patch 或 .mbox 文件 → 报告用户并停止。mbox 格式的 patch 与 .patch 格式处理方式完全相同。
 
 #### 3.3 解析 patch 文件
 
 ```bash
-ls <patch_dir>/*.patch | sort
+ls <patch_dir>/*.patch <patch_dir>/*.mbox 2>/dev/null | sort
 ```
 
-读取每个 .patch 文件内容，用 `^Subject:\s*(.+)$` 提取标题，用 `^\+\+\+ b/(.+)$` 提取涉及文件。检查是否有空文件或格式无效的 patch。
+读取每个 patch 文件内容，用 `^Subject:\s*(.+)$` 提取标题，用 `^\+\+\+ b/(.+)$` 提取涉及文件。
+
+**过滤 Cover Letter**：patch 文件名包含 `_patch_0`、`-0-`、`vN-0-` 模式，或文件内容无 diff 标记（无 `--- a/` / `+++ b/` / `@@` 行），则判定为 cover letter，跳过不列入合入清单。
+
+检查是否有空文件或格式无效的 patch。
 
 解析完成后按「输出规范 → 相位 3 输出 → 3.3 解析完成后输出 patch 清单」展示。
 
@@ -461,7 +502,7 @@ fi
 
 1. **必须先分析再修复**：每次编译失败时，先写出 "错误类型是 X，原因是 Y，修复方案是 Z"，再动手改代码
 2. **多次失败时报告用户**：同一 patch 编译多次失败无法解决时，向用户展示最近一次错误 + 已尝试的修复记录，让用户决策（继续/跳过/停止）
-3. **不修复已有错误**：如果编译错误在合入 patch 之前就存在（用 `git stash && make` 验证），不修复，报告用户
+3. **不修复已有错误**：如果编译错误在合入 patch 之前就存在，不修复，报告用户。验证方法：将错误中的符号/函数名在合入前的代码中检查（`git show HEAD^:<file> | grep "<symbol>"` 或 `grep -r "<symbol>"` 对比前后差异），避免使用 `git stash`（stash pop 可能重新引入已解决的冲突）
 4. **记录修复过程**：每次修复都要记录到 per-patch 分析文档的「编译修复记录」中
 5. **commit 时机**：
    - 策略 ①②③：编译通过后不需要额外 commit（git am 已自动创建）；如有修复则 `git commit --amend --no-edit`
@@ -499,7 +540,8 @@ fi
 - 删除操作分支
 - 多个 patch 合并为一个 commit
 - revert 时不按逆序执行
-- 写 Python 脚本来替代直接的 bash 调用
+- 写 Python 脚本或任何脚本语言来替代直接的 bash/Edit 工具调用（包括批量解决冲突 — 必须用 Edit 工具逐个文件处理）
+- 用 `git stash` + `git stash pop` 验证编译（stash pop 会重新引入已解决的冲突）
 - 遇到问题不询问用户自行决定
 - 把 patch diff 中的上下文行（不带 `+`/`-` 前缀的行）写入源码文件
 - 跳过前置检测直接开始 merge
@@ -532,10 +574,13 @@ Agent 全部返回后，用此模板汇总。在 Phase 0 结束时输出。
 ### 依赖检测
 > 仅在指定 --upstream 时展示
 
-| # | Upstream Commit | 标题 | 匹配理由 |
-|---|-----------------|------|---------|
-| 1 | abc123          | <title> | patch #N 引用此 commit |
-| 2 | def456          | <title> | 关键函数 bar_setup 的引入 commit |
+| # | Upstream Commit | 标题 | 分级 | 匹配理由 | 推荐操作 |
+|---|-----------------|------|------|---------|---------|
+| 1 | abc123          | <title> | 强功能 | patch 多处使用依赖引入的宏 KVM_PGTABLE_LAST_LEVEL | 拉取 |
+| 2 | def456          | <title> | 弱上下文 | 仅需函数骨架，依赖引入的功能与本次合入无关 | 手工创建 stub |
+
+- **强功能依赖**：不拉取无法编译，拉取代价可接受 → 拉取
+- **弱上下文依赖**：可通过修改 patch 上下文或创建最小 stub 解决 → 不拉取，用冲突解决替代
 
 未找到依赖时显示: `未发现缺失的依赖 commit`
 
@@ -568,10 +613,19 @@ Agent 全部返回后，用此模板汇总。在 Phase 0 结束时输出。
 |------|------|------|
 | 1 | 创建分支 | patch-<keyword> |
 | 2 | Revert 旧 commit | 逆序 revert N 个 commit（场景 B） |
-| 3 | 跳过已合入 | 跳过 patch #M（场景 D） |
-| 4 | Merge | 合入剩余 N 个 patch |
-| 5 | 编译验证 | 每个 patch 后编译 |
-| 6 | 生成报告 | .patchset-summary.md |
+| 3 | 拉取强依赖 | 从上游拉取 N 个强依赖 patch（场景 C） |
+| 4 | 跳过已合入 | 跳过 patch #M（场景 D） |
+| 5 | Merge | 合入剩余 N 个 patch |
+| 6 | 编译验证 | 每个 patch 后编译 |
+| 7 | 生成报告 | .patchset-summary.md |
+
+### 依赖处理策略（场景 C 时展示）
+| # | 依赖 Commit | 分级 | 处理方式 | 理由 |
+|---|------------|------|---------|------|
+| 1 | abc123 | 强功能 | 拉取 | patch 0005 5 处使用其定义的宏，手工替代代价高 |
+| 2 | def456 | 弱上下文 | 手工创建 stub | 仅需函数骨架，拉取完整 commit 会引入不相关的 idregs 代码和结构性冲突 |
+
+> 弱依赖不拉取，在 Phase 2 通过创建最小化 stub / 调整 patch 上下文解决。
 
 确认以上计划后开始执行。
 ```
