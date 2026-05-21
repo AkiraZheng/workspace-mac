@@ -918,6 +918,32 @@ diff <(git -C <source_dir> show <commit_hash> --format=raw) <(cat <original_patc
 | **合入策略** | git am / 冲突解决 / git apply --3way / git apply |
 | **涉及子系统** | <kernel core / 驱动 / 文件系统 / 网络 / 架构相关 / ...> |
 | **判定依据** | <根据风险评级标准逐条说明> |
+
+## 附录
+
+> 原始 patch 文件与合入后实际 commit 之间的 diff 对比。
+
+生成方式：
+
+```bash
+# 提取原始 patch 中的纯 diff 部分（去掉邮件头），与合入后 commit 的 diff 做对比
+git -C <source_dir> show <commit_hash> --format="" > /tmp/actual_commit.diff
+diff <original_patch_file> /tmp/actual_commit.diff > /tmp/patch-vs-commit.diff 2>&1 || true
+```
+
+输出格式：
+
+```diff
+--- a/<original_patch_file>  (原始 patch)
++++ b/<commit_hash>         (合入后 commit)
+@@ -<line>,<n> +<line>,<n> @@
+ <原始 patch 中存在的行，合入后 commit 中不存在 / 被修改>
+ <合入后 commit 中新增的行，原始 patch 中不存在>
+```
+
+> 如果完全一致，则写 "原始 patch 与合入后 commit 完全一致，无差异。"
+
+> 附录 diff 由脚本自动生成，保留完整输出，不截断。
 ```
 
 ---
