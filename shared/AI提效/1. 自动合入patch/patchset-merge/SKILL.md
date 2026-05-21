@@ -363,9 +363,9 @@ git -C <source_dir> log --oneline <candidate_hash>..HEAD --follow -p -- <file_pa
 
 | # | Patch | 相似度 | 匹配文件 | 引入 Commit | Commit 标题 | 依赖链（后续依赖它的 commit） | Revert 安全 | 依据 |
 |---|-------|--------|---------|-------------|------------|---------------------------|------------|------|
-| 1 | <title> | 高 | drivers/foo.c | abc123 | "add: foo driver" | 无 | ✅ 可 revert | 后续无 commit 依赖 foo_init，独立 revert 安全 |
-| 2 | <title> | 高 | kernel/bar.c | def456 | "add: bar core" | ghi789, jkl012 | ⚠ 高危 | bar_core_init() 被后续 2 个 commit 调用，需一并 revert ghi789 和 jkl012 |
-| 3 | <title> | 中 | mm/alloc.c | mno345 | "refactor: alloc" | pqr - vwx - bcd | 🔴 不可 revert | 形成 3 层依赖链（alloc page mem），revert 代价过大 |
+| 1 | \<title> | 高 | drivers/foo.c | abc123 | "add: foo driver" | 无 | ✅ 可 revert | 后续无 commit 依赖 foo_init，独立 revert 安全 |
+| 2 | \<title> | 高 | kernel/bar.c | def456 | "add: bar core" | ghi789, jkl012 | ⚠ 高危 | bar_core_init() 被后续 2 个 commit 调用，需一并 revert ghi789 和 jkl012 |
+| 3 | \<title> | 中 | mm/alloc.c | mno345 | "refactor: alloc" | pqr - vwx - bcd | 🔴 不可 revert | 形成 3 层依赖链（alloc page mem），revert 代价过大 |
 
 **Revert 安全分级**：
 - ✅ **可 revert**：该 commit 之后无其他 commit 依赖它引入的符号/代码，独立 revert 安全
