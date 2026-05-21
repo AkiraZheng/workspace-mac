@@ -461,9 +461,11 @@ fi
 │  3. 分析错误（必须做，写出分析结论）                         │
 │     ├─ 读取编译输出的前 40 行                               │
 │     ├─ 按「错误分类表」匹配错误类型                          │
-│     ├─ 判断是 patch 引入的还是目标仓库已有的                 │
-│     │   ├─ 目标仓库已有错误 → 报告用户，不修复，跳过编译     │
-│     │   └─ patch 引入的错误 → 步骤 4                       │
+│     ├─ 判断错误来源                                         │
+│     │   ├─ patch 自身代码问题 → 步骤 4（直接修复）          │
+│     │   └─ 环境/配置问题（非 patch 代码）→ 步骤 4a         │
+│     │       临时修改 config/Makefile 等 → 编译通过          │
+│     │       → commit 后立即 git checkout 还原环境文件       │
 │     ↓                                                     │
 │  4. 修复源码                                               │
 │     ├─ 按「修复策略表」选择对应的修复方式                    │
@@ -479,6 +481,9 @@ fi
 │     │                                 git commit --amend --no-edit │
 │     └─ 策略 ④~⑧（未 commit）→ git add -u && git commit    │
 │         （commit message 用 patch 的 Subject）                 │
+│     ↓                                                     │
+│  7. 如果步骤 4a 修改了环境文件 → git checkout -- <配置文件>  │
+│     （还原临时修改，只保留 patch 自身的改动）                  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -495,8 +500,9 @@ fi
 | 语法错误 | `expected ';'` / `expected '}'` | 检查冲突解决时是否引入了多余/缺少的标记 → 逐行比对冲突标记位置 |
 | 重复定义 | `redefinition of` | patch 新增的符号在目标仓库已存在 → 删除 patch 中的重复定义，保留目标仓库版本 |
 | 变量未使用 | `unused variable` | 如果 patch 引入了但后续代码未引用 → 保留变量（可能被后续 patch 使用），注掉 warning；如果是残留代码 → 删除 |
-| 文件不存在 | `No such file or directory`（编译命令引用） | patch 新增/修改的文件未被 Makefile/Kconfig 正确引用 → 检查是否需要更新 Makefile |
+| 文件不存在 | `No such file or directory`（编译命令引用） | patch 新增/修改的文件未被 Makefile/Kconfig 正确引用 → 临时修改 Makefile 添加编译目标，commit 后 `git checkout -- Makefile` 还原 |
 | Kconfig 依赖缺失 | `depends on` 相关错误 | 检查目标仓库的 Kconfig 层级 → 添加缺失的 config 依赖项 |
+| 环境/配置问题 | `CONFIG_XXX` 未定义、Makefile 缺少目标、编译选项不兼容等，且**错误不是 patch 代码引起的** | **临时修改**：改 config/Makefile 使编译通过 → commit → 立即 `git checkout -- <被修改的配置文件>` 还原。在分析文档中记录临时修改了什么、为什么需要改 |
 
 ---
 
@@ -504,12 +510,17 @@ fi
 
 1. **必须先分析再修复**：每次编译失败时，先写出 "错误类型是 X，原因是 Y，修复方案是 Z"，再动手改代码
 2. **禁止自行跳过 patch**：同一 patch 编译多次失败无法解决时，AI 可继续尝试修复或停止合入，但**跳过 patch 必须经用户确认**（跳过 patch 是硬性禁止操作）
-3. **不修复已有错误**：如果编译错误在合入 patch 之前就存在，不修复，报告用户。验证方法：将错误中的符号/函数名在合入前的代码中检查（`git show HEAD^:<file> | grep "<symbol>"` 或 `grep -r "<symbol>"` 对比前后差异），避免使用 `git stash`（stash pop 可能重新引入已解决的冲突）
+3. **必须编译通过**：编译是硬性要求，不允许出现"无法验证"的结果。区分两种错误来源：
+   - **patch 自身代码问题**（如未声明函数、类型不匹配、语法错误等）→ 直接修复源码，记录到分析文档
+   - **环境/配置问题**（如 CONFIG_XXX 未启用、Makefile 缺少编译目标、Kconfig 依赖不满足等，且错误不是 patch 代码引起的）→ 临时修改配置文件使编译通过，commit 后立即 `git checkout -- <配置文件>` 还原。**禁止以"配置未启用"为由跳过编译**
+   
+   验证方法：将错误中的符号/函数名在合入前的代码中检查（`git show HEAD^:<file> | grep "<symbol>"` 或 `grep -r "<symbol>"` 对比前后差异），避免使用 `git stash`（stash pop 可能重新引入已解决的冲突）
 4. **记录修复过程**：每次修复都要记录到 per-patch 分析文档的「编译修复记录」中
 5. **commit 时机**：
    - 策略 ①②③：编译通过后不需要额外 commit（git am 已自动创建）；如有修复则 `git commit --amend --no-edit`
    - 策略 ④~⑧：编译通过后 `git commit -m "<patch Subject>"`
-6. **不能跳过编译**：即使用户说"跳过"，也必须至少执行一次编译
+   - 如果为编译通过临时修改了环境文件（config/Makefile），commit **之后**必须立即执行 `git checkout -- <配置文件>` 还原，确保只有 patch 代码留在 commit 中
+6. **编译必须通过**：不允许出现"⚠ 无法验证"的结果。每个 patch 合入后必须编译成功。即使用户说"跳过编译"，也必须至少执行一次
 
 #### 3.7 生成报告、分析和总结
 
