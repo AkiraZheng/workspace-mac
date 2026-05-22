@@ -1,0 +1,67 @@
+{
+  "source": "/mnt/shared/originPatch/HDBSS_v3/",
+  "target_kernel": "/root/code/openeuler/kernel",
+  "target_branch": "patch-hdbss-v3",
+  "build_target": "make ARCH=arm64 Image",
+  "strategy": "B: 合并差异改进点（本地已有实现）",
+  "total_count": 5,
+  "active_count": 3,
+  "skip_count": 2,
+  "merge_order": [
+    {
+      "seq": 1,
+      "task_id": "0001",
+      "patch_file": "/tmp/patches/0001.patch",
+      "subject": "arm64/sysreg: Add HDBSS related register information",
+      "author": "eillon <yezhenyu2@huawei.com>",
+      "action": "apply",
+      "strategy": "已部分合入。差异点：HDBSSBR_EL2 SZ 枚举缺少 0b0000 4KB 条目。git am --3way，冲突在 arch/arm64/tools/sysreg，保留现有内容 + 添加 4KB 条目。",
+      "depends_on": [],
+      "risk": "低"
+    },
+    {
+      "seq": 2,
+      "task_id": "0002",
+      "patch_file": "/tmp/patches/0002.patch",
+      "subject": "KVM: arm64: Add support to set the DBM attr during memory abort",
+      "author": "eillon <yezhenyu2@huawei.com>",
+      "action": "skip",
+      "strategy": "已完全实现。DBM 功能已通过 CONFIG_ARM64_HDBSS guard 集成到 stage2_set_prot_attr 和 kvm_pgtable_stage2_relax_perms。KVM_PGTABLE_PROT_DBM 用 BIT(4) 代替 patch 的 BIT(6)，差异是目标内核的适配选择，不影响功能。",
+      "depends_on": [],
+      "risk": "跳过"
+    },
+    {
+      "seq": 3,
+      "task_id": "0003",
+      "patch_file": "/tmp/patches/0003.patch",
+      "subject": "KVM: arm64: Add support for FEAT_HDBSS",
+      "author": "eillon <yezhenyu2@huawei.com>",
+      "action": "apply",
+      "strategy": "半合入。system_supports_hdbss() 已存在但直接读寄存器。差异改进点：1) 添加 HAS_HDBSS 到 cpucaps；2) 添加 has_vhe_hdbss() 和 arm64_features[] cpufeature 条目。KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 已存在(值502)，跳过 kvm.h 的 diff。保留现有的 system_supports_hdbss() 实现（直接读寄存器），冲突时保留 ours。",
+      "depends_on": ["0001"],
+      "risk": "中"
+    },
+    {
+      "seq": 4,
+      "task_id": "0004",
+      "patch_file": "/tmp/patches/0004.patch",
+      "subject": "KVM: arm64: Enable HDBSS support and handle HDBSSF events",
+      "author": "eillon <yezhenyu2@huawei.com>",
+      "action": "skip",
+      "strategy": "核心实现已存在。目标内核通过 CONFIG_ARM64_HDBSS 保护的完整实现在 arch/arm64/ 下 17 处引用。与 patch 在数据结构、函数位置、刷新机制等方面有 10+ 维度结构性冲突。patch 使用 guard() 宏在当前内核不兼容导致编译失败。现有实现功能完整，不建议替换。",
+      "depends_on": ["0001", "0002", "0003"],
+      "risk": "跳过"
+    },
+    {
+      "seq": 5,
+      "task_id": "0005",
+      "patch_file": "/tmp/patches/0005.patch",
+      "subject": "KVM: arm64: Document HDBSS ioctl",
+      "author": "Tian Zheng <zhengtian10@huawei.com>",
+      "action": "apply",
+      "strategy": "文档补丁。KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 已存在，添加 API 文档说明 ioctl 参数语义。Documentation/virt/kvm/api.rst 中查找合适位置插入。",
+      "depends_on": ["0003"],
+      "risk": "低"
+    }
+  ]
+}

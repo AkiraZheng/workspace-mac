@@ -1,0 +1,73 @@
+From ec9a95cc11919f3f39943846e42ecb39a6af4849 Mon Sep 17 00:00:00 2001
+From: eillon <yezhenyu2@huawei.com>
+Date: Fri, 22 May 2026 17:57:39 +0800
+Subject: [PATCH 3/7] arm64/sysreg: Add HDBSS related register information
+
+The ARM architecture added the HDBSS feature and descriptions of
+related registers (HDBSSBR/HDBSSPROD) in the DDI0601(ID121123) version,
+add them to Linux.
+
+[Adapted from upstream patchset v3]
+Signed-off-by: eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/esr.h |  2 ++
+ arch/arm64/tools/sysreg      | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/arch/arm64/include/asm/esr.h b/arch/arm64/include/asm/esr.h
+index d5c30ee0985f..276eb39ed9a7 100644
+--- a/arch/arm64/include/asm/esr.h
++++ b/arch/arm64/include/asm/esr.h
+@@ -148,6 +148,8 @@
+ #define ESR_ELx_CM 		(UL(1) << ESR_ELx_CM_SHIFT)
+ 
+ /* ISS2 field definitions for Data Aborts */
++#define ESR_ELx_HDBSSF_SHIFT	(11)
++#define ESR_ELx_HDBSSF		(UL(1) << ESR_ELx_HDBSSF_SHIFT)
+ #define ESR_ELx_TnD_SHIFT	(10)
+ #define ESR_ELx_TnD 		(UL(1) << ESR_ELx_TnD_SHIFT)
+ #define ESR_ELx_TagAccess_SHIFT	(9)
+diff --git a/arch/arm64/tools/sysreg b/arch/arm64/tools/sysreg
+index baded26ab7d7..de9fead05c7e 100644
+--- a/arch/arm64/tools/sysreg
++++ b/arch/arm64/tools/sysreg
+@@ -2477,6 +2477,35 @@ Sysreg	SMCR_EL2	3	4	1	2	6
+ Fields	SMCR_ELx
+ EndSysreg
+ 
++Sysreg	HDBSSBR_EL2	3	4	2	3	2
++Res0	63:56
++Field	55:12	BADDR
++Res0	11:4
++Enum	3:0	SZ
++	0b0000	4KB
++	0b0001	8KB
++	0b0010	16KB
++	0b0011	32KB
++	0b0100	64KB
++	0b0101	128KB
++	0b0110	256KB
++	0b0111	512KB
++	0b1000	1MB
++	0b1001	2MB
++EndEnum
++EndSysreg
++
++Sysreg	HDBSSPROD_EL2	3	4	2	3	3
++Res0	63:32
++Enum	31:26	FSC
++	0b000000	OK
++	0b010000	ExternalAbort
++	0b101000	GPF
++EndEnum
++Res0	25:19
++Field	18:0	INDEX
++EndSysreg
++
+ Sysreg	DACR32_EL2	3	4	3	0	0
+ Res0	63:32
+ Field	31:30	D15
+-- 
+2.43.0
+

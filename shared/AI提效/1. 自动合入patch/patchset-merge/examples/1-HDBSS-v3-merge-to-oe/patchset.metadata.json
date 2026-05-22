@@ -1,0 +1,16 @@
+{
+  "source": "/mnt/shared/originPatch/HDBSS_v3/",
+  "download_method": "local",
+  "total_patches": 5,
+  "target_kernel": "/root/code/openeuler/kernel",
+  "target_branch": "patch-hdbss-v3",
+  "build_target": "make ARCH=arm64 Image",
+  "upstream": "none",
+  "patches": [
+    {"id": "0001", "file": "/tmp/patches/0001.patch", "subject": "arm64/sysreg: Add HDBSS related register information", "author": "eillon <yezhenyu2@huawei.com>"},
+    {"id": "0002", "file": "/tmp/patches/0002.patch", "subject": "KVM: arm64: Add support to set the DBM attr during memory abort", "author": "eillon <yezhenyu2@huawei.com>"},
+    {"id": "0003", "file": "/tmp/patches/0003.patch", "subject": "KVM: arm64: Add support for FEAT_HDBSS", "author": "eillon <yezhenyu2@huawei.com>"},
+    {"id": "0004", "file": "/tmp/patches/0004.patch", "subject": "KVM: arm64: Enable HDBSS support and handle HDBSSF events", "author": "eillon <yezhenyu2@huawei.com>"},
+    {"id": "0005", "file": "/tmp/patches/0005.patch", "subject": "KVM: arm64: Document HDBSS ioctl", "author": "Tian Zheng <zhengtian10@huawei.com>"}
+  ]
+}

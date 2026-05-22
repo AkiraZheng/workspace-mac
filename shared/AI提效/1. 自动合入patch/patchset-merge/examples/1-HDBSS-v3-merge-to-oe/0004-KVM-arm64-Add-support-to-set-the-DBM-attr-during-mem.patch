@@ -1,0 +1,74 @@
+From 54e687c353cc9af4f5a74c85041650f94c7bfbb5 Mon Sep 17 00:00:00 2001
+From: eillon <yezhenyu2@huawei.com>
+Date: Fri, 22 May 2026 18:14:28 +0800
+Subject: [PATCH 4/7] KVM: arm64: Add support to set the DBM attr during memory
+ abort
+
+This patch adds support to set the DBM (Dirty Bit Modifier) attribute
+in S2 PTE during user_mem_abort(). This bit, introduced in ARMv8.1,
+enables hardware to automatically promote write-clean pages to write-dirty.
+
+[Adapted from upstream patchset v3 - target kernel API differences]
+Signed-off-by: eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 2 ++
+ arch/arm64/kvm/hyp/pgtable.c         | 8 ++++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 4153b77d8aae..fc4286fab74f 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -178,6 +178,7 @@ enum kvm_pgtable_stage2_flags {
+  * @KVM_PGTABLE_PROT_W:		Write permission.
+  * @KVM_PGTABLE_PROT_R:		Read permission.
+  * @KVM_PGTABLE_PROT_DEVICE:	Device attributes.
++ * @KVM_PGTABLE_PROT_DBM:		Dirty bit management attribute.
+  * @KVM_PGTABLE_PROT_SW0:	Software bit 0.
+  * @KVM_PGTABLE_PROT_SW1:	Software bit 1.
+  * @KVM_PGTABLE_PROT_SW2:	Software bit 2.
+@@ -189,6 +190,7 @@ enum kvm_pgtable_prot {
+ 	KVM_PGTABLE_PROT_R			= BIT(2),
+ 
+ 	KVM_PGTABLE_PROT_DEVICE			= BIT(3),
++	KVM_PGTABLE_PROT_DBM			= BIT(4),
+ 
+ 	KVM_PGTABLE_PROT_SW0			= BIT(55),
+ 	KVM_PGTABLE_PROT_SW1			= BIT(56),
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index d79feecc2f51..125a30c1f169 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -40,6 +40,8 @@
+ 
+ #define KVM_PTE_LEAF_ATTR_HI_SW		GENMASK(58, 55)
+ 
++#define KVM_PTE_LEAF_ATTR_HI_S2_DBM	BIT(51)
++
+ #define KVM_PTE_LEAF_ATTR_HI_S1_XN	BIT(54)
+ 
+ #define KVM_PTE_LEAF_ATTR_HI_S2_XN	BIT(54)
+@@ -711,6 +713,9 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 	if (prot & KVM_PGTABLE_PROT_W)
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+ 
++	if (prot & KVM_PGTABLE_PROT_DBM)
++		attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++
+ 	attr |= FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S2_SH, sh);
+ 	attr |= KVM_PTE_LEAF_ATTR_LO_S2_AF;
+ 	attr |= prot & KVM_PTE_LEAF_ATTR_HI_SW;
+@@ -1315,6 +1320,9 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 	if (prot & KVM_PGTABLE_PROT_W)
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+ 
++	if (prot & KVM_PGTABLE_PROT_DBM)
++		set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++
+ 	if (prot & KVM_PGTABLE_PROT_X)
+ 		clr |= KVM_PTE_LEAF_ATTR_HI_S2_XN;
+ 
+-- 
+2.43.0
+
