@@ -1,6 +1,6 @@
 ---
 name: merge-patchset
-description: Use when the user provides a patch folder path, runs /merge-patchset, or asks to merge/apply/合入/打补丁/回退 a patchset into a source tree. Handles multi-scenario intelligent merge: clean apply, revert-then-merge for conflicting old code, dependency auto-discovery from upstream repos, and partial-apply detection. Uses parallel sub-agents for pre-check analysis. Trigger on: 合入patch、合入补丁、打patch、apply patch、merge patch、回退旧代码再合入、/merge-patchset, and any mention of applying patches to a repo.
+description: "Merge patchset into git repository. Use when user wants to apply patches to a target codebase — any phrasing mentioning patches and repositories together (merge/合入/apply patches, patch合入kernel, 把patch文件夹合到源码里, etc.). **NEVER ask user for patch_dir or source_dir** — extract from input first; if path incomplete, auto-search /mnt/shared/originPatch/, /root/code/, and current directory before asking. Clean merges (scene A) proceed without confirmation. Supports: conflict detection, dependency discovery, revert-then-merge for conflicting code, path adaptation."
 compatibility: claude-code, opencode
 allowed-tools: Bash(git:*), Bash(make:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:*), Bash(cat:*), Bash(ls:*), Bash(find:*), Bash(echo:*), Write(*), Agent, LSP(*)
 ---
@@ -8,11 +8,10 @@ allowed-tools: Bash(git:*), Bash(make:*), Bash(mkdir:*), Bash(grep:*), Bash(sed:
 # Patchset Merge
 
 从用户指定的 patch 文件夹逐个合入到源码仓库。内置多场景智能检测：自动判断是否需要先 revert 旧代码、是否需要从上游拉取依赖 patch。遇问题在对话中交互决策。
-
 ## 总流程
 
 ```text
-用户输入: patch_dir + --source + --upstream? + --branch?
+分析用户需求
 │
 ├─ LSP 环境准备 — clangd 安装与索引
 │   └─ 确保目标仓库有 compile_commands.json 且 LSP 可解析
@@ -95,14 +94,61 @@ grep -q '"skill.*karpathy.*deny"' opencode.json 2>/dev/null && echo "✗ karpath
 5. **逆序 revert**: 如需 revert 旧代码，从最新到最旧逆序执行
 6. **中文输出**: 所有思考、解释、输出使用中文
 
-## 参数
+## 路径智能推断（参数解析阶段，MUST 自动执行）
 
-| 参数 | 必需 | 说明 | 默认值 |
-|------|------|------|--------|
-| `patch_dir` | 是 | 包含 .patch 文件的文件夹路径 | — |
-| `--source` | 否 | 目标源码 git 仓库路径 | 当前目录 `.` |
-| `--upstream` | 否 | 上游源码仓库路径，用于查找依赖 patch | — |
-| `--branch` | 否 | 操作分支名 | 自动生成 |
+这是整个流程的**第一步**，在开始任何检测之前完成。**禁止在用户已提供或可推断路径时询问用户。**
+
+### 路径提取优先级
+
+1. **直接提取**：用户输入中包含完整路径 → 直接使用，零询问
+2. **关键词搜索**：用户只给了名称（如 "HDBSS_v3"、"kernel"）→ 自动搜索
+3. **上下文推断**：当前工作目录是 git 仓库 → 可能是 target；目录下有 .patch 文件 → 可能是 patch_dir
+4. **询问用户**：以上全部失败 → 才问（只问缺失的参数）
+
+### 自动搜索策略
+
+当用户给的路径不完整（如只说 "HDBSS_v3" 没说完整路径、只说 "kernel" 没说哪个目录），按以下顺序自动搜索：
+
+```bash
+# 推断 patch_dir（用户给了关键词如 "HDBSS_v3"、"patch" 等）
+# 1. 在常见 patch 存放位置搜索
+find /mnt/shared/originPatch -maxdepth 2 -type d -name "*<keyword>*" 2>/dev/null
+# 2. 在当前工作目录及附近搜索
+find . -maxdepth 3 -type d -name "*<keyword>*" 2>/dev/null
+# 3. 搜索包含 .patch 文件的目录
+find /mnt/shared -maxdepth 4 -type d -name "*<keyword>*" 2>/dev/null
+# 4. 只有一个结果 → 直接使用；多个结果 → 选最匹配的（名称完全匹配 > 部分匹配 > 包含 .patch 文件），不确定时列出选项让用户选
+```
+
+```bash
+# 推断 source_dir（用户给了关键词如 "kernel"、"openeuler" 等）
+# 1. 在常见源码位置搜索 git 仓库
+find /root/code -maxdepth 3 -type d -name "*<keyword>*" -exec test -d {}/.git \; -print 2>/dev/null
+# 2. 当前目录如果是 git 仓库，且名称匹配关键词 → 直接使用
+git rev-parse --show-toplevel 2>/dev/null
+# 3. 搜索常见内核源码目录
+find /root/code -maxdepth 4 -name "Makefile" -o -name "Kconfig" | sed 's|/Makefile||;s|/Kconfig||' | sort -u | head -10
+```
+
+### 推断结果确认策略
+
+| 搜索结果 | 处理方式 |
+|---------|---------|
+| 恰好 1 个匹配 | **直接使用**，告知用户"自动检测到 patch_dir: <path>" |
+| 2-3 个匹配 | 名称完全匹配的 → 直接使用；否则列出选项让用户选 |
+| >3 个匹配或无匹配 | 列出最佳候选或告知搜索失败，询问用户 |
+
+### 上游仓库推断（可选）
+
+如果用户提到了 "upstream" / "上游" / "主线" 等关键词但没给路径：
+```bash
+# 检查目标仓库的 remote
+git -C <source_dir> remote -v | head -5
+# 搜索常见上游路径
+find /mnt/shared -maxdepth 4 -type d -name "linux" -o -name "kernel*" 2>/dev/null | head -10
+```
+
+---
 
 ## 工作流
 
@@ -359,20 +405,31 @@ git -C <source_dir> log --oneline <candidate_hash>..HEAD --follow -p -- <file_pa
 #      → 该后续 commit 也必须一并 revert，或整个 revert 标记为不可行
 ```
 
-**输出**：每个 high 风险 patch 的相似度分析 + revert 安全评估：
+**输出**：每个 high 风险 patch 的相似度分析 + revert 安全评估。
 
-| # | Patch | 相似度 | 匹配文件 | 引入 Commit | Commit 标题 | 依赖链（后续依赖它的 commit） | Revert 安全 | 依据 |
+**⚠️ 关键判定逻辑**：
+- 相似度 ≥ 70% + 目标仓库已有实现 = **应该 revert 旧版本**，标记为 ✅ 或 ⚠（根据依赖链）
+- **禁止使用"可保留"、"需检查"等歧义表述**，必须使用 ✅/⚠/🔴 三级标记
+- "Revert 安全"列的含义是"是否可以安全地 revert 这个旧 commit"，不是"是否保留现有代码"
+
+| # | Patch | 相似度 | 匹配文件 | 引入 Commit | Commit 标题 | 依赖链（后续依赖它的 commit） | Revert 判定 | 依据 |
 |---|-------|--------|---------|-------------|------------|---------------------------|------------|------|
-| 1 | \<title> | 高 | drivers/foo.c | abc123 | "add: foo driver" | 无 | ✅ 可 revert | 后续无 commit 依赖 foo_init，独立 revert 安全 |
-| 2 | \<title> | 高 | kernel/bar.c | def456 | "add: bar core" | ghi789, jkl012 | ⚠ 高危 | bar_core_init() 被后续 2 个 commit 调用，需一并 revert ghi789 和 jkl012 |
-| 3 | \<title> | 中 | mm/alloc.c | mno345 | "refactor: alloc" | pqr - vwx - bcd | 🔴 不可 revert | 形成 3 层依赖链（alloc page mem），revert 代价过大 |
+| 1 | \<title> | 高 | drivers/foo.c | abc123 | "add: foo driver" | 无 | ✅ 可 revert | 相似度 95%，目标仓库已有旧版本，后续无依赖，应 revert 旧版本再合入新 patch |
+| 2 | \<title> | 高 | kernel/bar.c | def456 | "add: bar core" | ghi789, jkl012 | ⚠ 链式 revert | 相似度 90%，bar_core_init() 被后续 2 个 commit 调用，需一并 revert |
+| 3 | \<title> | 中 | mm/alloc.c | mno345 | "refactor: alloc" | pqr - vwx - bcd | 🔴 不可 revert | 依赖链 >3 层，revert 代价过大，退回冲突解决 |
 
-**Revert 安全分级**：
-- ✅ **可 revert**：该 commit 之后无其他 commit 依赖它引入的符号/代码，独立 revert 安全
-- ⚠ **高危 — 需链式 revert**：后续有 commit 依赖它，但依赖链较短（≤3 个），可以一并 revert
-- 🔴 **不可 revert**：依赖链超过 3 层，或依赖它的 commit 涉及其他子系统，revert 代价过大 → **放弃 revert，走冲突解决**
+**Revert 安全分级**（判断顺序）：
+1. **先判断相似度**：相似度 < 70% → 不列入 revert 清单，走冲突解决
+2. **再判断依赖链**：相似度 ≥ 70% 时，按依赖链长度决定安全分级：
+   - ✅ **可 revert**：该 commit 之后无其他 commit 依赖它引入的符号/代码，独立 revert 安全
+   - ⚠ **链式 revert**：后续有 commit 依赖它，但依赖链较短（≤3 个），可以一并 revert
+   - 🔴 **不可 revert**：依赖链超过 3 层，或依赖它的 commit 涉及其他子系统，revert 代价过大 → **放弃 revert，走冲突解决**
 
-> 相似度"低"的 patch 不需要 revert，走正常的冲突解决流程即可。
+> **相似度判断总结**：
+> - 低（< 40%）：不列入 revert 清单，走冲突解决
+> - 中（40%~70%）：根据具体情况判断，如代码结构相似但实现不同 → 走冲突解决；如仅 API 签名变化 → 可考虑 revert
+> - 高（≥ 70%）+ 目标仓库已有实现：**必须列入 revert 清单**，根据依赖链决定 ✅/⚠/🔴
+>
 > 未找到相似代码时显示: `目标仓库中未发现相似代码，无需 revert`
 > **仅 ✅ 可 revert 和 ⚠ 链式 revert（用户确认后）的 commit 才进入 Phase 2 的 revert 操作。🔴 不可 revert 的 patch 退回走冲突解决流程。**
 
@@ -391,7 +448,20 @@ git -C <source_dir> log --oneline <candidate_hash>..HEAD --follow -p -- <file_pa
 
 场景可以组合（如 B + C：先 revert 旧代码，拉取强依赖，再 merge）。
 
-按 `references/output-templates.md` 中「相位 1 输出」模板展示场景判定和执行计划。**必须等用户确认后才进入 Phase 2。**
+按 `references/output-templates.md` 中「相位 1 输出」模板展示场景判定和执行计划。
+
+**Phase 1 确认策略（按场景分级）**：
+
+| 场景 | 确认要求 | 说明 |
+|------|---------|------|
+| **仅 A — 干净合入**（所有 patch 风险 none/low，无依赖，无路径问题） | 🚀 **自动继续**，只通知用户 | 无需用户介入，直接进入 Phase 3 merge |
+| **E — 路径适配**（自动找到唯一映射） | 🚀 **自动继续**，展示映射关系 | 只有一处路径变化，映射明确 |
+| **E — 路径适配**（多个候选映射） | ⚠ 需确认 | 用户选择正确的路径映射 |
+| **B — 含 Revert**（任何 revert 判定） | ⚠ 需确认 | revert 操作不可逆，必须用户确认 |
+| **C — 含强依赖拉取** | ⚠ 需确认 | 从上游拉取代码可能引入额外变更 |
+| **组合场景**（B+E, B+C, C+E, B+C+E） | ⚠ 需确认 | 多场景组合复杂度高 |
+
+> **核心原则**：能不打扰用户就不打扰。只有涉及不可逆操作（revert）、外部代码引入（拉依赖）、或路径映射有歧义时才需要确认。
 
 ---
 
@@ -699,19 +769,50 @@ fi
 
 ## 交互模式
 
-以下场景（相位 1 及前置操作）必须在对话中向用户展示信息并等待决策，**不自行决定**。相位 3 中的冲突解决和编译修复由 AI 自行处理：
+### 核心原则
 
-| 场景 | 展示内容 | 用户选项 |
-|------|---------|---------|
-| 工作区不干净 | 未提交的文件列表 | 继续 / 取消 |
-| 场景判定结果 | 三个 agent 的检测摘要、推荐场景、将执行的操作 | 确认执行 / 调整参数 / 取消 |
-| Revert 确认 | 要 revert 的 commit 列表（hash + 标题 + 安全分级 + 依赖链） | 确认（含链式 revert）/ 逐条选择 / 取消 |
-| 依赖拉取确认 | 推荐的依赖 commit 列表 | 全部拉取 / 逐条选择 / 取消 |
-| 路径映射 | 原始路径 → 目标路径的映射表 | 确认 / 手动修正 / 取消 |
-| 编译失败 | patch 编号、编译错误（前 20 行） | AI 自行分析修复 / 停止；需跳过时询问用户 |
+**AI 应尽可能自主完成工作，非必要不打断用户。** 每次停下来询问用户都是一次上下文切换，应该避免。
+
+判断是否需要询问的标准：**这个决策是否不可逆、有安全风险、或存在多个同样合理的选项？**
+- 是 → 询问用户
+- 否 → AI 自行决策并告知用户
+
+### 路径解析阶段（MUST 自动执行）
+
+1. 用户输入含完整路径 → 直接提取，不询问
+2. 用户输入含关键词但无完整路径 → 按「路径智能推断」自动搜索，搜到唯一结果直接用
+3. 搜索失败或结果不明确 → 列出候选让用户选，只问这一次
+4. **禁止**：用户已给路径、或搜索已找到结果后，再次向用户确认路径
+
+### 需要用户确认的场景
+
+| 场景 | 何时询问 | 何时不询问 |
+|------|---------|-----------|
+| **路径/参数** | 自动搜索失败，无匹配结果 | 找到唯一匹配，或用户已明确提供 |
+| **工作区不干净** | 有未提交文件时展示列表 | 工作区干净则直接继续 |
+| **场景判定 — A 干净合入** | — | **永远自动继续**，只通知不确认 |
+| **场景判定 — E 路径适配** | 多个候选路径映射时 | 唯一映射时直接应用 |
+| **场景判定 — B 含 Revert** | 总是需要确认（不可逆） | — |
+| **场景判定 — C 补依赖** | 总是需要确认（引入外部代码） | — |
+| **编译失败** | AI 自行分析修复；**仅跳过 patch 时需要确认** | 修复和重编译由 AI 自主完成 |
+
+### 交互反模式（强化版）
+
+以下是绝对禁止的行为，每次交互前自我检查：
+
+1. ❌ **用户已提供参数时再次询问** — 用户输入含 patch_dir、source_dir（完整或部分），直接提取/搜索，禁止再次提问
+2. ❌ **搜索已找到结果时还问确认** — `find` 返回唯一结果就直接用，告知用户即可
+3. ❌ **干净合入场景（场景 A）停下来让用户确认** — 所有 patch 无风险、无依赖、无路径问题，直接开始 merge
+4. ❌ **能自己搜索的不搜直接问** — 用户给了关键词（如"HDBSS_v3"），先搜 `/mnt/shared/originPatch/` 和常见位置，搜不到再问
+5. ❌ **重复询问同一信息** — 用户回答过一次的信息，记住它，不要再问第二次
+6. ❌ **问"是否继续"类无意义问题** — 如果前面没有异常，默认继续
 
 ## 反模式
 
+- **用户已提供参数时再次询问** — 如果用户输入中已包含 patch_dir、source_dir 等参数（含关键词），直接提取/搜索，禁止再次提问
+- **能自动搜索的不搜直接问** — 用户给名称（如"HDBSS_v3"），先去 `/mnt/shared/originPatch/` 等位置搜，搜不到再问。用户说"kernel"，先去 `/root/code/` 搜 git 仓库
+- **干净合入停下来确认** — 场景 A 所有 patch 无风险，直接进入 merge，只需通知用户
+- **路径自动搜索到唯一结果时还确认** — 直接使用并告知用户
 - 跳过失败的 patch 直接合入下一个
 - 在 master/main 等主干分支上操作
 - 删除操作分支
@@ -719,7 +820,7 @@ fi
 - revert 时不按逆序执行
 - 写 Python 脚本或任何脚本语言来替代直接的 bash/Edit 工具调用（包括批量解决冲突 — 必须用 Edit 工具逐个文件处理）
 - 用 `git stash` + `git stash pop` 验证编译（stash pop 会重新引入已解决的冲突）
-- 在 Phase 1 场景判定阶段不询问用户直接执行修改操作
+- 在 Phase 1 场景判定阶段，对场景 B/C/组合不询问用户直接执行修改操作（场景 A 和唯一映射的 E 应自动继续）
 - 把 patch diff 中的上下文行（不带 `+`/`-` 前缀的行）写入源码文件
 - 跳过前置检测直接开始 merge
 - 不向用户展示场景判定结果就执行修改操作
@@ -727,7 +828,7 @@ fi
 ## 输出规则
 
 1. **每个相位的输出必须在进入下一相位前完成**，不得省略
-2. **相位 1 场景判定**输出后必须等待用户确认，不得自动继续；相位 3 中的冲突解决和编译修复由 AI 自行分析决策，不需人工介入
+2. **相位 1 场景判定**确认策略：场景 A（干净合入）自动继续，仅通知；场景 E（唯一映射）自动继续；场景 B/C/组合需等待用户确认。相位 3 中的冲突解决和编译修复由 AI 自行分析决策，不需人工介入
 3. **进度输出使用 N/M 格式**，让用户清楚知道当前进度
 4. **所有表格必须用 Markdown 表格**，不得用纯文本罗列
 5. **三种输出职责分离**：

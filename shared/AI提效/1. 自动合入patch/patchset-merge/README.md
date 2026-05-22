@@ -24,23 +24,41 @@ cd patchset-merge
 
 ### Claude Code
 
-```
-/merge-patchset <patch_dir> [--source <目标仓库>] [--upstream <源仓库>] [--branch <分支名>]
-```
-
-- `patch_dir`: patchset 目录
-- `--source`: 目标仓库，默认为当前仓库
-- `--upstream`: 上游仓库，用于自动查找是否缺少相关的依赖patches
-- `--branch`: merge操作的目标分支名
-
-### OpenCode
-
-直接描述需求，OpenCode 自动发现并加载 skill。例如：
+【推荐用法】直接描述需求，claude 自动发现并加载 skill。例如：
 
 ```
 帮我合入 /tmp/patches/ 下的 patchset，目标仓库是 /root/openeuler/kernel
 这些 patch 来自 linux-stable，上游仓库在 /root/linux，帮我检查有没有缺失的依赖
 ```
+
+使用参数：
+```
+/merge-patchset <patch_dir> [--source <目标仓库>] [--upstream <源仓库>] [--branch <分支名>]
+```
+
+- `patch_dir`: 包含 .patch 文件的文件夹路径
+- `--source`: 目标源码 git 仓库路径
+- `--upstream`: 上游仓库，用于自动查找是否缺少相关的依赖patches
+- `--branch`: merge操作的目标分支名
+
+### OpenCode
+
+【推荐用法】直接描述需求，OpenCode 自动发现并加载 skill。例如：
+
+```
+帮我合入 /tmp/patches/ 下的 patchset，目标仓库是 /root/openeuler/kernel
+这些 patch 来自 linux-stable，上游仓库在 /root/linux，帮我检查有没有缺失的依赖
+```
+
+使用参数：
+```
+/merge-patchset <patch_dir> [--source <目标仓库>] [--upstream <源仓库>] [--branch <分支名>]
+```
+
+- `patch_dir`: 包含 .patch 文件的文件夹路径
+- `--source`: 目标源码 git 仓库路径
+- `--upstream`: 上游仓库，用于自动查找是否缺少相关的依赖patches
+- `--branch`: merge操作的目标分支名
 
 ## 工作流
 

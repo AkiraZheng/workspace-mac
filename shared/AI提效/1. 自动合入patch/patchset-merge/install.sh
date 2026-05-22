@@ -86,23 +86,54 @@ check_platform() {
 }
 
 # --- 部署 ---
+# OpenCode 和 Claude Code 共用的 agents 目录（优先级最高）
+AGENTS_SKILLS_DIR="$HOME/.agents/skills"
+mkdir -p "$AGENTS_SKILLS_DIR"
+
+# 先部署到 .agents/skills（OpenCode 主要读取这个目录）
+deploy_skill "merge-patchset" "SKILL.md" "$AGENTS_SKILLS_DIR/merge-patchset"
+mkdir -p "$AGENTS_SKILLS_DIR/karpathy-guidelines"
+cp "$KARPATHY_SRC" "$AGENTS_SKILLS_DIR/karpathy-guidelines/SKILL.md"
+echo "  [✓] merge-patchset → $AGENTS_SKILLS_DIR/merge-patchset/SKILL.md"
+echo "  [✓] karpathy-guidelines → $AGENTS_SKILLS_DIR/karpathy-guidelines/SKILL.md"
+
+# Claude Code 也部署一份（通过符号链接或直接目录）
 for platform in "${DETECTED_PLATFORMS[@]}"; do
     echo ""
     echo "--- 部署到 $platform ---"
     check_platform "$platform" || true
     case "$platform" in
         claude)
-            deploy_skill "merge-patchset" "SKILL.md" "$HOME/.claude/skills/merge-patchset"
-            mkdir -p "$HOME/.claude/skills/karpathy-guidelines"
-            cp "$KARPATHY_SRC" "$HOME/.claude/skills/karpathy-guidelines/SKILL.md"
-            echo "  [✓] karpathy-guidelines → $HOME/.claude/skills/karpathy-guidelines/SKILL.md"
+            # Claude Code 通过符号链接指向 .agents
+            if [ -d "$HOME/.claude/skills/merge-patchset" ] && [ ! -L "$HOME/.claude/skills/merge-patchset" ]; then
+                rm -rf "$HOME/.claude/skills/merge-patchset"
+            fi
+            ln -sf "$AGENTS_SKILLS_DIR/merge-patchset" "$HOME/.claude/skills/merge-patchset" 2>/dev/null || \
+                deploy_skill "merge-patchset" "SKILL.md" "$HOME/.claude/skills/merge-patchset"
+            
+            if [ -e "$HOME/.claude/skills/karpathy-guidelines" ] && [ ! -L "$HOME/.claude/skills/karpathy-guidelines" ]; then
+                rm -rf "$HOME/.claude/skills/karpathy-guidelines"
+            fi
+            ln -sf "$AGENTS_SKILLS_DIR/karpathy-guidelines" "$HOME/.claude/skills/karpathy-guidelines" 2>/dev/null || \
+                mkdir -p "$HOME/.claude/skills/karpathy-guidelines" && \
+                cp "$KARPATHY_SRC" "$HOME/.claude/skills/karpathy-guidelines/SKILL.md"
+            echo "  [✓] Claude Code skills → 符号链接到 $AGENTS_SKILLS_DIR"
             ;;
         opencode)
-            deploy_skill "merge-patchset" "SKILL.md" "$HOME/.config/opencode/skills/merge-patchset"
-            mkdir -p "$HOME/.config/opencode/skills/karpathy-guidelines"
-            cp "$KARPATHY_SRC" "$HOME/.config/opencode/skills/karpathy-guidelines/SKILL.md"
-            echo "  [✓] karpathy-guidelines → $HOME/.config/opencode/skills/karpathy-guidelines/SKILL.md"
-            echo "  [✓] OpenCode 自动发现 skill，在 opencode.json 中可通过 permission.skill 控制"
+            # OpenCode 同样通过符号链接（保持一致性）
+            if [ -d "$HOME/.config/opencode/skills/merge-patchset" ] && [ ! -L "$HOME/.config/opencode/skills/merge-patchset" ]; then
+                rm -rf "$HOME/.config/opencode/skills/merge-patchset"
+            fi
+            ln -sf "$AGENTS_SKILLS_DIR/merge-patchset" "$HOME/.config/opencode/skills/merge-patchset" 2>/dev/null || \
+                deploy_skill "merge-patchset" "SKILL.md" "$HOME/.config/opencode/skills/merge-patchset"
+            
+            if [ -e "$HOME/.config/opencode/skills/karpathy-guidelines" ] && [ ! -L "$HOME/.config/opencode/skills/karpathy-guidelines" ]; then
+                rm -rf "$HOME/.config/opencode/skills/karpathy-guidelines"
+            fi
+            ln -sf "$AGENTS_SKILLS_DIR/karpathy-guidelines" "$HOME/.config/opencode/skills/karpathy-guidelines" 2>/dev/null || \
+                mkdir -p "$HOME/.config/opencode/skills/karpathy-guidelines" && \
+                cp "$KARPATHY_SRC" "$HOME/.config/opencode/skills/karpathy-guidelines/SKILL.md"
+            echo "  [✓] OpenCode skills → 符号链接到 $AGENTS_SKILLS_DIR"
             ;;
     esac
 done

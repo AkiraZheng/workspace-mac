@@ -49,7 +49,16 @@
       "Bash(cp /root/.claude/skills/merge-patchset/references/output-templates.md /tmp/output-templates.md)",
       "Bash(cp /tmp/output-templates.md /root/.claude/skills/merge-patchset/references/output-templates.md)",
       "Bash(cp /root/.claude/skills/merge-patchset/references/diagnostic-guide.md /tmp/diagnostic-guide.md)",
-      "Bash(cp /tmp/diagnostic-guide.md /root/.claude/skills/merge-patchset/references/diagnostic-guide.md)"
+      "Bash(cp /tmp/diagnostic-guide.md /root/.claude/skills/merge-patchset/references/diagnostic-guide.md)",
+      "Read(//root/.config/opencode/skills/merge-patchset/**)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:v for k,v in d.items\\(\\) if 'skill' in k.lower\\(\\) or 'permission' in k.lower\\(\\) or 'plugin' in k.lower\\(\\)}, indent=2\\)\\)\")",
+      "Bash(cp /root/.claude/skills/merge-patchset/SKILL.md /root/.claude/skills/merge-patchset/SKILL.md.bak)",
+      "Bash(cp /root/.claude/skills/merge-patchset/SKILL.md /root/.config/opencode/skills/merge-patchset/SKILL.md)",
+      "Bash(cp /root/.claude/skills/merge-patchset/SKILL.md \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/SKILL.md\")",
+      "Bash(cp /root/.claude/skills/merge-patchset/references/output-templates.md \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/references/output-templates.md\")",
+      "Bash(cp -f /root/.claude/skills/merge-patchset/references/output-templates.md \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/references/output-templates.md\")",
+      "Bash(\\\\cp /root/.claude/skills/merge-patchset/SKILL.md \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/SKILL.md\")",
+      "Bash(\\\\cp /root/.claude/skills/merge-patchset/references/output-templates.md \"/mnt/shared/AI提效/1. 自动合入patch/patchset-merge/references/output-templates.md\")"
     ]
   }
 }
