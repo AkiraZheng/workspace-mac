@@ -24,24 +24,24 @@ merge-patchset skill 的目标是：**让 AI 自动完成检测、判定、执�
 
 > PlantUML 源文件: [diagrams/workflow-overview.puml](diagrams/workflow-overview.puml)
 
-<img src=merge-patchset-skill-report/2026-05-22-12-18-46.png>
+<img src="merge-patchset-skill-report/2026-05-22-12-18-46.png">
 
-<img src=merge-patchset-skill-report/2026-05-22-12-24-20.png>
+<img src="merge-patchset-skill-report/2026-05-22-12-24-20.png">
 
-<img src=merge-patchset-skill-report/2026-05-22-12-26-30.png>
+<img src="merge-patchset-skill-report/2026-05-22-12-26-30.png">
 
 ### 2.2 8 步策略链条（Phase 3 核心）
 
 > PlantUML 源文件: [diagrams/strategy-chain.puml](diagrams/strategy-chain.puml)
 
-<img src=merge-patchset-skill-report/2026-05-22-12-19-11.png>
+<img src="merge-patchset-skill-report/2026-05-22-12-19-11.png">
 
 ### 2.3 组件交互图
 
 > PlantUML 源文件: [diagrams/component-interaction.puml](diagrams/component-interaction.puml)
 
 
-<img src=merge-patchset-skill-report/2026-05-22-12-19-45.png>
+<img src="merge-patchset-skill-report/2026-05-22-12-19-45.png">
 
 ---
 
@@ -92,7 +92,7 @@ merge-patchset skill 的目标是：**让 AI 自动完成检测、判定、执�
 
 > PlantUML 源文件: [diagrams/solution-comparison.puml](diagrams/solution-comparison.puml)
 
-<img src=merge-patchset-skill-report/2026-05-22-12-20-23.png>
+<img src="merge-patchset-skill-report/2026-05-22-12-20-23.png">
 
 ### 4.2 六维度量化对比
 
@@ -213,6 +213,16 @@ merge-patchset skill 的目标是：**让 AI 自动完成检测、判定、执�
 | 上游仓库需手动指定路径 | 依赖检测需额外输入 | 利用 git remote 自动推断 |
 | LSP 仅支持 clangd | 非 C/C++ 项目无符号导航 | 扩展其他 LSP 支持 |
 | 不支持 patch 冲突的自动合并 | 冲突时靠 8 策略链降级 | 探索 AI 辅助三路合并 |
+
+### 6.3 后续任务清单
+
+| TODO | 内容 | 状态 |
+|------|------|:----:|
+| TODO-0 | Phase 4 Code Review 流程设计 — 含 code-reviewer / security-reviewer 子 agent 调用 + `git rebase → commit --amend → rebase --continue` 的 Fix Loop | 🔴待解决 |
+| TODO-1 | index.js 分析结论 — 现有 skill 均不使用 JS，纯指令驱动无需代码入口 | ✅已完成 |
+| TODO-2 | Subagent 设计优化 — 建议将 agent prompt 从 SKILL.md 拆分到 agents/ 目录，含设计原则和调度写法示例 | 🟡规划中 |
+| TODO-3 | Patch 拓扑排序算法 — 参考性能组方案，基于符号依赖矩阵 + Kahn/DFS 拓扑排序，面向大批量 CVE 回合场景 | 🟡规划中 |
+| TODO-4 | 按 Tag 切基线遗留问题 — 6 个问题（基线识别、分支冲突、编译环境差异、安全补丁、revert 安全、路径组合），标注了状态 | 🔴待解决 |
 
 ---
 
