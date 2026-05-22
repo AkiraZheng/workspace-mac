@@ -1,0 +1,85 @@
+@startuml
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontSize 11
+
+title 8 步策略链 — 逐级降级保证合入成功率
+
+|From|
+start
+:patch 文件;
+
+repeat
+  :① git am;
+  note right: 首选：保留完整 commit 元信息
+  if (成功?) then (✓)
+    :自动 commit;
+    :编译验证;
+    stop
+  endif
+
+  :② git am --3way;
+  note right: 三路合并，处理上下文偏移
+  if (成功?) then (✓)
+    :自动 commit;
+    :编译验证;
+    stop
+  endif
+
+  :③ git am --ignore-whitespace;
+  note right: 忽略空白差异
+  if (成功?) then (✓)
+    :自动 commit;
+    :编译验证;
+    stop
+  endif
+
+  :④ patch --fuzz=3;
+  note right: 模糊匹配上下文
+  if (成功?) then (✓)
+    :手动 commit;
+    :编译验证;
+    stop
+  endif
+
+  :⑤ git apply --3way;
+  note right: 三路合并不依赖 mail 格式
+  if (成功?) then (✓)
+    :手动 commit;
+    :编译验证;
+    stop
+  endif
+
+  :⑥ git apply --reject;
+  note right: 部分应用，生成 .rej 文件
+  if (成功?) then (✓)
+    :检查 .rej 内容;
+    :处理有效 hunk;
+    :手动 commit;
+    :编译验证;
+    stop
+  endif
+
+  :⑦ 手动解冲突;
+  note right: 分析冲突标记 → 诊断 → 解决
+  if (成功?) then (✓)
+    :手动 commit;
+    :编译验证;
+    stop
+  endif
+
+  :⑧ git apply (最后手段);
+  note right: 放弃元信息，纯文件级合入
+  if (成功?) then (✓)
+    :手动 commit;
+    :编译验证;
+    stop
+  else (✗)
+    :记录失败;
+    :报告用户决策;
+    stop
+  endif
+
+repeat while (仍有策略可尝试?)
+
+stop
+@enduml

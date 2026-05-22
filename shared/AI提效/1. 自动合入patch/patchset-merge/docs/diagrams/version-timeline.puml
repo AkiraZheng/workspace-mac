@@ -1,0 +1,26 @@
+@startuml
+skinparam backgroundColor #FEFEFE
+
+title merge-patchset Skill 演进时间线
+
+concise "Skill 演进" as Skill
+
+@2026-05-10
+Skill is "v0: 初始版本"
+
+@2026-05-11
+Skill is "v1: 跨平台"
+note right
+  + compatibility 字段
+  + 平台感知 preamble
+  + install.sh 多平台部署
+end note
+
+@2026-05-22
+Skill is "v2: 自主决策"
+note right
+  + 路径智能推断
+  + Phase 1 分级确认
+  + 交互反模式强化
+end note
+@enduml

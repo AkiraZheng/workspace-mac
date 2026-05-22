@@ -1,0 +1,84 @@
+@startuml
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontSize 12
+
+title Patchset Merge Skill — 四相工作流架构
+
+|#LightBlue| 用户输入 |
+start
+:用户描述合入需求;
+note right
+  例: "把 HDBSS_v3 的 patch
+  合入到 openEuler kernel"
+end note
+
+|#LightYellow| 路径智能推断 |
+:提取/搜索 patch_dir;
+:提取/搜索 source_dir;
+:提取/搜索 upstream_dir (可选);
+
+if (路径完整或搜索成功?) then (是)
+  :直接使用，告知用户;
+else (否)
+  :询问用户缺失参数;
+  note right: 唯一可能打断用户的地方
+endif
+
+|#LightGreen| LSP 环境准备 |
+:检查 clangd 安装;
+:生成 compile_commands.json;
+:验证 LSP 可用性;
+note right
+  为后续 Agent 提供
+  符号级代码导航
+end note
+
+|#LightCyan| 相位 0 — 并行 Agent 检测 |
+fork
+  :**Agent A: 冲突预检**
+  扫描每个 patch 在目标仓库的冲突风险
+  → none / low / high;
+fork again
+  :**Agent B: 依赖检测**
+  在上游仓库查找缺失的依赖 commit
+  → 强依赖 / 弱依赖;
+fork again
+  :**Agent C: 相似度检测**
+  对 high 风险 patch 定位需要 revert 的 commit
+  → ✅可revert / ⚠链式 / 🔴不可;
+end fork
+note right: 三个 Agent 并行运行，只读不写
+
+|#LightSalmon| 相位 1 — 场景判定 |
+:汇总 Agent 结果;
+:判定场景 (A/B/C/E/组合);
+
+if (场景 A 或 E唯一映射?) then (是)
+  :🚀 自动继续;
+  note right: 不打断用户
+else (否)
+  :⚠ 展示执行计划;
+  :等待用户确认;
+endif
+
+|#Wheat| 相位 2 — 前置操作 |
+switch (场景)
+  case (B)
+    :逆序 git revert 旧 commit;
+  case (C)
+    :从上游拉取强依赖 patch;
+    :创建 stub 处理弱依赖;
+  case (E)
+    :find 搜索实际路径;
+    :sed 替换 patch 路径;
+endswitch
+
+|#Thistle| 相位 3 — 核心 Merge |
+:创建分支;
+:逐个 patch 合入 (8步策略链);
+:fix-compile loop;
+:生成 per-patch 分析文档;
+:生成 .patchset-summary.md;
+
+stop
+@enduml
