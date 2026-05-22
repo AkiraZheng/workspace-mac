@@ -180,8 +180,71 @@ git -C "$KERNEL_REPO_PATH" log --oneline -L <start>,<end>:<file>
 | 同一文件区域有功能相似改动 | **可能冲突** | 合入时需特别注意 |
 | 无匹配 | **无重复** | 正常流程 |
 
-**步骤 6: 屏幕输出**
-按 `references/output-templates.md` 中的结构化格式输出到屏幕。
+**步骤 6: PR 映射聚合**
+
+对步骤 3/4/5 中找到的 commit 列表，解析 PR 归属并聚合展示。优先找整个 PR 的提交内容（PR 可能包含多个分散的 patch，整体比逐个 commit 更安全）。
+
+**方法 1：解析 commit message 中的 PR 链接**
+```bash
+# 提取 Link 标签中的 PR URL
+git -C "$UPSTREAM_REPO_PATH" log --format="%H %b" <commit-range> | grep -E "Link:.*(github\.com|lore\.kernel\.org)"
+
+# 示例输出：
+# Link: https://github.com/torvalds/linux/pull/1234
+# Link: https://lore.kernel.org/all/xxx@yyy/  → 解析 series 信息
+```
+
+**方法 2：git log 搜索 PR 号**
+```bash
+# 在 commit subject 或 body 中搜索 PR 引用
+git -C "$UPSTREAM_REPO_PATH" log --all --grep="PR #" --format="%H %s"
+git -C "$UPSTREAM_REPO_PATH" log --all --grep="#[0-9]\+" --format="%H %s"
+```
+
+**方法 3：b4 解析 lore.kernel.org series**
+```bash
+# b4 可解析 patchset series 信息
+b4 series-info <message-id>
+# 输出包含 series 总数、cover letter 等
+```
+
+**聚合逻辑**：
+- 同一 PR 的多个 commit → 标记为 `[PR #xxx]` 组，推荐整体合入/revert
+- 无 PR 归属的独立 commit → 标记为 `[独立 commit]`
+- 输出格式（存入 analysis_cache.json）：
+```json
+{
+  "pr_mapping": {
+    "upstream_deps": [
+      {
+        "pr_id": "PR #123",
+        "pr_url": "https://github.com/torvalds/linux/pull/123",
+        "commits": ["abc123", "def456"],
+        "cover_letter_msgid": "xxx@lore.kernel.org",
+        "reason": "缺失函数 stage2_try_set_pte"
+      }
+    ],
+    "bugfix_deps": [
+      {
+        "pr_id": "独立 commit",
+        "commits": ["ghi789"],
+        "reason": "修复空指针"
+      }
+    ],
+    "revert_candidates": [
+      {
+        "pr_id": "PR #456",
+        "commits": ["local-abc", "local-def"],
+        "subject": "本地 HDBSS 实现",
+        "urgency": "必须"
+      }
+    ]
+  }
+}
+```
+
+**步骤 7: 屏幕输出**
+按 `references/output-templates.md` 中的结构化格式输出到屏幕。含 PR 映射结果。
 
 ---
 
@@ -195,8 +258,46 @@ git -C "$KERNEL_REPO_PATH" log --oneline -L <start>,<end>:<file>
 **步骤 2: 依赖图 + 拓扑排序**
 构建有向图 → 检测循环依赖 → 输出 merge_order。与原始 patchset 顺序对比，说明调整原因。
 
-**步骤 3: 全局 Revert 清单去重**
-所有 agent 报告的 revert commit 去重合并，按 commit 时间逆序排序。
+**步骤 3: 全局 Revert 清单去重 + PR 聚合 + revert_cmd 推荐**
+
+1. **去重合并**：所有 agent 报告的 revert commit 去重
+2. **PR 聚合**：解析每个 commit 的 PR 归属（优先找整个 PR 的提交内容）
+3. **两层输出**（存入 `global_revert_order`）：
+   - **PR 维度**：同一 PR 的多个 commit 归为一组，推荐整体 revert
+   - **Commit 维度**：每个 commit 的明细
+
+`global_revert_order` 格式（替代旧的扁平列表）：
+```json
+[
+  {
+    "pr_id": "PR #123",
+    "pr_url": "https://github.com/torvalds/linux/pull/123",
+    "subject": "HDBSS 功能系列",
+    "commits": ["abc123", "def456", "ghi789"],
+    "commit_count": 3,
+    "revert_strategy": "整体 revert PR #123",
+    "revert_cmd": "git revert --ancestry-path abc123^..ghi789",
+    "urgency": "必须",
+    "related_patches": ["0001", "0003", "0004"]
+  },
+  {
+    "pr_id": "独立 commit",
+    "commits": ["jkl012"],
+    "commit_count": 1,
+    "revert_strategy": "单独 revert",
+    "revert_cmd": "git revert jkl012",
+    "urgency": "建议",
+    "related_patches": ["0004"]
+  }
+]
+```
+
+**revert 策略优先级**：
+| 场景 | revert_cmd |
+|------|-----------|
+| 整个 PR | `git revert --ancestry-path <first>^..<last>` |
+| 单个 commit | `git revert <commit>` |
+| PR 内部分 commit | 按逆序逐个 `git revert`
 
 **步骤 4: 生成 merge_tasks.json 和 analysis_cache.json**
 
@@ -204,9 +305,15 @@ git -C "$KERNEL_REPO_PATH" log --oneline -L <start>,<end>:<file>
 
 **merge_tasks.json 必须严格按照以下 schema 生成，不可自行增减字段：**
 
-每个 task 必须包含：
+**顶层结构**：
+- `patchset_info` — 来源/目标/架构等基本信息
+- `global_revert_order` — PR 聚合的全局 revert 列表（步骤 3 产物，见上方格式）
+- `deps_order` — 待拉取的上游依赖 patch 列表（初始 `[]`，步骤 6 填充）
+- `merge_order` — 主体合入任务列表
+
+**每个 task 必须包含**（merge_order 和 deps_order 共用）：
 - `seq` — 执行序号（merge agent 严格按此升序执行）
-- `task_id` — patch 编号（0001~000N）
+- `task_id` — patch 编号（0001~000N 或 dep-001~dep-00N）
 - `status` — `pending`（初始值，Phase 2 动态更新）
 - `patch_file` — .patch 文件的绝对路径
 - `subject` — patch 标题
@@ -215,29 +322,88 @@ git -C "$KERNEL_REPO_PATH" log --oneline -L <start>,<end>:<file>
 - `action` — `apply` | `skip`（判定是否需要合入）
 - `skip_reason` — 若 skip，必须填写具体原因
 - `pre_revert` — 需先 revert 的本地 commit hash 列表
-- `depends_on` — 前置 task_id 列表
+- `depends_on` — 前置 task_id 列表（可跨 deps_order / merge_order）
 - `risk_level` — `高` | `中` | `低`
 - `review_required` — `高` | `中` | `低`
 - `blame_hits` — bugfix commit 列表（step 3 产物）
 - `duplicate_info` — 目标仓库重复检测结果（step 5 产物）
 - `conflicts_predicted` — 预判冲突点列表（文件:行号:原因）
 - `special_notes` — 合入注意事项
+- `pr_mapping` — PR 映射聚合结果（step 6 产物，见下方格式）
 - `execution_log` — `[]`（初始空数组，Phase 2 动态追加）
 
-顶层必须包含 `global_revert_order`（去重+逆序的全局 revert 列表）。
+**pr_mapping 字段格式**：
+```json
+{
+  "upstream_deps": [
+    {
+      "pr_id": "PR #123",
+      "pr_url": "https://github.com/torvalds/linux/pull/123",
+      "commits": ["abc123", "def456"],
+      "cover_letter_msgid": "xxx@lore.kernel.org",
+      "download_cmd": "b4 am xxx@lore.kernel.org",
+      "reason": "缺失函数 stage2_try_set_pte"
+    }
+  ],
+  "bugfix_deps": [
+    {
+      "pr_id": "独立 commit",
+      "commits": ["ghi789"],
+      "reason": "修复空指针"
+    }
+  ],
+  "revert_candidates": [
+    {
+      "pr_id": "PR #456",
+      "commits": ["local-abc", "local-def"],
+      "subject": "本地 HDBSS 实现",
+      "revert_cmd": "git revert --ancestry-path local-abc^..local-def",
+      "urgency": "必须"
+    }
+  ]
+}
+```
 
-**analysis_cache.json** 按 `references/output-templates.md` 中定义的字段生成。
+**analysis_cache.json** 按 `references/output-templates.md` 中定义的字段生成（含 `pr_mapping`）。
 
 **步骤 5: 校验 + 屏幕预览 → 用户确认**
 
 写入后必须校验每个 task 的必填字段完整，然后按 `references/output-templates.md` 中"Phase 1.5 全局预览模板"的 4 部分格式展示给用户确认：依赖汇总 → Revert 清单 → 合入计划 → 确认交互。
+
+**步骤 6: 拉取上游依赖（用户确认"继续"后自动执行）**
+
+用户选择 `[1] 继续执行 merge 流程` 后，遍历所有 task 的 `pr_mapping.upstream_deps`，拉取缺失的依赖 patch。
+
+**拉取策略**：
+| 依赖类型 | 拉取命令 |
+|---------|---------|
+| lore.kernel.org PR（有 cover_letter_msgid） | `b4 am <cover_letter_msgid> -o /tmp/patches/deps/` |
+| GitHub PR（有 pr_url） | `git fetch origin && git cherry-pick <commit_range>` |
+| 独立 commit（有 commit hash） | `b4 am <msgid>` 或直接 cherry-pick |
+
+**拉取后处理**：
+1. 检查新 patch 是否与现有 patchset 有文件冲突
+2. 检查符号依赖是否满足（recursive）
+3. 将拉取的 patch 写入 `deps_order`（格式与 merge_order 的 task 相同，task_id 为 dep-001~dep-00N）
+4. 更新 `merge_order` 中相关 task 的 `depends_on`，引用 deps_order 的 task_id
+5. 屏幕输出：
+```
+已拉取 3 个依赖 patch，已插入 deps_order：
+  dep-001: stage2 页表重构 (PR #456)
+  dep-002: KVM helper 重构
+  dep-003: 宏定义修正
+```
+
+**无上游依赖时**：跳过此步骤，直接进入 Phase 2。
 
 ---
 
 ## Phase 2：串行 Merge
 
 ### 启动
-读取 `/tmp/patches/merge_tasks.json`，按 `merge_order[].seq` 升序处理每个 task。
+读取 `/tmp/patches/merge_tasks.json`。
+
+**执行顺序**：先遍历 `deps_order`（若有），再遍历 `merge_order`，各自按 `seq` 升序处理。若 `deps_order` 为空则直接从 `merge_order` 开始。
 
 ### 状态机
 

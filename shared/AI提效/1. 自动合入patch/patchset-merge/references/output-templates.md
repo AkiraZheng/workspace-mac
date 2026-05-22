@@ -185,7 +185,43 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
     "target_branch": "$KERNEL_BRANCH",
     "build_target": "$BUILD_CMD"
   },
-  "global_revert_order": ["commit_hash_1", "commit_hash_2"],
+  "global_revert_order": [
+    {
+      "pr_id": "PR #123",
+      "pr_url": "https://github.com/torvalds/linux/pull/123",
+      "subject": "HDBSS 功能系列",
+      "commits": ["abc123", "def456"],
+      "commit_count": 2,
+      "revert_strategy": "整体 revert PR #123",
+      "revert_cmd": "git revert --ancestry-path abc123^..def456",
+      "urgency": "必须",
+      "related_patches": ["0001", "0003"]
+    }
+  ],
+  "deps_order": [
+    {
+      "seq": 1,
+      "task_id": "dep-001",
+      "source_pr": "PR #456",
+      "status": "pending",
+      "patch_file": "/tmp/patches/deps/0001-dep.patch",
+      "subject": "stage2 页表重构",
+      "author": "upstream author",
+      "files_changed": ["file1.c"],
+      "action": "apply",
+      "skip_reason": null,
+      "pre_revert": [],
+      "depends_on": [],
+      "risk_level": "低",
+      "review_required": "低",
+      "blame_hits": [],
+      "duplicate_info": {"level": "无重复", "detail": ""},
+      "conflicts_predicted": [],
+      "special_notes": "上游依赖，Phase 1.5 步骤 6 拉取",
+      "pr_mapping": {},
+      "execution_log": []
+    }
+  ],
   "merge_order": [
     {
       "seq": 1,
@@ -205,6 +241,34 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
       "duplicate_info": {"level": "无重复", "detail": ""},
       "conflicts_predicted": [],
       "special_notes": "",
+      "pr_mapping": {
+        "upstream_deps": [
+          {
+            "pr_id": "PR #456",
+            "pr_url": "https://github.com/torvalds/linux/pull/456",
+            "commits": ["dep-abc"],
+            "cover_letter_msgid": "xxx@lore.kernel.org",
+            "download_cmd": "b4 am xxx@lore.kernel.org",
+            "reason": "缺失函数 stage2_try_set_pte"
+          }
+        ],
+        "bugfix_deps": [
+          {
+            "pr_id": "独立 commit",
+            "commits": ["fix-ghi789"],
+            "reason": "修复空指针"
+          }
+        ],
+        "revert_candidates": [
+          {
+            "pr_id": "PR #456",
+            "commits": ["local-abc", "local-def"],
+            "subject": "本地 HDBSS 实现",
+            "revert_cmd": "git revert --ancestry-path local-abc^..local-def",
+            "urgency": "必须"
+          }
+        ]
+      },
       "execution_log": []
     }
   ]
@@ -216,7 +280,7 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
 | 字段 | 必填 | 类型 | 说明 |
 |------|:--:|------|------|
 | `seq` | ✓ | int | 执行序号，merge agent 严格按此升序执行 |
-| `task_id` | ✓ | string | 补零 4 位，如 `"0001"` |
+| `task_id` | ✓ | string | 补零 4 位（如 `"0001"`）或 `dep-001`~`dep-00N`（依赖 patch） |
 | `status` | ✓ | string | `pending` / `in_progress` / `done` / `blocked` / `skipped` / `failed` |
 | `patch_file` | ✓ | string | .patch 文件的绝对路径 |
 | `subject` | ✓ | string | patch 标题 |
@@ -225,13 +289,48 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
 | `action` | ✓ | string | `apply`（需要合入）或 `skip`（跳过） |
 | `skip_reason` | - | string/null | 若 action=skip，必须填写具体原因；否则 null |
 | `pre_revert` | ✓ | list | 需先 revert 的本地 commit hash |
-| `depends_on` | ✓ | list | 前置 task_id 列表 |
+| `depends_on` | ✓ | list | 前置 task_id 列表（可跨 deps_order / merge_order） |
 | `risk_level` | ✓ | string | `高` / `中` / `低` |
 | `review_required` | ✓ | string | `高` / `中` / `低` |
 | `blame_hits` | ✓ | list | bugfix commit 列表 |
 | `duplicate_info` | ✓ | dict | `{"level": "无重复|精确重复|高概率等效|可能冲突", "detail": "..."}` |
 | `conflicts_predicted` | ✓ | list | 预判冲突点 |
 | `special_notes` | ✓ | string | 合入注意事项 |
+| `pr_mapping` | ✓ | dict | PR 映射聚合（见下方 pr_mapping 字段说明） |
+| `execution_log` | ✓ | list | 初始 `[]`，Phase 2 动态追加 |
+
+### pr_mapping 字段说明
+
+| 字段 | 必填 | 说明 |
+|------|:--:|------|
+| `upstream_deps` | ✓ | 上游依赖 PR/commit 列表，Phase 1.5 步骤 6 用于拉取 |
+| `bugfix_deps` | ✓ | bugfix 依赖 PR/commit 列表 |
+| `revert_candidates` | ✓ | 本地需 revert 的 PR/commit 列表 |
+
+每个条目包含：
+
+| 字段 | 必填 | 说明 |
+|------|:--:|------|
+| `pr_id` | ✓ | PR 编号（如 `"PR #123"`）或 `"独立 commit"` |
+| `pr_url` | - | PR 链接（若有） |
+| `commits` | ✓ | 该 PR/分组包含的 commit hash 列表 |
+| `cover_letter_msgid` | - | lore.kernel.org 的 cover letter message-id |
+| `download_cmd` | - | 推荐的拉取命令（如 `b4 am xxx`） |
+| `revert_cmd` | - | 推荐的 revert 命令（仅 revert_candidates） |
+| `subject` | - | PR/subject 描述 |
+| `reason` | ✓ | 依赖/revert 原因 |
+| `urgency` | ✓ | `必须` / `建议` / `无须`（仅 revert_candidates） |
+
+### 顶层字段说明
+
+| 字段 | 必填 | 说明 |
+|------|:--:|------|
+| `patchset_info` | ✓ | 来源/目标/架构等基本信息 |
+| `global_revert_order` | ✓ | PR 聚合的全局 revert 列表，Phase 2 PRE_REVERT 阶段消费 |
+| `deps_order` | ✓ | 上游依赖 patch 列表（初始 `[]`），Phase 1.5 步骤 6 填充 |
+| `merge_order` | ✓ | 主体合入任务列表，Phase 2 主要消费 |
+
+**Phase 2 执行顺序**：先遍历 `deps_order`（若有），再遍历 `merge_order`，各自按 `seq` 升序。
 | `execution_log` | ✓ | list | 初始 `[]`，Phase 2 动态追加 |
 
 ## analysis_cache.json 固定 Schema
@@ -258,7 +357,33 @@ Phase 1.5 主 Agent 汇总所有分析 Agent 的屏幕输出后生成。Phase 3 
     "review_reason": "为什么",
     "smoke_tests": ["验证点1", "验证点2"],
     "changed_files": ["file1.c", "file2.h"],
-    "status_in_target": "在目标仓库中的现状描述"
+    "status_in_target": "在目标仓库中的现状描述",
+    "pr_mapping": {
+      "upstream_deps": [
+        {
+          "pr_id": "PR #123",
+          "pr_url": "https://github.com/torvalds/linux/pull/123",
+          "commits": ["abc123", "def456"],
+          "cover_letter_msgid": "xxx@lore.kernel.org",
+          "reason": "缺失函数 stage2_try_set_pte"
+        }
+      ],
+      "bugfix_deps": [
+        {
+          "pr_id": "独立 commit",
+          "commits": ["ghi789"],
+          "reason": "修复空指针"
+        }
+      ],
+      "revert_candidates": [
+        {
+          "pr_id": "PR #456",
+          "commits": ["local-abc", "local-def"],
+          "subject": "本地 HDBSS 实现",
+          "urgency": "必须"
+        }
+      ]
+    }
   }
 }
 ```
@@ -283,6 +408,7 @@ Phase 1.5 主 Agent 汇总所有分析 Agent 的屏幕输出后生成。Phase 3 
 | `smoke_tests` | ✓ | 验证项列表 |
 | `changed_files` | ✓ | 涉改文件列表 |
 | `status_in_target` | ✓ | 目标仓库现状描述 |
+| `pr_mapping` | ✓ | PR 映射聚合（Phase 0 步骤 6 产物，字段见 merge_tasks.json 的 pr_mapping 说明） |
 
 ## Phase 1 分析 Agent 屏幕输出格式
 
@@ -329,21 +455,30 @@ Phase 1 分析和 Phase 1.5 汇总完成后，主 Agent 将以下 4 个部分结
 
 ### 第 1 部分：依赖 Patch 汇总
 
-列出 patchset 所有依赖项（外部依赖 + 内部依赖 + bugfix 依赖）：
+列出 patchset 所有依赖项（外部依赖 + 内部依赖 + bugfix 依赖），**优先按 PR 聚合展示**：
 
 ```
 ═══════════════════════════════════════════════
-  依赖 Patch 汇总
+  依赖 Patch 汇总（PR 聚合）
 ═══════════════════════════════════════════════
 
-[外部依赖] 需要从上游合入的前置 patch：
+[外部依赖] 需要从上游合入的前置 patch（按 PR 聚合）：
 
-┌──────────┬──────────────────────┬──────────────────────────────┐
-│ 类型     │ Commit / Message-ID  │ 原因                         │
-├──────────┼──────────────────────┼──────────────────────────────┤
-│ 上游依赖 │ commit-abc123        │ 缺失函数 stage2_try_set_pte  │
-│ 上游依赖 │ msgid-2024xxxx       │ 依赖锁重构系列(patchset)     │
-└──────────┴──────────────────────┴──────────────────────────────┘
+┌──────────────┬──────────────────────────────────────────────────────┐
+│ PR #123      │ stage2 页表重构系列（含 3 个 commit）               │
+│ github.com/..│ 原因: 缺失函数 stage2_try_set_pte 等                │
+├──────────────┼──────────────────────────────────────────────────────┤
+│ 包含 commit: │ - abc123: "arm64: mmu: refactor stage2 page table"   │
+│              │ - def456: "arm64: add stage2_try_set_pte helper"    │
+│              │ - ghi789: "arm64: use stage2_try_set_pte in KVM"    │
+│ 推荐拉取:    │ b4 am 2024xxx@lore.kernel.org                       │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌──────────────┬──────────────────────────────────────────────────────┐
+│ [独立 commit]│ commit-jkl012                                        │
+│              │ 原因: 缺失宏 VTCR_EL2_HDBSS                          │
+│ 推荐拉取:    │ cherry-pick jkl012                                   │
+└──────────────┴──────────────────────────────────────────────────────┘
 
 [内部依赖] patchset 内部依赖链：
 
@@ -355,44 +490,56 @@ Phase 1 分析和 Phase 1.5 汇总完成后，主 Agent 将以下 4 个部分结
 │          │ 0003     │ 依赖 0001 的寄存器定义       │
 └──────────┴──────────┴──────────────────────────────┘
 
-[Bugfix 依赖] 目标仓库已存在但需回溯的 bugfix：
+[Bugfix 依赖] 目标仓库已存在但需回溯的 bugfix（按 PR 聚合）：
 
-┌──────────────┬──────────────────────────────┐
-│ Commit       │ 修复内容                     │
-├──────────────┼──────────────────────────────┤
-│ def456       │ 修复 KVM stage-2 页表泄漏    │
-└──────────────┴──────────────────────────────┘
+┌──────────────┬──────────────────────────────────────────────────────┐
+│ PR #456      │ KVM 内存泄漏修复系列（含 2 个 commit）               │
+├──────────────┼──────────────────────────────────────────────────────┤
+│ 包含 commit: │ - mno345: "KVM: fix memory leak in stage2"          │
+│              │ - pqr678: "KVM: add cleanup helper"                 │
+│ 推荐拉取:    │ cherry-pick mno345..pqr678                          │
+└──────────────┴──────────────────────────────────────────────────────┘
 
-📋 需额外下载的 patch：共 X 个
-   b4 am <message-id-1>
-   b4 am <message-id-2>
+📋 拉取策略推荐：
+   [优先] 含 PR 的 → b4 am <cover-letter-msgid> 或 cherry-pick <range>
+   [备选] 独立 commit → 逐个 cherry-pick
+
+   确认"继续"后将自动执行拉取，结果写入 deps_order。
 ```
 
 ---
 
-### 第 2 部分：Revert 清单（全局逆序）
+### 第 2 部分：Revert 清单（PR 聚合 + 逆序）
 
-列出所有需回退的本地 commit，按 commit 时间逆序排列（最新→最旧）：
+列出所有需回退的本地 commit，**优先按 PR 聚合，组内按 commit 时间逆序**：
 
 ```
 ═══════════════════════════════════════════════
-  Revert 清单
+  Revert 清单（PR 聚合）
 ═══════════════════════════════════════════════
 
-  执行顺序（从上到下）：
+  执行顺序（从上到下，PR 内部逆序）：
 
-┌──────┬──────────────┬──────────────────────────────────┬────────────┬──────────┐
-│ 序号 │ Commit Hash  │ Subject                          │ 关联 Patch │ 紧急度   │
-├──────┼──────────────┼──────────────────────────────────┼────────────┼──────────┤
-│  1   │ abc123       │ HDBSS 初始实现 v2               │ 0001-0005  │ 必须     │
-│  2   │ def456       │ 修复 HDBSS 内存泄漏             │ 0004       │ 建议     │
-│  3   │ ghi789       │ 调整 HDBSS 寄存器偏移           │ 0001       │ 建议     │
-└──────┴──────────────┴──────────────────────────────────┴────────────┴──────────┘
+┌──────┬──────────────┬──────────────────────────────────┬──────────────┬──────────┐
+│ 序号 │ PR / Commit  │ Subject                          │ 关联 Patch   │ 紧急度   │
+├──────┼──────────────┼──────────────────────────────────┼──────────────┼──────────┤
+│  1   │ PR #123      │ HDBSS 功能系列（3 commits）      │ 0001-0005    │ 必须     │
+│      │   └ abc123   │   └ HDBSS 初始实现 v2           │              │          │
+│      │   └ def456   │   └ 添加 HDBSS sysreg           │              │          │
+│      │   └ ghi789   │   └ KVM 集成 HDBSS              │              │          │
+│      │ revert_cmd:  │ git revert --ancestry-path       │              │          │
+│      │              │   abc123^..ghi789                │              │          │
+├──────┼──────────────┼──────────────────────────────────┼──────────────┼──────────┤
+│  2   │ [独立]       │ 修复 HDBSS 内存泄漏              │ 0004         │ 建议     │
+│      │   jkl012     │                                  │              │          │
+│      │ revert_cmd:  │ git revert jkl012                │              │          │
+└──────┴──────────────┴──────────────────────────────────┴──────────────┴──────────┘
 
-  Revert 原因说明：
-  - abc123: 本地实现了 HDBSS 完整功能，patchset 提供标准化版本
-  - def456: 本地 fix 仅作用于旧实现，新 patchset 已涵盖
-  - ghi789: 寄存器偏移值与 patchset 定义冲突
+  Revert 策略说明：
+  - PR #123: 整个 PR 一次性 revert
+    → git revert --ancestry-path abc123^..ghi789
+  - [独立] jkl012: 单独 revert
+    → git revert jkl012
 ```
 
 ---
