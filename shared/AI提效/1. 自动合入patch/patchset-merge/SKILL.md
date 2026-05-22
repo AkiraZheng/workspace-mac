@@ -555,11 +555,20 @@ mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
 ```bash
 # 1. 从 analysis_cache.json 读取 Phase 1 分析数据
 # 2. 从 merge_tasks.json 的 execution_log 读取 Phase 2 合入经验
-# 3. 生成 diff 对比（仅 done 的 task，skipped/failed 标注"未合入"）
+# 3. 生成差异对比报告（只输出偏离部分，不输出完整 diff）
+
+# merge 场景：原始 .patch vs 合入后的 commit
 python3 scripts/generate_diff_report.py \
-  --patch-file "/tmp/patches/<task_id>-<name>.patch" \
+  --source "patch:/tmp/patches/<task_id>-<name>.patch" \
+  --target <commit_hash> \
   --repo-path "$KERNEL_REPO_PATH" \
-  --commit <commit_hash> \
+  > "$KERNEL_REPO_PATH/patch_analysis/<task_id>-diff.txt"
+
+# revert 场景：被 revert 的 commit vs revert commit
+python3 scripts/generate_diff_report.py \
+  --source "commit:<被_revert_的_commit_hash>" \
+  --target <revert_commit_hash> \
+  --repo-path "$KERNEL_REPO_PATH" \
   > "$KERNEL_REPO_PATH/patch_analysis/<task_id>-diff.txt"
 
 # 4. 按模板写入
@@ -570,7 +579,7 @@ python3 scripts/generate_diff_report.py \
 **必需内容**（每份 analyse.md）：
 - Phase 1 分析数据（analysis_cache.json 中对应条目）
 - Phase 2 合入经验（merge_tasks.json 中 execution_log）
-- 完整 diff（generate_diff_report.py 输出）
+- 差异对比报告（generate_diff_report.py 输出，只展示偏离，不重复完整内容）
 - 编译验证记录
 
 **然后写入汇总**：

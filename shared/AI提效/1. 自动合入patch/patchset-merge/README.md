@@ -2,6 +2,8 @@
 
 Linux 内核 patchset 多 Agent 自动合入与冲突解决 Skill。
 
+- 26.5.23：当前版本在opencode+ds场景下执行稳定，在glm下不咋行
+
 ## 功能
 
 - 从 lore.kernel.org、URL 或本地目录获取 patchset

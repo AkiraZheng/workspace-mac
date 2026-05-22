@@ -66,12 +66,33 @@
 - 编译修复：{编译修复详情}
 - 重试次数：冲突 {冲突轮数} 次 / 编译 {编译轮数} 次
 
-## 9. 与源 Patch 的完整 Diff
+## 9. 与源 Patch/Commit 的差异对比
 
-（由 scripts/generate_diff_report.py 生成，合并原始 patch + 实际应用 diff + 差异对比）
+**对比对象**：
+- **merge 场景**：原始 `.patch` 文件（下载的 patch 意图）vs 合入后的 commit（`git show <commit>` 的实际落地的代码）
+- **revert 场景**：被 revert 的原 commit（回退目标）vs revert commit（回退操作产生的 commit）
+
+**输出焦点**：只展示偏离部分，不重复完整内容。由 `scripts/generate_diff_report.py` 生成。
+
+**脚本调用**：
+```bash
+# merge 场景
+python3 scripts/generate_diff_report.py \
+  --source "patch:/tmp/patches/0001-xxx.patch" \
+  --target <commit_hash> --repo-path "$KERNEL_REPO_PATH"
+
+# revert 场景
+python3 scripts/generate_diff_report.py \
+  --source "commit:<被_revert_的_commit>" \
+  --target <revert_commit_hash> --repo-path "$KERNEL_REPO_PATH"
+```
+
+**偏离类型标注**：
+- 源有目标无：patch/原 commit 有此行，实际 commit 无（因冲突跳过/被删除）
+- 目标有源无：实际 commit 有此行，源 patch/原 commit 无（因适配新增/git am 自动调整）
 
 ```diff
-{diff 内容}
+{差异对比内容，由 generate_diff_report.py 生成}
 ```
 
 ## 10. 编译验证记录
