@@ -1,0 +1,44 @@
+From f447cb729f5e577a5cab9eedfa096a4a4abe01c9 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 22 May 2026 20:25:25 +0800
+Subject: [PATCH 7/8] KVM: arm64: Document HDBSS ioctl
+
+Add documentation for KVM_CAP_ARM_HW_DIRTY_STATE_TRACK ioctl in
+the KVM API documentation.
+
+Document the parameters, architecture, and usage of HDBSS for
+hardware-assisted dirty page tracking.
+---
+ Documentation/virt/kvm/api.rst | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/Documentation/virt/kvm/api.rst b/Documentation/virt/kvm/api.rst
+index 470b7da2ae41..56d66a53fcc7 100644
+--- a/Documentation/virt/kvm/api.rst
++++ b/Documentation/virt/kvm/api.rst
+@@ -7948,6 +7948,22 @@ Used to configure and set up the memory for a Realm. The available actions are:
+                                   enter the realm until it has been activated.
+ ================================= =============================================
+ 
++7.39 KVM_CAP_ARM_HW_DIRTY_STATE_TRACK
++-------------------------------------
++
++:Architectures: arm64
++:Type: VM
++:Parameters: args[0] is the allocation order determining HDBSS buffer size
++             args[1] is 0 to disable, 1 to enable HDBSS
++:Returns: 0 on success, negative value on failure
++
++Enables hardware-assisted dirty page tracking via the Hardware Dirty State
++Tracking Structure (HDBSS).
++
++When live migration is initiated, userspace can enable this feature by
++setting KVM_CAP_ARM_HW_DIRTY_STATE_TRACK through IOCTL. KVM will allocate
++per-vCPU HDBSS buffers.
++
+ 8. Other capabilities.
+ ======================
+ 
+-- 
+2.43.0
+

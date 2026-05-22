@@ -1,0 +1,91 @@
+From 02599b736c6ea93b9e5cdc22994166f54043e143 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 22 May 2026 19:37:47 +0800
+Subject: [PATCH 1/8] Revert "!17748  fix bug in hdbss"
+
+This reverts commit b1d8169dd540d0448140c573c535bafd82986f6e, reversing
+changes made to 242365f71d0edaeff9d861d32b639f02170e075d.
+---
+ arch/arm64/kvm/arm.c | 45 +++++++++++++++-----------------------------
+ 1 file changed, 15 insertions(+), 30 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index e59152ad5c4a..e7f61d198e93 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -131,29 +131,6 @@ int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
+ }
+ 
+ #ifdef CONFIG_ARM64_HDBSS
+-static void kvm_clear_hdbss(struct kvm *kvm)
+-{
+-	unsigned long i;
+-	struct kvm_vcpu *vcpu;
+-	struct page *hdbss_pg;
+-
+-	kvm->arch.vtcr &= ~(VTCR_EL2_HD | VTCR_EL2_HDBSS);
+-
+-	kvm_for_each_vcpu(i, vcpu, kvm) {
+-		/* Kick vcpus to flush hdbss buffer. */
+-		kvm_vcpu_kick(vcpu);
+-
+-		hdbss_pg = phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2));
+-		if (hdbss_pg)
+-			__free_pages(hdbss_pg, HDBSSBR_SZ(vcpu->arch.hdbss.br_el2));
+-
+-		vcpu->arch.hdbss.br_el2 = 0;
+-		vcpu->arch.hdbss.prod_el2 = 0;
+-	}
+-
+-	kvm->enable_hdbss = false;
+-}
+-
+ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 				    struct kvm_enable_cap *cap)
+ {
+@@ -167,11 +144,6 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 		return -EINVAL;
+ 	}
+ 
+-	if (!is_kernel_in_hyp_mode()) {
+-		kvm_err("Do not support HDBSS in non-VHE mode!\n");
+-		return -EINVAL;
+-	}
+-
+ 	if (size < 0 || size > HDBSS_MAX_SIZE) {
+ 		kvm_err("Invalid HDBSS buffer size: %d!\n", size);
+ 		return -EINVAL;
+@@ -186,7 +158,6 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 			hdbss_pg = alloc_pages(GFP_KERNEL, size);
+ 			if (!hdbss_pg) {
+ 				kvm_err("Alloc HDBSS buffer failed!\n");
+-				kvm_clear_hdbss(kvm);
+ 				return -EINVAL;
+ 			}
+ 
+@@ -203,7 +174,21 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 
+ 		kvm_info("Enable HDBSS success, HDBSS buffer size: %d\n", size);
+ 	} else if (kvm->enable_hdbss) {
+-		kvm_clear_hdbss(kvm);
++		kvm->arch.vtcr &= ~(VTCR_EL2_HD | VTCR_EL2_HDBSS);
++
++		kvm_for_each_vcpu(i, vcpu, kvm) {
++			/* Kick vcpus to flush hdbss buffer. */
++			kvm_vcpu_kick(vcpu);
++
++			hdbss_pg = phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2));
++			if (hdbss_pg)
++				__free_pages(hdbss_pg, HDBSSBR_SZ(vcpu->arch.hdbss.br_el2));
++
++			vcpu->arch.hdbss.br_el2 = 0;
++			vcpu->arch.hdbss.prod_el2 = 0;
++		}
++
++		kvm->enable_hdbss = false;
+ 		kvm_info("Disable HDBSS success\n");
+ 	}
+ 
+-- 
+2.43.0
+

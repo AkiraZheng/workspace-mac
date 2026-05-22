@@ -1,0 +1,422 @@
+From 7c79d8212f3e7fd85e63dcdea1932f829157bf3a Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 22 May 2026 20:24:41 +0800
+Subject: [PATCH 6/8] KVM: arm64: Enable HDBSS support and handle HDBSSF events
+
+Add HDBSS buffer management functions:
+- kvm_arm_vcpu_free_hdbss: Free HDBSS buffer pages
+- kvm_cap_arm_enable_hdbss: Enable/disable HDBSS via ioctl
+- kvm_flush_hdbss_buffer: Flush dirty pages from HDBSS buffer
+- kvm_handle_hdbss_fault: Handle HDBSS fault events
+- __load_hdbss: Load HDBSS registers on VCPU entry
+
+Add HDBSS fields to kvm_arch and kvm_vcpu_arch structures.
+Add KVM_REQ_FLUSH_HDBSS request for buffer flush handling.
+Add DBM attribute setting in user_mem_abort for dirty tracking.
+
+Handle HDBSSF (ISS2 bit 11) in guest abort handler to process
+dirty tracking events.
+---
+ arch/arm64/include/asm/esr.h      |  5 ++
+ arch/arm64/include/asm/kvm_host.h | 17 ++++++
+ arch/arm64/include/asm/kvm_mmu.h  |  1 +
+ arch/arm64/include/asm/sysreg.h   | 24 +++++++++
+ arch/arm64/kvm/arm.c              | 86 +++++++++++++++++++++++++++++++
+ arch/arm64/kvm/hyp/vhe/switch.c   | 18 +++++++
+ arch/arm64/kvm/mmu.c              | 72 ++++++++++++++++++++++++++
+ arch/arm64/kvm/reset.c            |  3 ++
+ 8 files changed, 226 insertions(+)
+
+diff --git a/arch/arm64/include/asm/esr.h b/arch/arm64/include/asm/esr.h
+index 276eb39ed9a7..a75188f8179a 100644
+--- a/arch/arm64/include/asm/esr.h
++++ b/arch/arm64/include/asm/esr.h
+@@ -391,6 +391,11 @@
+ #ifndef __ASSEMBLY__
+ #include <asm/types.h>
+ 
++static inline bool esr_iss2_is_hdbssf(unsigned long esr)
++{
++	return ESR_ELx_ISS2(esr) & ESR_ELx_HDBSSF;
++}
++
+ static inline bool esr_is_data_abort(unsigned long esr)
+ {
+ 	const unsigned long ec = ESR_ELx_EC(esr);
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index ac4e59256f8e..5ac059e6e647 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -55,12 +55,17 @@
+ #define KVM_REQ_RESYNC_PMU_EL0	KVM_ARCH_REQ(7)
+ #define KVM_REQ_RELOAD_TLBI_DVMBM	KVM_ARCH_REQ(8)
+ #define KVM_REQ_RELOAD_WFI_TRAPS       KVM_ARCH_REQ(9)
++#define KVM_REQ_FLUSH_HDBSS			KVM_ARCH_REQ(10)
+ 
+ #define KVM_DIRTY_LOG_MANUAL_CAPS   (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE | \
+ 				     KVM_DIRTY_LOG_INITIALLY_SET)
+ 
+ #define KVM_HAVE_MMU_RWLOCK
+ 
++/* HDBSS entry field definitions */
++#define HDBSS_ENTRY_VALID BIT(0)
++#define HDBSS_ENTRY_IPA GENMASK_ULL(55, 12)
++
+ /*
+  * Mode of operation configurable with kvm-arm.mode early param.
+  * See Documentation/admin-guide/kernel-parameters.txt for more information.
+@@ -83,6 +88,7 @@ int __init kvm_arm_init_sve(void);
+ u32 __attribute_const__ kvm_target_cpu(void);
+ int kvm_reset_vcpu(struct kvm_vcpu *vcpu);
+ void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu);
++void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
+ 
+ struct kvm_hyp_memcache {
+ 	phys_addr_t head;
+@@ -285,6 +291,8 @@ struct kvm_arch {
+ 	 */
+ 	struct kvm_protected_vm pkvm;
+ 
++	bool enable_hdbss;
++
+ #ifdef CONFIG_KVM_HISI_VIRT
+ 	spinlock_t sched_lock;
+ 	cpumask_var_t sched_cpus;	/* Union of all vcpu's cpus_ptr */
+@@ -518,6 +526,12 @@ struct vcpu_reset_state {
+ 	bool		reset;
+ };
+ 
++struct vcpu_hdbss_state {
++	phys_addr_t base_phys;
++	u32 size;
++	u32 next_index;
++};
++
+ struct kvm_vcpu_arch {
+ 	struct kvm_cpu_context ctxt;
+ 
+@@ -641,6 +655,9 @@ struct kvm_vcpu_arch {
+ #ifdef CONFIG_HISI_VIRTCCA_HOST
+ 	struct virtcca_cvm_tec tec;
+ #endif
++
++	/* HDBSS registers info */
++	struct vcpu_hdbss_state hdbss;
+ };
+ 
+ /*
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index d698ce35deb8..54203d5e562d 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -179,6 +179,7 @@ int kvm_phys_addr_ioremap(struct kvm *kvm, phys_addr_t guest_ipa,
+ 			  phys_addr_t pa, unsigned long size, bool writable);
+ 
+ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu);
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+ 
+ phys_addr_t kvm_mmu_get_httbr(void);
+ phys_addr_t kvm_get_idmap_vector(void);
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 435634a703c6..a6ae771f23cc 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1154,6 +1154,30 @@
+ #define SYS_FIELD_PREP(reg, field, val)		\
+ 		 FIELD_PREP(reg##_##field##_MASK, val)
+ 
++/*
++ * Definitions for the HDBSS feature
++ */
++#define HDBSS_MAX_SIZE		HDBSSBR_EL2_SZ_2MB
++
++#define HDBSSBR_EL2_SZ_MASK		GENMASK(3, 0)
++#define HDBSSBR_EL2_SZ_4KB		0
++#define HDBSSBR_EL2_SZ_8KB		1
++#define HDBSSBR_EL2_SZ_16KB		2
++#define HDBSSBR_EL2_SZ_32KB		3
++#define HDBSSBR_EL2_SZ_64KB		4
++#define HDBSSBR_EL2_SZ_128KB		5
++#define HDBSSBR_EL2_SZ_256KB		6
++#define HDBSSBR_EL2_SZ_512KB		7
++#define HDBSSBR_EL2_SZ_1MB		8
++#define HDBSSBR_EL2_SZ_2MB		9
++
++#define HDBSSPROD_EL2_INDEX_MASK	GENMASK(18, 0)
++
++#define HDBSSBR_EL2(baddr, sz)	(((baddr) & GENMASK(55, 12 + sz)) | \
++				 FIELD_PREP(HDBSSBR_EL2_SZ_MASK, sz))
++
++#define HDBSSPROD_IDX(prod)	FIELD_GET(HDBSSPROD_EL2_INDEX_MASK, prod)
++
+ #define SYS_FIELD_PREP_ENUM(reg, field, val)		\
+ 		 FIELD_PREP(reg##_##field##_MASK, reg##_##field##_##val)
+ 
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 067348105655..bf746aea1346 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -130,6 +130,81 @@ int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
+ 	return kvm_vcpu_exiting_guest_mode(vcpu) == IN_GUEST_MODE;
+ }
+ 
++void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
++{
++	struct page *hdbss_pg;
++
++	hdbss_pg = phys_to_page(vcpu->arch.hdbss.base_phys);
++	if (hdbss_pg)
++		__free_pages(hdbss_pg, vcpu->arch.hdbss.size);
++
++	vcpu->arch.hdbss.size = 0;
++}
++
++static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
++				    struct kvm_enable_cap *cap)
++{
++	unsigned long i;
++	struct kvm_vcpu *vcpu;
++	struct page *hdbss_pg = NULL;
++	__u64 size = cap->args[0];
++	bool enable = cap->args[1] ? true : false;
++
++	if (!system_supports_hdbss())
++		return -EINVAL;
++
++	if (size > HDBSS_MAX_SIZE)
++		return -EINVAL;
++
++	if (!enable && !kvm->arch.enable_hdbss)
++		return 0;
++
++	if (enable && kvm->arch.enable_hdbss)
++		return -EINVAL;
++
++	if (!enable) {
++		kvm->arch.mmu.vtcr &= ~(VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA);
++
++		kvm_for_each_vcpu(i, vcpu, kvm) {
++			kvm_vcpu_kick(vcpu);
++
++			kvm_arm_vcpu_free_hdbss(vcpu);
++		}
++
++		kvm->arch.enable_hdbss = false;
++
++		return 0;
++	}
++
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT, size);
++		if (!hdbss_pg)
++			goto error_alloc;
++
++		vcpu->arch.hdbss = (struct vcpu_hdbss_state) {
++			.base_phys = page_to_phys(hdbss_pg),
++			.size = size,
++			.next_index = 0,
++		};
++	}
++
++	kvm->arch.enable_hdbss = true;
++	kvm->arch.mmu.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA;
++
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_vcpu_kick(vcpu);
++
++	return 0;
++
++error_alloc:
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		if (vcpu->arch.hdbss.base_phys)
++			kvm_arm_vcpu_free_hdbss(vcpu);
++	}
++
++	return -ENOMEM;
++}
++
+ 		mutex_lock(&kvm->lock);
+ 		if (!system_supports_mte() || kvm->created_vcpus) {
+ 			r = -EINVAL;
+@@ -143,6 +218,11 @@ int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
+ 		r = 0;
+ 		set_bit(KVM_ARCH_FLAG_SYSTEM_SUSPEND_ENABLED, &kvm->arch.flags);
+ 		break;
++	case KVM_CAP_ARM_HW_DIRTY_STATE_TRACK:
++		mutex_lock(&kvm->lock);
++		r = kvm_cap_arm_enable_hdbss(kvm, cap);
++		mutex_unlock(&kvm->lock);
++		break;
+ 	case KVM_CAP_ARM_WRITABLE_IMP_ID_REGS:
+ 		mutex_lock(&kvm->lock);
+ 		if (!kvm->created_vcpus) {
+@@ -347,6 +427,9 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+ 	case KVM_CAP_IRQFD_RESAMPLE:
+ 		r = 1;
+ 		break;
++	case KVM_CAP_ARM_HW_DIRTY_STATE_TRACK:
++		r = system_supports_hdbss();
++		break;
+ 	case KVM_CAP_COUNTER_OFFSET:
+ 	case KVM_CAP_READONLY_MEM:
+ 	case KVM_CAP_SET_GUEST_DEBUG:
+@@ -1036,6 +1119,9 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
+ 		if (kvm_dirty_ring_check_request(vcpu))
+ 			return 0;
+ 
++		if (kvm_check_request(KVM_REQ_FLUSH_HDBSS, vcpu))
++			kvm_flush_hdbss_buffer(vcpu);
++
+ 		if (kvm_check_request(KVM_REQ_RELOAD_TLBI_DVMBM, vcpu))
+ 			kvm_hisi_reload_lsudvmbm(vcpu->kvm);
+ 
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index 821e366b54f2..32e09b90ff40 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -89,6 +89,23 @@ static void __activate_traps(struct kvm_vcpu *vcpu)
+ }
+ NOKPROBE_SYMBOL(__activate_traps);
+ 
++static void __load_hdbss(struct kvm_vcpu *vcpu)
++{
++	struct kvm *kvm = vcpu->kvm;
++	u64 br_el2, prod_el2;
++
++	if (!kvm->arch.enable_hdbss)
++		return;
++
++	br_el2 = HDBSSBR_EL2(vcpu->arch.hdbss.base_phys, vcpu->arch.hdbss.size);
++	prod_el2 = vcpu->arch.hdbss.next_index;
++
++	write_sysreg_s(br_el2, SYS_HDBSSBR_EL2);
++	write_sysreg_s(prod_el2, SYS_HDBSSPROD_EL2);
++
++	isb();
++}
++
+ static void __deactivate_traps(struct kvm_vcpu *vcpu)
+ {
+ 	const char *host_vectors = vectors;
+@@ -226,6 +243,7 @@ static int __kvm_vcpu_run_vhe(struct kvm_vcpu *vcpu)
+ 	 */
+ 	__load_stage2(vcpu->arch.hw_mmu, vcpu->arch.hw_mmu->arch);
+ 	__activate_traps(vcpu);
++	__load_hdbss(vcpu);
+ 
+ 	__kvm_adjust_pc(vcpu);
+ 
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 016bde6cdffd..4a5a741ab567 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1667,6 +1667,9 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (writable)
+ 		prot |= KVM_PGTABLE_PROT_W;
+ 
++	if (writable && kvm->arch.enable_hdbss && logging_active)
++		prot |= KVM_PGTABLE_PROT_DBM;
++
+ 	if (exec_fault)
+ 		prot |= KVM_PGTABLE_PROT_X;
+ 
+@@ -1736,6 +1739,72 @@ static void handle_access_fault(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
+  * space. The distinction is based on the IPA causing the fault and whether this
+  * memory region has been registered as standard RAM by user space.
+  */
++
++#define HDBSSPROD_EL2_FSC_MASK		GENMASK(31, 26)
++#define HDBSSPROD_EL2_FSC_OK		0
++#define HDBSSPROD_EL2_FSC_ExternalAbort	(0b010000 << 26)
++#define HDBSSPROD_EL2_FSC_GPF		(0b101000 << 26)
++
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
++{
++	int idx, curr_idx;
++	u64 br_el2;
++	u64 *hdbss_buf;
++	struct kvm *kvm = vcpu->kvm;
++
++	if (!kvm->arch.enable_hdbss)
++		return;
++
++	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
++	br_el2 = HDBSSBR_EL2(vcpu->arch.hdbss.base_phys, vcpu->arch.hdbss.size);
++
++	if (curr_idx == 0 || br_el2 == 0)
++		return;
++
++	hdbss_buf = page_address(phys_to_page(vcpu->arch.hdbss.base_phys));
++	if (!hdbss_buf)
++		return;
++
++	guard(write_lock_irqsave)(&vcpu->kvm->mmu_lock);
++	for (idx = 0; idx < curr_idx; idx++) {
++		u64 gpa;
++
++		gpa = hdbss_buf[idx];
++		if (!(gpa & HDBSS_ENTRY_VALID))
++			continue;
++
++		gpa &= HDBSS_ENTRY_IPA;
++		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
++	}
++
++	write_sysreg_s(0, SYS_HDBSSPROD_EL2);
++	vcpu->arch.hdbss.next_index = 0;
++	isb();
++}
++
++static int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
++{
++	u64 prod;
++	u64 fsc;
++
++	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
++	fsc = FIELD_GET(HDBSSPROD_EL2_FSC_MASK, prod);
++
++	switch (fsc) {
++	case HDBSSPROD_EL2_FSC_OK:
++		kvm_flush_hdbss_buffer(vcpu);
++		return 1;
++	case HDBSSPROD_EL2_FSC_ExternalAbort:
++	case HDBSSPROD_EL2_FSC_GPF:
++		return -EFAULT;
++	default:
++		WARN_ONCE(1,
++				"Unexpected HDBSS fault type, FSC: 0x%llx (prod=0x%llx, vcpu=%d)\n",
++				fsc, prod, vcpu->vcpu_id);
++		return -EFAULT;
++	}
++}
++
+ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+ {
+ 	unsigned long fault_status;
+@@ -1751,6 +1820,9 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+ 	fault_ipa = kvm_vcpu_get_fault_ipa(vcpu);
+ 	is_iabt = kvm_vcpu_trap_is_iabt(vcpu);
+ 
++	if (esr_iss2_is_hdbssf(kvm_vcpu_get_esr(vcpu)))
++		return kvm_handle_hdbss_fault(vcpu);
++
+ 	if (fault_status == ESR_ELx_FSC_FAULT) {
+ 		/* Beyond sanitised PARange (which is the IPA limit) */
+ 		if (fault_ipa >= BIT_ULL(get_kvm_ipa_limit())) {
+diff --git a/arch/arm64/kvm/reset.c b/arch/arm64/kvm/reset.c
+index 89bb3cc4ee0e..6e33d769f56f 100644
+--- a/arch/arm64/kvm/reset.c
++++ b/arch/arm64/kvm/reset.c
+@@ -181,6 +181,9 @@ void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu)
+ 		kvm_unshare_hyp(sve_state, sve_state + vcpu_sve_state_size(vcpu));
+ 	kfree(sve_state);
+ 	kfree(vcpu->arch.ccsidr);
++
++	if (vcpu->kvm->arch.enable_hdbss)
++		kvm_arm_vcpu_free_hdbss(vcpu);
+ }
+ 
+ static void kvm_vcpu_reset_sve(struct kvm_vcpu *vcpu)
+-- 
+2.43.0
+

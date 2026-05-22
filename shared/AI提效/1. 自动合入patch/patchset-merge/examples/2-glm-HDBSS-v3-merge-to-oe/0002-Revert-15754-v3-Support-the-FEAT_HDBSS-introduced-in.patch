@@ -1,0 +1,1640 @@
+From 03ec792ff3f04569d4c45556d3fe1b573a66971c Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 22 May 2026 19:56:51 +0800
+Subject: [PATCH 2/8] Revert "!15754 v3  Support the FEAT_HDBSS introduced in
+ Armv9.5"
+
+This reverts commit fe4fa748119154562e90d7ffb1fdb775ee084f99, reversing
+changes made to a8f711b494f352fee7d319f77d87d63916854c6e.
+---
+ arch/arm64/Kconfig                     |  77 +----------
+ arch/arm64/configs/openeuler_defconfig | 176 ++-----------------------
+ arch/arm64/include/asm/cpufeature.h    |  14 --
+ arch/arm64/include/asm/esr.h           |   2 -
+ arch/arm64/include/asm/kvm_arm.h       |   1 -
+ arch/arm64/include/asm/kvm_host.h      | 116 +++-------------
+ arch/arm64/include/asm/kvm_mmu.h       |  14 --
+ arch/arm64/include/asm/kvm_pgtable.h   |   1 -
+ arch/arm64/include/asm/sysreg.h        |  14 --
+ arch/arm64/kvm/arm.c                   | 136 +++----------------
+ arch/arm64/kvm/handle_exit.c           |  50 -------
+ arch/arm64/kvm/hyp/pgtable.c           |  12 --
+ arch/arm64/kvm/hyp/vhe/switch.c        |   3 -
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c     |   4 -
+ arch/arm64/kvm/mmu.c                   |  17 +--
+ arch/arm64/kvm/reset.c                 |  11 --
+ arch/arm64/tools/sysreg                |  28 ----
+ include/linux/kvm_host.h               |   3 -
+ include/uapi/linux/kvm.h               |  58 ++------
+ tools/include/uapi/linux/kvm.h         |   2 -
+ 20 files changed, 64 insertions(+), 675 deletions(-)
+
+diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
+index c3b38c890b45..9da9d58f1c02 100644
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -20,7 +20,6 @@ config ARM64
+ 	select ARCH_ENABLE_SPLIT_PMD_PTLOCK if PGTABLE_LEVELS > 2
+ 	select ARCH_ENABLE_THP_MIGRATION if TRANSPARENT_HUGEPAGE
+ 	select ARCH_HAS_CACHE_LINE_SIZE
+-	select ARCH_HAS_CC_PLATFORM
+ 	select ARCH_HAS_COPY_MC if ACPI_APEI_GHES
+ 	select ARCH_HAS_CURRENT_STACK_POINTER
+ 	select ARCH_HAS_DEBUG_VIRTUAL
+@@ -34,7 +33,6 @@ config ARM64
+ 	select ARCH_HAS_KCOV
+ 	select ARCH_HAS_KEEPINITRD
+ 	select ARCH_HAS_MEMBARRIER_SYNC_CORE
+-	select ARCH_HAS_MEM_ENCRYPT
+ 	select ARCH_HAS_NMI_SAFE_THIS_CPU_OPS
+ 	select ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE
+ 	select ARCH_HAS_NONLEAF_PMD_YOUNG if ARM64_HAFT
+@@ -46,8 +44,6 @@ config ARM64
+ 	select ARCH_HAS_SETUP_DMA_OPS
+ 	select ARCH_HAS_SET_DIRECT_MAP
+ 	select ARCH_HAS_SET_MEMORY
+-	select ARCH_HAS_MEM_ENCRYPT
+-	select ARCH_HAS_FORCE_DMA_UNENCRYPTED
+ 	select ARCH_STACKWALK
+ 	select ARCH_HAS_STRICT_KERNEL_RWX
+ 	select ARCH_HAS_STRICT_MODULE_RWX
+@@ -105,11 +101,8 @@ config ARM64
+ 	select ARCH_SUPPORTS_ATOMIC_RMW
+ 	select ARCH_SUPPORTS_INT128 if CC_HAS_INT128
+ 	select ARCH_SUPPORTS_NUMA_BALANCING
+-	select ARCH_SUPPORTS_SCHED_PARAL
+-	select ARCH_SUPPORTS_SCHED_SOFT_QUOTA
+ 	select ARCH_SUPPORTS_PAGE_TABLE_CHECK
+ 	select ARCH_SUPPORTS_PER_VMA_LOCK
+-	select ARCH_SUPPORTS_HUGE_PFNMAP if TRANSPARENT_HUGEPAGE
+ 	select ARCH_WANT_BATCHED_UNMAP_TLB_FLUSH
+ 	select ARCH_WANT_COMPAT_IPC_PARSE_VERSION if COMPAT
+ 	select ARCH_WANT_DEFAULT_BPF_JIT
+@@ -129,7 +122,6 @@ config ARM64
+ 	select ARM_GIC_V3
+ 	select ARM_GIC_V3_ITS if PCI
+ 	select ARM_PSCI_FW
+-	select ARM64_LS64 if !FUNCTION_ALIGNMENT_64B
+ 	select BUILDTIME_TABLE_SORT
+ 	select CLONE_BACKWARDS
+ 	select COMMON_CLK
+@@ -250,7 +242,7 @@ config ARM64
+ 	select HAVE_KRETPROBES
+ 	select HAVE_GENERIC_VDSO
+ 	select HOTPLUG_CORE_SYNC_DEAD if HOTPLUG_CPU
+-	select HOTPLUG_SMT if HOTPLUG_CPU
++	select HOTPLUG_SMT if (SMP && HOTPLUG_CPU)
+ 	select IRQ_DOMAIN
+ 	select IRQ_FORCED_THREADING
+ 	select KASAN_VMALLOC if KASAN
+@@ -274,6 +266,8 @@ config ARM64
+ 	select TRACE_IRQFLAGS_SUPPORT
+ 	select TRACE_IRQFLAGS_NMI_SUPPORT
+ 	select HAVE_SOFTIRQ_ON_OWN_STACK
++	select ARCH_SUPPORTS_FAST_SYSCALL if !ARM64_MTE && !KASAN_HW_TAGS
++	select ARCH_SUPPORTS_FAST_IRQ if ARM_GIC_V3 && !ARM64_MTE && !KASAN_HW_TAGS
+ 	help
+ 	  ARM 64-bit (AArch64) Linux support.
+ 
+@@ -432,8 +426,6 @@ source "kernel/livepatch/Kconfig"
+ 
+ menu "Kernel Features"
+ 
+-source "arch/arm64/Kconfig.turbo"
+-
+ menu "ARM errata workarounds via the alternatives framework"
+ 
+ config AMPERE_ERRATUM_AC03_CPU_38
+@@ -1268,19 +1260,6 @@ config HISILICON_ERRATUM_162100801
+ 
+ 	  If unsure, say Y.
+ 
+-config HISILICON_ERRATUM_162100803
+-	bool "Hip09/10/10c/12 162100803/162200807/162400807/165010802 erratum support"
+-	default y
+-	help
+-	  There is a hardware conflict between vSGI and vLPI, fix it by
+-	  configure a max ITS ITT size 0xf when doing MAPD with V = 1, clear V
+-	  field in ITS device table and clear ITS cache to implement MAPD with
+-	  V = 0 instead. Hip09/10/10c/12 have this same problem, just use
+-	  HISILICON_ERRATUM_162100803 as the compile macro and
+-	  ITS_FLAGS_WORKAROUND_HISILICON_162100803 as ITS flag for convenience
+-
+-	  If unsure, say Y.
+-
+ config HISILICON_ERRATUM_162100602
+ 	bool "Hisilicon erratum 162100602"
+ 	depends on ARM_SMMU_V3 && ARCH_HISI
+@@ -1304,17 +1283,6 @@ config HISILICON_ERRATUM_162102203
+ 
+ 	  If unsure, say N.
+ 
+-config HISILICON_ERRATUM_165010801
+-	bool "Hisilicon erratum 165010801"
+-	depends on ARCH_HISI
+-	default y
+-	help
+-	  On HIP12, when GIC receives multiple interrupts of the same priority and
+-	  different types, the interrupts are selected in the following sequence:
+-	  SPI > LPI > SGI > PPI. This scheduling rule may cause PPI starvation.
+-	  To prevent starvation from triggering system watchdog hardlockup, the
+-	  interrupt priority is explicitly increased in the arch_timer driver.
+-
+ config QCOM_FALKOR_ERRATUM_1003
+ 	bool "Falkor E1003: Incorrect translation due to ASID change"
+ 	default y
+@@ -1404,16 +1372,6 @@ config HISILICON_HIP08_RU_PREFETCH_DEFAULT_OFF
+ 
+ 	  If unsure, say N.
+ 
+-config PHYTIUM_ERRATUM_FT3386
+-	bool "FT3386: enable Phytium FT3386 pswiotlb can improve dma performance"
+-	depends on PSWIOTLB
+-	default y
+-	help
+-	  Phytium FT3386 pswiotlb can improve D2H dma performance and
+-	  should be enabled by default.
+-
+-	  If unsure, say Y.
+-
+ endmenu # "ARM errata workarounds via the alternatives framework"
+ 
+ choice
+@@ -2370,9 +2328,6 @@ config ARM64_TWED
+ 	help
+ 	  Delayed Trapping of WFE (part of the ARMv8.6 Extensions)
+ 
+-config ARM64_LS64
+-	bool
+-
+ endmenu
+ 
+ menu "ARMv8.7 architectural features"
+@@ -2421,31 +2376,6 @@ config ARM64_HAFT
+ 
+ endmenu # "ARMv8.8 architectural features"
+ 
+-menu "ARMv9.5 architectural features"
+-
+-config ARM64_HDBSS
+-	bool "Enable support for Hardware Dirty state tracking Structure (HDBSS)"
+-	default y
+-	help
+-	  Hardware Dirty state tracking Structure(HDBSS) enhances tracking
+-	  translation table descriptors’ dirty state to reduce the cost of
+-	  surveying for dirtied granules.
+-
+-endmenu # "ARMv9.5 architectural features"
+-
+-config ARM64_HISI_IPIV
+-	bool "Enable support for IPIV"
+-	default y
+-	depends on ACPI
+-	depends on ARM64
+-	help
+-	  IPIV optimizes vSGI on the basis of GICv4.1. The vCPU on the sending
+-	  side of vSGI needs to trap to Hypervisor. IPIv sends vSGI without
+-	  traping, improving performance.
+-
+-	  The feature will only be enabled if CPU in the system and Guest OS
+-	  support this feature. If unsure, say Y.
+-
+ config ARM64_SVE
+ 	bool "ARM Scalable Vector Extension support"
+ 	default y
+@@ -2754,4 +2684,3 @@ source "drivers/acpi/Kconfig"
+ 
+ source "arch/arm64/kvm/Kconfig"
+ 
+-source "arch/arm64/mm/Kconfig"
+diff --git a/arch/arm64/configs/openeuler_defconfig b/arch/arm64/configs/openeuler_defconfig
+index 7579860c008a..3b6ceba474e1 100644
+--- a/arch/arm64/configs/openeuler_defconfig
++++ b/arch/arm64/configs/openeuler_defconfig
+@@ -85,23 +85,17 @@ CONFIG_BPF_SYSCALL=y
+ CONFIG_BPF_JIT=y
+ CONFIG_BPF_JIT_ALWAYS_ON=y
+ CONFIG_BPF_JIT_DEFAULT_ON=y
+-CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
++# CONFIG_BPF_UNPRIV_DEFAULT_OFF is not set
+ # CONFIG_BPF_PRELOAD is not set
+ CONFIG_BPF_LSM=y
+ CONFIG_BPF_SCHED=y
+ # end of BPF subsystem
+ 
+-CONFIG_BPF_RVI=y
+ CONFIG_PREEMPT_NONE_BUILD=y
+ CONFIG_PREEMPT_NONE=y
+ # CONFIG_PREEMPT_VOLUNTARY is not set
+ # CONFIG_PREEMPT is not set
+ # CONFIG_PREEMPT_DYNAMIC is not set
+-CONFIG_XCU_SCHEDULER=y
+-CONFIG_XCU_VSTREAM=y
+-CONFIG_XSCHED_NR_CUS=128
+-CONFIG_XCU_SCHED_RT=y
+-# CONFIG_XCU_SCHED_CFS is not set
+ 
+ #
+ # CPU/Task time and stats accounting
+@@ -172,7 +166,6 @@ CONFIG_MEMCG_MEMFS_INFO=y
+ CONFIG_MEMCG_OOM_PRIORITY=y
+ CONFIG_MEMCG_SWAP_QOS=y
+ CONFIG_MEMCG_KMEM=y
+-CONFIG_MEMCG_KMEM_STOCK=y
+ CONFIG_BLK_CGROUP=y
+ CONFIG_CGROUP_WRITEBACK=y
+ CONFIG_CGROUP_V1_WRITEBACK=y
+@@ -185,7 +178,6 @@ CONFIG_FAIR_GROUP_SCHED=y
+ CONFIG_CFS_BANDWIDTH=y
+ CONFIG_RT_GROUP_SCHED=y
+ CONFIG_QOS_SCHED_DYNAMIC_AFFINITY=y
+-CONFIG_SCHED_SOFT_DOMAIN=y
+ # CONFIG_SCHED_MM_CID is not set
+ CONFIG_QOS_SCHED_SMART_GRID=y
+ CONFIG_CGROUP_PIDS=y
+@@ -204,8 +196,6 @@ CONFIG_SOCK_CGROUP_DATA=y
+ CONFIG_CGROUP_V1_KILL=y
+ CONFIG_CGROUP_V1_STAT=y
+ CONFIG_CGROUP_FILES=y
+-# CONFIG_CGROUP_IFS is not set
+-CONFIG_UCOUNTS_PERCPU_COUNTER=y
+ CONFIG_NAMESPACES=y
+ CONFIG_UTS_NS=y
+ CONFIG_TIME_NS=y
+@@ -214,8 +204,6 @@ CONFIG_USER_NS=y
+ CONFIG_PID_NS=y
+ CONFIG_NET_NS=y
+ CONFIG_SCHED_STEAL=y
+-CONFIG_SCHED_PARAL=y
+-CONFIG_SCHED_SOFT_QUOTA=y
+ CONFIG_CHECKPOINT_RESTORE=y
+ CONFIG_SCHED_AUTOGROUP=y
+ CONFIG_RELAY=y
+@@ -384,24 +372,12 @@ CONFIG_LIVEPATCH_STOP_MACHINE_CONSISTENCY=y
+ # CONFIG_LIVEPATCH_STACK is not set
+ CONFIG_LIVEPATCH_RESTRICT_KPROBE=y
+ CONFIG_LIVEPATCH_ISOLATE_KPROBE=y
+-CONFIG_LIVEPATCH_LONG_SYMBOL_SUPPORT=y
+ # end of Enable Livepatch
+ 
+ #
+ # Kernel Features
+ #
+ 
+-#
+-# Turbo features selection
+-#
+-CONFIG_FAST_SYSCALL=y
+-CONFIG_FAST_IRQ=y
+-CONFIG_DEBUG_FEATURE_BYPASS=y
+-CONFIG_SECURITY_FEATURE_BYPASS=y
+-CONFIG_ACTLR_XCALL_XINT=y
+-CONFIG_DYNAMIC_XCALL=y
+-# end of Turbo features selection
+-
+ #
+ # ARM errata workarounds via the alternatives framework
+ #
+@@ -462,7 +438,6 @@ CONFIG_HISILICON_ERRATUM_161600802=y
+ CONFIG_HISILICON_ERRATUM_162100125=y
+ # CONFIG_HISILICON_ERRATUM_1980005 is not set
+ CONFIG_HISILICON_ERRATUM_162100801=y
+-CONFIG_HISILICON_ERRATUM_162100803=y
+ CONFIG_HISILICON_ERRATUM_162100602=y
+ CONFIG_HISILICON_ERRATUM_162102203=y
+ CONFIG_QCOM_FALKOR_ERRATUM_1003=y
+@@ -474,7 +449,6 @@ CONFIG_ROCKCHIP_ERRATUM_3588001=y
+ CONFIG_SOCIONEXT_SYNQUACER_PREITS=y
+ CONFIG_HISILICON_ERRATUM_HIP08_RU_PREFETCH=y
+ # CONFIG_HISILICON_HIP08_RU_PREFETCH_DEFAULT_OFF is not set
+-CONFIG_PHYTIUM_ERRATUM_FT3386=y
+ # end of ARM errata workarounds via the alternatives framework
+ 
+ CONFIG_ARM64_4K_PAGES=y
+@@ -593,13 +567,6 @@ CONFIG_ARM64_EPAN=y
+ CONFIG_ARM64_NMI=y
+ # end of ARMv8.8 architectural features
+ 
+-#
+-# ARMv9.5 architectural features
+-#
+-CONFIG_ARM64_HDBSS=y
+-# end of ARMv9.5 architectural features
+-
+-CONFIG_ARM64_HISI_IPIV=y
+ CONFIG_ARM64_SVE=y
+ CONFIG_ARM64_SME=y
+ CONFIG_ARM64_PSEUDO_NMI=y
+@@ -629,9 +596,7 @@ CONFIG_DMI=y
+ # end of Boot options
+ 
+ CONFIG_COMPAT=y
+-CONFIG_HISI_VIRTCCA_HOST=y
+ CONFIG_HISI_VIRTCCA_GUEST=y
+-CONFIG_HISI_VIRTCCA_CODA=y
+ 
+ #
+ # Power management options
+@@ -732,7 +697,6 @@ CONFIG_ACPI_SPCR_TABLE=y
+ CONFIG_ACPI_AC=y
+ CONFIG_ACPI_BATTERY=y
+ CONFIG_ACPI_BUTTON=y
+-CONFIG_ACPI_POWER_NOTIFIER_CHAIN=y
+ CONFIG_ACPI_VIDEO=m
+ CONFIG_ACPI_FAN=y
+ # CONFIG_ACPI_TAD is not set
+@@ -796,15 +760,15 @@ CONFIG_HAVE_KVM_IRQ_BYPASS=y
+ CONFIG_HAVE_KVM_VCPU_RUN_PID_CHANGE=y
+ CONFIG_KVM_XFER_TO_GUEST_WORK=y
+ CONFIG_KVM_GENERIC_HARDWARE_ENABLING=y
+-CONFIG_HAVE_KVM_PINNED_VMID=y
+ CONFIG_KVM_HISI_VIRT=y
+ CONFIG_VIRTUALIZATION=y
+ CONFIG_KVM=y
++CONFIG_HISI_VIRTCCA_HOST=y
++CONFIG_HISI_VIRTCCA_CODA=y
+ # CONFIG_NVHE_EL2_DEBUG is not set
+ CONFIG_KVM_ARM_MULTI_LPI_TRANSLATE_CACHE=y
+ CONFIG_ARCH_VCPU_STAT=y
+ CONFIG_VIRT_VTIMER_IRQ_BYPASS=y
+-CONFIG_PFN_RANGE_ALLOC=y
+ CONFIG_CPU_MITIGATIONS=y
+ 
+ #
+@@ -932,6 +896,10 @@ CONFIG_HAVE_GCC_PLUGINS=y
+ CONFIG_FUNCTION_ALIGNMENT_4B=y
+ CONFIG_FUNCTION_ALIGNMENT_8B=y
+ CONFIG_FUNCTION_ALIGNMENT=8
++CONFIG_ARCH_SUPPORTS_FAST_SYSCALL=y
++# CONFIG_FAST_SYSCALL is not set
++CONFIG_ARCH_SUPPORTS_FAST_IRQ=y
++# CONFIG_FAST_IRQ is not set
+ # end of General architecture-dependent options
+ 
+ CONFIG_RT_MUTEXES=y
+@@ -985,7 +953,6 @@ CONFIG_BLK_WBT_MQ=y
+ # CONFIG_BLK_CGROUP_FC_APPID is not set
+ CONFIG_BLK_CGROUP_IOCOST=y
+ CONFIG_BLK_CGROUP_LEGACY_IOCOST=y
+-CONFIG_BLK_CGROUP_IOINFLIGHT=y
+ # CONFIG_BLK_CGROUP_IOPRIO is not set
+ CONFIG_BLK_DEBUG_FS=y
+ CONFIG_BLK_DEBUG_FS_ZONED=y
+@@ -1172,7 +1139,6 @@ CONFIG_MEMORY_ISOLATION=y
+ CONFIG_EXCLUSIVE_SYSTEM_RAM=y
+ CONFIG_ARCH_ENABLE_MEMORY_HOTPLUG=y
+ CONFIG_ARCH_ENABLE_MEMORY_HOTREMOVE=y
+-CONFIG_NUMA_REMOTE=y
+ CONFIG_MEMORY_HOTPLUG=y
+ CONFIG_MEMORY_HOTPLUG_DEFAULT_ONLINE=y
+ CONFIG_MEMORY_HOTREMOVE=y
+@@ -1204,8 +1170,6 @@ CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS=y
+ # CONFIG_TRANSPARENT_HUGEPAGE_MADVISE is not set
+ CONFIG_THP_SWAP=y
+ CONFIG_READ_ONLY_THP_FOR_FS=y
+-CONFIG_ARCH_SUPPORTS_HUGE_PFNMAP=y
+-CONFIG_ARCH_SUPPORTS_PMD_PFNMAP=y
+ CONFIG_NEED_PER_CPU_EMBED_FIRST_CHUNK=y
+ CONFIG_NEED_PER_CPU_PAGE_FIRST_CHUNK=y
+ CONFIG_USE_PERCPU_NUMA_NODE_ID=y
+@@ -1246,7 +1210,6 @@ CONFIG_LRU_GEN=y
+ # CONFIG_LRU_GEN_STATS is not set
+ CONFIG_ARM64_HAFT=y
+ CONFIG_ARCH_SUPPORTS_PER_VMA_LOCK=y
+-CONFIG_GMEM=y
+ CONFIG_PER_VMA_LOCK=y
+ CONFIG_LOCK_MM_AND_FIND_VMA=y
+ CONFIG_IOMMU_MM_DATA=y
+@@ -1258,25 +1221,19 @@ CONFIG_DYNAMIC_POOL=y
+ CONFIG_ETMEM_SCAN=m
+ CONFIG_ETMEM_SWAP=m
+ CONFIG_ETMEM=y
+-CONFIG_RECLAIM_NOTIFY=y
+ # CONFIG_BPF_READAHEAD is not set
+-CONFIG_MEM_SAMPLING=y
+-CONFIG_NUMABALANCING_MEM_SAMPLING=y
+ 
+ #
+ # Data Access Monitoring
+ #
+ CONFIG_DAMON=y
+ CONFIG_DAMON_VADDR=y
+-CONFIG_DAMON_MEM_SAMPLING=y
+ CONFIG_DAMON_PADDR=y
+ CONFIG_DAMON_SYSFS=y
+ # CONFIG_DAMON_DBGFS is not set
+ CONFIG_DAMON_RECLAIM=y
+ CONFIG_DAMON_LRU_SORT=y
+ # end of Data Access Monitoring
+-
+-CONFIG_THP_CONTROL=y
+ # end of Memory Management options
+ 
+ CONFIG_NET=y
+@@ -1316,7 +1273,6 @@ CONFIG_NET_KEY_MIGRATE=y
+ CONFIG_SMC=m
+ CONFIG_SMC_DIAG=m
+ CONFIG_SMC_LO=y
+-CONFIG_UB_UMS=m
+ CONFIG_XDP_SOCKETS=y
+ CONFIG_XDP_SOCKETS_DIAG=y
+ CONFIG_NET_HANDSHAKE=y
+@@ -1944,7 +1900,6 @@ CONFIG_CGROUP_NET_CLASSID=y
+ CONFIG_NET_RX_BUSY_POLL=y
+ CONFIG_BQL=y
+ CONFIG_BPF_STREAM_PARSER=y
+-CONFIG_HISOCK=y
+ CONFIG_NET_FLOW_LIMIT=y
+ 
+ #
+@@ -2168,9 +2123,6 @@ CONFIG_FW_CACHE=y
+ CONFIG_FW_UPLOAD=y
+ # end of Firmware loader
+ 
+-# fwctl
+-CONFIG_FWCTL=m
+-
+ CONFIG_WANT_DEV_COREDUMP=y
+ # CONFIG_ALLOW_DEV_COREDUMP is not set
+ # CONFIG_DEBUG_DRIVER is not set
+@@ -3012,9 +2964,6 @@ CONFIG_ICE=m
+ CONFIG_ICE_SWITCHDEV=y
+ CONFIG_FM10K=m
+ # CONFIG_IGC is not set
+-CONFIG_NET_VENDOR_LINKDATA=y
+-CONFIG_SXE=m
+-CONFIG_SXE_VF=m
+ CONFIG_NET_VENDOR_MUCSE=y
+ CONFIG_MXGBE=m
+ CONFIG_MXGBE_FIX_VF_QUEUE=y
+@@ -3078,8 +3027,6 @@ CONFIG_MLXFW=m
+ CONFIG_NET_VENDOR_MICROSEMI=y
+ # CONFIG_MSCC_OCELOT_SWITCH is not set
+ CONFIG_NET_VENDOR_MICROSOFT=y
+-CONFIG_NET_VENDOR_MOTORCOMM=y
+-CONFIG_YT6801=m
+ CONFIG_NET_VENDOR_MYRI=y
+ # CONFIG_MYRI10GE is not set
+ # CONFIG_FEALNX is not set
+@@ -3209,7 +3156,7 @@ CONFIG_MICREL_PHY=m
+ CONFIG_MICROCHIP_PHY=m
+ # CONFIG_MICROCHIP_T1_PHY is not set
+ # CONFIG_MICROSEMI_PHY is not set
+-CONFIG_MOTORCOMM_PHY=m
++# CONFIG_MOTORCOMM_PHY is not set
+ CONFIG_NATIONAL_PHY=m
+ # CONFIG_NXP_CBTX_PHY is not set
+ # CONFIG_NXP_C45_TJA11XX_PHY is not set
+@@ -4429,7 +4376,6 @@ CONFIG_THERMAL_GOV_STEP_WISE=y
+ CONFIG_THERMAL_GOV_USER_SPACE=y
+ CONFIG_CPU_THERMAL=y
+ CONFIG_CPU_FREQ_THERMAL=y
+-# CONFIG_DEVFREQ_THERMAL is not set
+ CONFIG_THERMAL_EMULATION=y
+ # CONFIG_THERMAL_MMIO is not set
+ CONFIG_HISI_THERMAL=m
+@@ -6260,7 +6206,6 @@ CONFIG_INFINIBAND_ON_DEMAND_PAGING=y
+ CONFIG_INFINIBAND_ADDR_TRANS=y
+ CONFIG_INFINIBAND_ADDR_TRANS_CONFIGFS=y
+ CONFIG_INFINIBAND_VIRT_DMA=y
+-CONFIG_IB_CORE_CQ_POLL=m
+ CONFIG_INFINIBAND_PEER_MEMORY=y
+ CONFIG_INFINIBAND_BNXT_RE=m
+ CONFIG_INFINIBAND_CXGB4=m
+@@ -6518,11 +6463,7 @@ CONFIG_VFIO_PLATFORM=m
+ # end of VFIO platform reset drivers
+ # end of VFIO support for platform devices
+ 
+-CONFIG_VIRT_DRIVERS=y
+-# CONFIG_VMGENID is not set
+-# CONFIG_NITRO_ENCLAVES is not set
+-CONFIG_TSM_REPORTS=m
+-CONFIG_ARM_CCA_GUEST=m
++# CONFIG_VIRT_DRIVERS is not set
+ CONFIG_VIRTIO_ANCHOR=y
+ CONFIG_VIRTIO=m
+ CONFIG_VIRTIO_PCI_LIB=m
+@@ -6641,7 +6582,6 @@ CONFIG_FSL_ERRATUM_A008585=y
+ CONFIG_HISILICON_ERRATUM_161010101=y
+ CONFIG_ARM64_ERRATUM_858921=y
+ CONFIG_ARM_TIMER_SP804=y
+-CONFIG_HISILICON_ERRATUM_165010801=y
+ # CONFIG_ARM_ARCH_TIMER_WORKAROUND_IN_USERSPACE is not set
+ # end of Clock Source drivers
+ 
+@@ -6673,8 +6613,8 @@ CONFIG_IOMMU_IO_PGTABLE_LPAE=y
+ # end of Generic IOMMU Pagetable Support
+ 
+ # CONFIG_IOMMU_DEBUGFS is not set
+-# CONFIG_IOMMU_DEFAULT_DMA_STRICT is not set
+-CONFIG_IOMMU_DEFAULT_DMA_LAZY=y
++CONFIG_IOMMU_DEFAULT_DMA_STRICT=y
++# CONFIG_IOMMU_DEFAULT_DMA_LAZY is not set
+ # CONFIG_IOMMU_DEFAULT_PASSTHROUGH is not set
+ CONFIG_OF_IOMMU=y
+ CONFIG_IOMMU_DMA=y
+@@ -6745,9 +6685,6 @@ CONFIG_SMMU_BYPASS_DEV=y
+ # CONFIG_HISI_HBMDEV is not set
+ # CONFIG_HISI_HBMCACHE is not set
+ CONFIG_KUNPENG_HCCS=m
+-CONFIG_HISI_SOC_CACHE=y
+-CONFIG_HISI_SOC_HHA=m
+-CONFIG_HISI_SOC_L3C=m
+ # end of Hisilicon SoC drivers
+ 
+ #
+@@ -6791,22 +6728,7 @@ CONFIG_QCOM_KRYO_L2_ACCESSORS=y
+ # end of Xilinx SoC drivers
+ # end of SOC (System On Chip) specific Drivers
+ 
+-CONFIG_PM_DEVFREQ=y
+-
+-#
+-# DEVFREQ Governors
+-#
+-CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND=y
+-CONFIG_DEVFREQ_GOV_PERFORMANCE=y
+-CONFIG_DEVFREQ_GOV_POWERSAVE=y
+-CONFIG_DEVFREQ_GOV_USERSPACE=y
+-# CONFIG_DEVFREQ_GOV_PASSIVE is not set
+-
+-#
+-# DEVFREQ Drivers
+-#
+-CONFIG_ARM_HISI_UNCORE_DEVFREQ=m
+-# CONFIG_PM_DEVFREQ_EVENT is not set
++# CONFIG_PM_DEVFREQ is not set
+ CONFIG_EXTCON=y
+ 
+ #
+@@ -6937,7 +6859,6 @@ CONFIG_ARM_PMU_ACPI=y
+ CONFIG_ARM_SMMU_V3_PMU=m
+ CONFIG_ARM_PMUV3=y
+ CONFIG_ARM64_BRBE=y
+-CONFIG_HISILICON_HW_METRIC=y
+ # CONFIG_ARM_DSU_PMU is not set
+ CONFIG_QCOM_L2_PMU=y
+ CONFIG_QCOM_L3_PMU=y
+@@ -6972,7 +6893,6 @@ CONFIG_USB4=m
+ #
+ CONFIG_VENDOR_HOOKS=y
+ CONFIG_VENDOR_BOND_HOOKS=y
+-CONFIG_OENETCLS=m
+ # end of Vendor Hooks
+ 
+ CONFIG_LIBNVDIMM=m
+@@ -7038,7 +6958,6 @@ CONFIG_CPU_INSPECTOR_ATF=m
+ 
+ CONFIG_ROH=m
+ CONFIG_ROH_HNS=m
+-CONFIG_ARM_SPE_MEM_SAMPLING=y
+ # end of Device Drivers
+ 
+ #
+@@ -7047,7 +6966,6 @@ CONFIG_ARM_SPE_MEM_SAMPLING=y
+ CONFIG_DCACHE_WORD_ACCESS=y
+ # CONFIG_VALIDATE_FS_PARSER is not set
+ CONFIG_FS_IOMAP=y
+-CONFIG_FS_STACK=y
+ CONFIG_BUFFER_HEAD=y
+ CONFIG_LEGACY_DIRECT_IO=y
+ # CONFIG_EXT2_FS is not set
+@@ -7117,8 +7035,6 @@ CONFIG_FUSE_FS=m
+ CONFIG_CUSE=m
+ CONFIG_VIRTIO_FS=m
+ CONFIG_FUSE_DAX=y
+-CONFIG_FUSE_PASSTHROUGH=y
+-CONFIG_FUSE_IO_URING=y
+ CONFIG_OVERLAY_FS=m
+ # CONFIG_OVERLAY_FS_REDIRECT_DIR is not set
+ CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW=y
+@@ -7126,6 +7042,7 @@ CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW=y
+ # CONFIG_OVERLAY_FS_XINO_AUTO is not set
+ # CONFIG_OVERLAY_FS_METACOPY is not set
+ # CONFIG_OVERLAY_FS_DEBUG is not set
++
+ #
+ # Caches
+ #
+@@ -7257,7 +7174,6 @@ CONFIG_EROFS_FS_POSIX_ACL=y
+ CONFIG_EROFS_FS_SECURITY=y
+ # CONFIG_EROFS_FS_ZIP is not set
+ CONFIG_EROFS_FS_ONDEMAND=y
+-CONFIG_MFS_FS=y
+ CONFIG_NETWORK_FILESYSTEMS=y
+ CONFIG_NFS_FS=m
+ CONFIG_NFS_V2=m
+@@ -7295,8 +7211,6 @@ CONFIG_LOCKD_V4=y
+ CONFIG_NFS_ACL_SUPPORT=m
+ CONFIG_NFS_COMMON=y
+ CONFIG_NFS_V4_2_SSC_HELPER=y
+-CONFIG_ENFS=m
+-CONFIG_SUNRPC_ENFS=y
+ CONFIG_SUNRPC=m
+ CONFIG_SUNRPC_GSS=m
+ CONFIG_SUNRPC_BACKCHANNEL=y
+@@ -7955,7 +7869,6 @@ CONFIG_CMA_SIZE_SEL_MBYTES=y
+ CONFIG_CMA_ALIGNMENT=8
+ # CONFIG_DMA_API_DEBUG is not set
+ CONFIG_DMA_MAP_BENCHMARK=y
+-CONFIG_PSWIOTLB=y
+ CONFIG_SGL_ALLOC=y
+ CONFIG_CHECK_SIGNATURE=y
+ # CONFIG_FORCE_NR_CPUS is not set
+@@ -8334,66 +8247,3 @@ CONFIG_ARCH_USE_MEMTEST=y
+ # end of Kernel hacking
+ 
+ CONFIG_KWORKER_NUMA_AFFINITY=y
+-
+-#
+-# unified bus
+-#
+-CONFIG_UB=y
+-CONFIG_UB_URMA=m
+-# Basic UB bus code compiled into the kernel
+-CONFIG_UB_UBUS=y
+-# UB Bus Core Driver
+-CONFIG_UB_UBUS_BUS=m
+-CONFIG_UB_UBFI=m
+-CONFIG_UB_UBUS_USI=y
+-CONFIG_ARM_GIC_V3_ITS_UBUS=y
+-CONFIG_VFIO_UB=m
+-CONFIG_UB_HISI_UBUS=m
+-# UB BASE driver
+-CONFIG_UB_UBASE=m
+-
+-#UB network driver
+-CONFIG_UB_NET=y
+-CONFIG_UB_UBL=m
+-CONFIG_UB_UNIC=m
+-CONFIG_UB_UNIC_UBL=y
+-CONFIG_UB_UNIC_DCB=y
+-
+-# UB CDMA driver
+-CONFIG_UB_CDMA=m
+-
+-# UB UDMA driver
+-CONFIG_UB_UDMA=m
+-
+-# end of unified bus
+-
+-# UMMU
+-CONFIG_UB_UMMU_CORE=y
+-CONFIG_UB_UMMU_CORE_DRIVER=m
+-CONFIG_UB_UMMU_PMU=m
+-CONFIG_UB_UMMU=m
+-CONFIG_UB_UMMU_SVA=y
+-CONFIG_UB_UBMEM_UMMU=y
+-CONFIG_UB_UMMU_BYPASSDEV=y
+-# end of UMMU
+-
+-CONFIG_OBMM=m
+-
+-CONFIG_UDFI=y
+-CONFIG_UDFI_CIS=m
+-CONFIG_UDFI_ODF=m
+-
+-# UB_FWCTL
+-CONFIG_FWCTL_UB=m
+-# end of UB_FWCTL
+-
+-# UB sentry
+-CONFIG_UB_SENTRY=m
+-CONFIG_UB_SENTRY_REMOTE=m
+-# end of UB sentry
+-
+-#
+-# PAGEATTACH SUPPORT
+-#
+-CONFIG_PAGEATTACH=m
+-# end of pageattach
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index 6f73a51d2422..856c40ee00cf 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -767,20 +767,6 @@ static __always_inline bool system_supports_fpsimd(void)
+ 	return !cpus_have_const_cap(ARM64_HAS_NO_FPSIMD);
+ }
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-static inline bool system_supports_hdbss(void)
+-{
+-	u64 mmfr1;
+-	u32 val;
+-
+-	mmfr1 =	read_sanitised_ftr_reg(SYS_ID_AA64MMFR1_EL1);
+-	val = cpuid_feature_extract_unsigned_field(mmfr1,
+-						ID_AA64MMFR1_EL1_HAFDBS_SHIFT);
+-
+-	return val == ID_AA64MMFR1_EL1_HAFDBS_HDBSS;
+-}
+-#endif
+-
+ static inline bool system_uses_hw_pan(void)
+ {
+ 	return IS_ENABLED(CONFIG_ARM64_PAN) &&
+diff --git a/arch/arm64/include/asm/esr.h b/arch/arm64/include/asm/esr.h
+index 276eb39ed9a7..d5c30ee0985f 100644
+--- a/arch/arm64/include/asm/esr.h
++++ b/arch/arm64/include/asm/esr.h
+@@ -148,8 +148,6 @@
+ #define ESR_ELx_CM 		(UL(1) << ESR_ELx_CM_SHIFT)
+ 
+ /* ISS2 field definitions for Data Aborts */
+-#define ESR_ELx_HDBSSF_SHIFT	(11)
+-#define ESR_ELx_HDBSSF		(UL(1) << ESR_ELx_HDBSSF_SHIFT)
+ #define ESR_ELx_TnD_SHIFT	(10)
+ #define ESR_ELx_TnD 		(UL(1) << ESR_ELx_TnD_SHIFT)
+ #define ESR_ELx_TagAccess_SHIFT	(9)
+diff --git a/arch/arm64/include/asm/kvm_arm.h b/arch/arm64/include/asm/kvm_arm.h
+index 6f4c9b1b4e9d..db78c577579e 100644
+--- a/arch/arm64/include/asm/kvm_arm.h
++++ b/arch/arm64/include/asm/kvm_arm.h
+@@ -128,7 +128,6 @@
+ 			 TCR_EL2_ORGN0_MASK | TCR_EL2_IRGN0_MASK | TCR_EL2_T0SZ_MASK)
+ 
+ /* VTCR_EL2 Registers bits */
+-#define VTCR_EL2_HDBSS		(1UL << 45)
+ #define VTCR_EL2_RES1		(1U << 31)
+ #define VTCR_EL2_HD		(1 << 22)
+ #define VTCR_EL2_HA		(1 << 21)
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 69a08a4f3d85..ac4e59256f8e 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -19,7 +19,6 @@
+ #include <linux/maple_tree.h>
+ #include <linux/percpu.h>
+ #include <linux/psci.h>
+-#include <linux/kabi.h>
+ #include <asm/arch_gicv3.h>
+ #include <asm/barrier.h>
+ #include <asm/cpufeature.h>
+@@ -28,8 +27,9 @@
+ #include <asm/fpsimd.h>
+ #include <asm/kvm.h>
+ #include <asm/kvm_asm.h>
+-#include <asm/kvm_rme.h>
++#ifdef CONFIG_HISI_VIRTCCA_HOST
+ #include <asm/kvm_tmm.h>
++#endif
+ 
+ #define __KVM_HAVE_ARCH_INTC_INITIALIZED
+ 
+@@ -41,8 +41,7 @@
+ 
+ #define KVM_MAX_VCPUS VGIC_V3_MAX_CPUS
+ 
+-#define KVM_VCPU_MAX_FEATURES_KABI_BASELINE 7
+-#define KVM_VCPU_MAX_FEATURES 9
++#define KVM_VCPU_MAX_FEATURES 7
+ #define KVM_VCPU_VALID_FEATURES	(BIT(KVM_VCPU_MAX_FEATURES) - 1)
+ 
+ #define KVM_REQ_SLEEP \
+@@ -78,8 +77,8 @@ enum kvm_mode kvm_get_mode(void);
+ static inline enum kvm_mode kvm_get_mode(void) { return KVM_MODE_NONE; };
+ #endif
+ 
++extern unsigned int __ro_after_init kvm_sve_max_vl;
+ int __init kvm_arm_init_sve(void);
+-unsigned int kvm_sve_get_max_vl(struct kvm *kvm);
+ 
+ u32 __attribute_const__ kvm_target_cpu(void);
+ int kvm_reset_vcpu(struct kvm_vcpu *vcpu);
+@@ -197,7 +196,6 @@ struct kvm_smccc_features {
+ 	unsigned long std_bmap;
+ 	unsigned long std_hyp_bmap;
+ 	unsigned long vendor_hyp_bmap;
+-	KABI_EXTEND(unsigned long vendor_hyp_bmap_2)
+ };
+ 
+ typedef unsigned int pkvm_handle_t;
+@@ -223,7 +221,7 @@ struct kvm_arch {
+ 
+ 	/* Mandated version of PSCI */
+ 	u32 psci_version;
+-	KABI_FILL_HOLE(refcount_t pinned)
++
+ 	/* Protects VM-scoped configuration data */
+ 	struct mutex config_lock;
+ 
+@@ -250,24 +248,10 @@ struct kvm_arch {
+ #define KVM_ARCH_FLAG_SMCCC_FILTER_CONFIGURED		7
+ 	/* Initial ID reg values loaded */
+ #define KVM_ARCH_FLAG_ID_REGS_INITIALIZED		8
+-
+-/* MIDR_EL1, REVIDR_EL1, and AIDR_EL1 are writable from userspace */
+-#define KVM_ARCH_FLAG_WRITABLE_IMP_ID_REGS		10
+ 	unsigned long flags;
+ 
+-	/* VM-wide vCPU feature set
+-	 * When calculating kabi CRC baseline by KVM_VCPU_MAX_FEATURES (old value is 7),
+-	 * the member variable here is
+-	 * unsigned long vcpu_features[(((7) + ((sizeof(long) * 8)) - 1) / ((sizeof(long) * 8)))]
+-	 * Now add ARM CCA vcpu feature, KVM_VCPU_MAX_FEATURES should increase to 10
+-	 * the member variable here changes to
+-	 * unsigned long vcpu_features[(((10) + ((sizeof(long) * 8)) - 1) / ((sizeof(long) * 8)))]
+-	 * kabi CRC calculate by the expression, not the value of expression, causes kabi changes.
+-	 * Because the real size of vcpu_features[] is unchanged, we can use KABI_REPLACE
+-	 * to fix kabi conflict.
+-	 */
+-	KABI_REPLACE(DECLARE_BITMAP(vcpu_features, KVM_VCPU_MAX_FEATURES_KABI_BASELINE),
+-		DECLARE_BITMAP(vcpu_features, KVM_VCPU_MAX_FEATURES))
++	/* VM-wide vCPU feature set */
++	DECLARE_BITMAP(vcpu_features, KVM_VCPU_MAX_FEATURES);
+ 
+ 	/*
+ 	 * VM-wide PMU filter, implemented as a bitmap and big enough for
+@@ -291,6 +275,7 @@ struct kvm_arch {
+ 	 * Atomic access to multiple idregs are guarded by kvm_arch.config_lock.
+ 	 */
+ #define IDREG_IDX(id)		(((sys_reg_CRm(id) - 1) << 3) | sys_reg_Op2(id))
++#define IDREG(kvm, id)		((kvm)->arch.id_regs[IDREG_IDX(id)])
+ #define KVM_ARM_ID_REG_NUM	(IDREG_IDX(sys_reg(3, 0, 0, 7, 7)) + 1)
+ 	u64 id_regs[KVM_ARM_ID_REG_NUM];
+ 
+@@ -306,26 +291,13 @@ struct kvm_arch {
+ 	u64 tlbi_dvmbm;
+ #endif
+ 
+-	KABI_REPLACE(union {
+-			struct cvm cvm;
+-			struct virtcca_cvm *virtcca_cvm;
+-		},
+-		union {
+-			struct cvm cvm;
+-			struct virtcca_cvm *virtcca_cvm;
+-			struct realm realm;
+-		})
+-	KABI_REPLACE(bool is_virtcca_cvm,
+-		union {
+-			bool is_virtcca_cvm;
+-			bool is_realm;
+-		})
+-	/* PMCR_EL0.N value for the guest */
+-	KABI_EXTEND(u8 pmcr_n)
+-	KABI_EXTEND(u64 ctr_el0)
+-	KABI_EXTEND(u64 midr_el1)
+-	KABI_EXTEND(u64 revidr_el1)
+-	KABI_EXTEND(u64 aidr_el1)
++#ifdef CONFIG_HISI_VIRTCCA_HOST
++	union {
++		struct cvm cvm;
++		struct virtcca_cvm *virtcca_cvm;
++	};
++	bool is_virtcca_cvm;
++#endif
+ };
+ 
+ struct kvm_vcpu_fault_info {
+@@ -635,17 +607,8 @@ struct kvm_vcpu_arch {
+ 	/* Cache some mmu pages needed inside spinlock regions */
+ 	struct kvm_mmu_memory_cache mmu_page_cache;
+ 
+-	/* feature flags
+-	 * When calculating kabi CRC baseline by KVM_VCPU_MAX_FEATURES (old value is 7), the member variable here is
+-	 * unsigned long features[(((7) + ((sizeof(long) * 8)) - 1) / ((sizeof(long) * 8)))]
+-	 * Now add ARM CCA vcpu feature, KVM_VCPU_MAX_FEATURES should increase to 10
+-	 * the member variable here changes to
+-	 * unsigned long features[(((10) + ((sizeof(long) * 8)) - 1) / ((sizeof(long) * 8)))]
+-	 * kabi CRC calculate by the expression, not the value of expression, causes kabi changes.
+-	 * Because the real size of features[] is unchanged, we can use KABI_REPLACE to fix kabi conflict.
+-	 */
+-	KABI_REPLACE(DECLARE_BITMAP(features, KVM_VCPU_MAX_FEATURES_KABI_BASELINE),
+-		DECLARE_BITMAP(features, KVM_VCPU_MAX_FEATURES))
++	/* feature flags */
++	DECLARE_BITMAP(features, KVM_VCPU_MAX_FEATURES);
+ 
+ 	/* Virtual SError ESR to restore when HCR_EL2.VSE is set */
+ 	u64 vsesr_el2;
+@@ -675,19 +638,8 @@ struct kvm_vcpu_arch {
+ 	cpumask_var_t pre_sched_cpus;
+ #endif
+ 
+-	KABI_REPLACE(struct virtcca_cvm_tec tec,
+-		union {
+-				struct virtcca_cvm_tec tec;
+-				/* Realm meta data */
+-				struct realm_rec *rec;
+-			})
+-
+-#ifdef CONFIG_ARM64_HDBSS
+-	/* HDBSS registers info */
+-	KABI_EXTEND(struct {
+-		u64 br_el2;
+-		u64 prod_el2;
+-	} hdbss)
++#ifdef CONFIG_HISI_VIRTCCA_HOST
++	struct virtcca_cvm_tec tec;
+ #endif
+ };
+ 
+@@ -1146,8 +1098,6 @@ int __init kvm_arm_vmid_alloc_init(void);
+ void __init kvm_arm_vmid_alloc_free(void);
+ void kvm_arm_vmid_update(struct kvm_vmid *kvm_vmid);
+ void kvm_arm_vmid_clear_active(void);
+-unsigned long kvm_arm_pinned_vmid_get(struct kvm_vmid *kvm_vmid);
+-void kvm_arm_pinned_vmid_put(struct kvm_vmid *kvm_vmid);
+ 
+ static inline void kvm_arm_pvtime_vcpu_init(struct kvm_vcpu_arch *vcpu_arch)
+ {
+@@ -1252,8 +1202,6 @@ int kvm_vm_ioctl_mte_copy_tags(struct kvm *kvm,
+ 			       struct kvm_arm_copy_mte_tags *copy_tags);
+ int kvm_vm_ioctl_set_counter_offset(struct kvm *kvm,
+ 				    struct kvm_arm_counter_offset *offset);
+-int kvm_vm_ioctl_get_reg_writable_masks(struct kvm *kvm,
+-					struct reg_mask_range *range);
+ 
+ /* Guest/host FPSIMD coordination helpers */
+ int kvm_arch_vcpu_run_map_fp(struct kvm_vcpu *vcpu);
+@@ -1318,8 +1266,6 @@ bool kvm_arm_vcpu_is_finalized(struct kvm_vcpu *vcpu);
+ #define kvm_vm_has_ran_once(kvm)					\
+ 	(test_bit(KVM_ARCH_FLAG_HAS_RAN_ONCE, &(kvm)->arch.flags))
+ 
+-#define kvm_vcpu_initialized(v) vcpu_get_flag(vcpu, VCPU_INITIALIZED)
+-
+ int kvm_trng_call(struct kvm_vcpu *vcpu);
+ #ifdef CONFIG_KVM
+ extern phys_addr_t hyp_mem_base;
+@@ -1337,30 +1283,6 @@ extern unsigned int twedel;
+ void kvm_arm_vcpu_power_off(struct kvm_vcpu *vcpu);
+ bool kvm_arm_vcpu_stopped(struct kvm_vcpu *vcpu);
+ 
+-static inline u64 *__vm_id_reg(struct kvm_arch *ka, u32 reg)
+-{
+-	switch (reg) {
+-	case sys_reg(3, 0, 0, 1, 0) ... sys_reg(3, 0, 0, 7, 7):
+-		return &ka->id_regs[IDREG_IDX(reg)];
+-	case SYS_CTR_EL0:
+-		return &ka->ctr_el0;
+-	case SYS_MIDR_EL1:
+-		return &ka->midr_el1;
+-	case SYS_REVIDR_EL1:
+-		return &ka->revidr_el1;
+-	case SYS_AIDR_EL1:
+-		return &ka->aidr_el1;
+-	default:
+-		WARN_ON_ONCE(1);
+-		return NULL;
+-	}
+-}
+-
+-#define kvm_read_vm_id_reg(kvm, reg)					\
+-	({ u64 __val = *__vm_id_reg(&(kvm)->arch, reg); __val; })
+-
+-void kvm_set_vm_id_reg(struct kvm *kvm, u32 reg, u64 val);
+-
+ extern bool force_wfi_trap;
+ extern bool kvm_ncsnp_support;
+ extern bool kvm_dvmbm_support;
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index 822d958b55e6..d698ce35deb8 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -310,20 +310,6 @@ static __always_inline void __load_stage2(struct kvm_s2_mmu *mmu,
+ 	asm(ALTERNATIVE("nop", "isb", ARM64_WORKAROUND_SPECULATIVE_AT));
+ }
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-static __always_inline void __load_hdbss(struct kvm_vcpu *vcpu)
+-{
+-	if (!vcpu->kvm->enable_hdbss)
+-		return;
+-
+-	write_sysreg_s(vcpu->arch.hdbss.br_el2, SYS_HDBSSBR_EL2);
+-	write_sysreg_s(vcpu->arch.hdbss.prod_el2, SYS_HDBSSPROD_EL2);
+-
+-	dsb(sy);
+-	isb();
+-}
+-#endif
+-
+ static inline struct kvm *kvm_s2_mmu_to_kvm(struct kvm_s2_mmu *mmu)
+ {
+ 	return container_of(mmu->arch, struct kvm, arch);
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 0c0ae56e8163..4153b77d8aae 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -189,7 +189,6 @@ enum kvm_pgtable_prot {
+ 	KVM_PGTABLE_PROT_R			= BIT(2),
+ 
+ 	KVM_PGTABLE_PROT_DEVICE			= BIT(3),
+-	KVM_PGTABLE_PROT_DBM			= BIT(4),
+ 
+ 	KVM_PGTABLE_PROT_SW0			= BIT(55),
+ 	KVM_PGTABLE_PROT_SW1			= BIT(56),
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 0d36f20ecd33..435634a703c6 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1031,20 +1031,6 @@
+ 
+ #define PIRx_ELx_PERM(idx, perm)	((perm) << ((idx) * 4))
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-/*
+- * Definitions for the HDBSS feature
+- */
+-#define HDBSS_MAX_SIZE		HDBSSBR_EL2_SZ_2MB
+-
+-#define HDBSSBR_EL2(baddr, sz)	(((baddr) & GENMASK(55, 12 + sz)) | \
+-				 ((sz) << HDBSSBR_EL2_SZ_SHIFT))
+-#define HDBSSBR_BADDR(br)	((br) & GENMASK(55, (12 + HDBSSBR_SZ(br))))
+-#define HDBSSBR_SZ(br)		(((br) & HDBSSBR_EL2_SZ_MASK) >> HDBSSBR_EL2_SZ_SHIFT)
+-
+-#define HDBSSPROD_IDX(prod)	(((prod) & HDBSSPROD_EL2_INDEX_MASK) >> HDBSSPROD_EL2_INDEX_SHIFT)
+-#endif
+-
+ #define ARM64_FEATURE_FIELD_BITS	4
+ 
+ /* Defined for compatibility only, do not add new users. */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index e7f61d198e93..067348105655 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -130,96 +130,6 @@ int kvm_arch_vcpu_should_kick(struct kvm_vcpu *vcpu)
+ 	return kvm_vcpu_exiting_guest_mode(vcpu) == IN_GUEST_MODE;
+ }
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+-				    struct kvm_enable_cap *cap)
+-{
+-	unsigned long i;
+-	struct kvm_vcpu *vcpu;
+-	struct page *hdbss_pg;
+-	int size = cap->args[0];
+-
+-	if (!system_supports_hdbss()) {
+-		kvm_err("This system does not support HDBSS!\n");
+-		return -EINVAL;
+-	}
+-
+-	if (size < 0 || size > HDBSS_MAX_SIZE) {
+-		kvm_err("Invalid HDBSS buffer size: %d!\n", size);
+-		return -EINVAL;
+-	}
+-
+-	/* Enable the HDBSS feature if size > 0, otherwise disable it. */
+-	if (size) {
+-		kvm->enable_hdbss = true;
+-		kvm->arch.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS;
+-
+-		kvm_for_each_vcpu(i, vcpu, kvm) {
+-			hdbss_pg = alloc_pages(GFP_KERNEL, size);
+-			if (!hdbss_pg) {
+-				kvm_err("Alloc HDBSS buffer failed!\n");
+-				return -EINVAL;
+-			}
+-
+-			vcpu->arch.hdbss.br_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), size);
+-			vcpu->arch.hdbss.prod_el2 = 0;
+-
+-			/*
+-			 * We should kick vcpus out of guest mode here to
+-			 * load new vtcr value to vtcr_el2 register when
+-			 * re-enter guest mode.
+-			 */
+-			kvm_vcpu_kick(vcpu);
+-		}
+-
+-		kvm_info("Enable HDBSS success, HDBSS buffer size: %d\n", size);
+-	} else if (kvm->enable_hdbss) {
+-		kvm->arch.vtcr &= ~(VTCR_EL2_HD | VTCR_EL2_HDBSS);
+-
+-		kvm_for_each_vcpu(i, vcpu, kvm) {
+-			/* Kick vcpus to flush hdbss buffer. */
+-			kvm_vcpu_kick(vcpu);
+-
+-			hdbss_pg = phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2));
+-			if (hdbss_pg)
+-				__free_pages(hdbss_pg, HDBSSBR_SZ(vcpu->arch.hdbss.br_el2));
+-
+-			vcpu->arch.hdbss.br_el2 = 0;
+-			vcpu->arch.hdbss.prod_el2 = 0;
+-		}
+-
+-		kvm->enable_hdbss = false;
+-		kvm_info("Disable HDBSS success\n");
+-	}
+-
+-	return 0;
+-}
+-#endif
+-
+-#ifdef CONFIG_ARM64_HISI_IPIV
+-static int kvm_hisi_ipiv_enable_cap(struct kvm *kvm, struct kvm_enable_cap *cap)
+-{
+-	kvm->arch.vgic.its_vm.enable_ipiv_from_vmm = true;
+-	return 0;
+-}
+-#endif
+-
+-int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+-			    struct kvm_enable_cap *cap)
+-{
+-	int r;
+-	u64 new_cap;
+-
+-	if (cap->flags)
+-		return -EINVAL;
+-
+-	switch (cap->cap) {
+-	case KVM_CAP_ARM_NISV_TO_USER:
+-		r = 0;
+-		set_bit(KVM_ARCH_FLAG_RETURN_NISV_IO_ABORT_TO_USER,
+-			&kvm->arch.flags);
+-		break;
+-	case KVM_CAP_ARM_MTE:
+ 		mutex_lock(&kvm->lock);
+ 		if (!system_supports_mte() || kvm->created_vcpus) {
+ 			r = -EINVAL;
+@@ -259,11 +169,6 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+ 		}
+ 		mutex_unlock(&kvm->slots_lock);
+ 		break;
+-#ifdef CONFIG_ARM64_HDBSS
+-	case KVM_CAP_ARM_HW_DIRTY_STATE_TRACK:
+-		r = kvm_cap_arm_enable_hdbss(kvm, cap);
+-		break;
+-#endif
+ #ifdef CONFIG_ARM64_HISI_IPIV
+ 	case KVM_CAP_ARM_HISI_IPIV:
+ 		r = kvm_hisi_ipiv_enable_cap(kvm, cap);
+@@ -274,6 +179,14 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+ 		r = kvm_realm_enable_cap(kvm, cap);
+ 		mutex_unlock(&kvm->lock);
+ 		break;
++=======
++#ifdef CONFIG_HISI_VIRTCCA_HOST
++	case KVM_CAP_ARM_TMM:
++		r = 0;
++		if (static_branch_unlikely(&virtcca_cvm_is_available))
++			r = kvm_cvm_enable_cap(kvm, cap);
++		break;
++#endif
+ 	default:
+ 		r = -EINVAL;
+ 		break;
+@@ -528,22 +441,21 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+ 		r = sdev_enable;
+ 		break;
+ #endif
+-#ifdef CONFIG_ARM64_HDBSS
+-	case KVM_CAP_ARM_HW_DIRTY_STATE_TRACK:
+-		r = system_supports_hdbss();
+-		break;
+-#endif
+-#ifdef CONFIG_ARM64_HISI_IPIV
+-	case KVM_CAP_ARM_HISI_IPIV:
+-		if (static_branch_unlikely(&ipiv_enable))
+-			r = 1;
+-		else
+-			r = 0;
+ 		break;
+ #endif
+ 	case KVM_CAP_ARM_RME:
+ 		r = static_key_enabled(&kvm_rme_is_available);
+ 		break;
++=======
++#ifdef CONFIG_HISI_VIRTCCA_HOST
++	case KVM_CAP_ARM_TMM:
++		if (!is_armv8_4_sel2_present()) {
++			r = -ENXIO;
++			break;
++		}
++		r = static_key_enabled(&virtcca_cvm_is_available);
++		break;
++#endif
+ 	default:
+ 		r = 0;
+ 	}
+@@ -1966,19 +1878,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
+ 
+ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ {
+-#ifdef CONFIG_ARM64_HDBSS
+-	/*
+-	 * Flush all CPUs' dirty log buffers to the dirty_bitmap.  Called
+-	 * before reporting dirty_bitmap to userspace.  KVM flushes the buffers
+-	 * on all VM-Exits, thus we only need to kick running vCPUs to force a
+-	 * VM-Exit.
+-	 */
+-	struct kvm_vcpu *vcpu;
+-	unsigned long i;
+ 
+-	kvm_for_each_vcpu(i, vcpu, kvm)
+-		kvm_vcpu_kick(vcpu);
+-#endif
+ }
+ 
+ static int kvm_vm_ioctl_set_device_addr(struct kvm *kvm,
+diff --git a/arch/arm64/kvm/handle_exit.c b/arch/arm64/kvm/handle_exit.c
+index 6919c3858193..90959b8b6228 100644
+--- a/arch/arm64/kvm/handle_exit.c
++++ b/arch/arm64/kvm/handle_exit.c
+@@ -292,52 +292,6 @@ static exit_handle_fn kvm_get_exit_handler(struct kvm_vcpu *vcpu)
+ 	return arm_exit_handlers[esr_ec];
+ }
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-#define HDBSS_ENTRY_VALID_SHIFT 0
+-#define HDBSS_ENTRY_VALID_MASK (1UL << HDBSS_ENTRY_VALID_SHIFT)
+-#define HDBSS_ENTRY_IPA_SHIFT 12
+-#define HDBSS_ENTRY_IPA_MASK GENMASK_ULL(55, HDBSS_ENTRY_IPA_SHIFT)
+-
+-static void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+-{
+-	int idx, curr_idx;
+-	u64 *hdbss_buf;
+-
+-	if (!vcpu->kvm->enable_hdbss)
+-		return;
+-
+-	dsb(sy);
+-	isb();
+-	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
+-
+-	/* Do nothing if HDBSS buffer is empty or br_el2 is NULL */
+-	if (curr_idx == 0 || vcpu->arch.hdbss.br_el2 == 0)
+-		return;
+-
+-	hdbss_buf = page_address(phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2)));
+-	if (!hdbss_buf) {
+-		kvm_err("Enter flush hdbss buffer with buffer == NULL!");
+-		return;
+-	}
+-
+-	for (idx = 0; idx < curr_idx; idx++) {
+-		u64 gpa;
+-
+-		gpa = hdbss_buf[idx];
+-		if (!(gpa & HDBSS_ENTRY_VALID_MASK))
+-			continue;
+-
+-		gpa = gpa & HDBSS_ENTRY_IPA_MASK;
+-		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
+-	}
+-
+-	/* reset HDBSS index */
+-	write_sysreg_s(0, SYS_HDBSSPROD_EL2);
+-	dsb(sy);
+-	isb();
+-}
+-#endif
+-
+ /*
+  * We may be single-stepping an emulated instruction. If the emulation
+  * has been completed in the kernel, we can return to userspace with a
+@@ -373,10 +327,6 @@ int handle_exit(struct kvm_vcpu *vcpu, int exception_index)
+ {
+ 	struct kvm_run *run = vcpu->run;
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (vcpu->kvm->enable_hdbss)
+-		kvm_flush_hdbss_buffer(vcpu);
+-#endif
+ 	if (ARM_SERROR_PENDING(exception_index)) {
+ 		/*
+ 		 * The SError is handled by handle_exit_early(). If the guest
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 874244df723e..d79feecc2f51 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -44,8 +44,6 @@
+ 
+ #define KVM_PTE_LEAF_ATTR_HI_S2_XN	BIT(54)
+ 
+-#define KVM_PTE_LEAF_ATTR_HI_S2_DBM	BIT(51)
+-
+ #define KVM_PTE_LEAF_ATTR_HI_S1_GP	BIT(50)
+ 
+ #define KVM_PTE_LEAF_ATTR_S2_PERMS	(KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R | \
+@@ -713,11 +711,6 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 	if (prot & KVM_PGTABLE_PROT_W)
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (prot & KVM_PGTABLE_PROT_DBM)
+-		attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+-#endif
+-
+ 	attr |= FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S2_SH, sh);
+ 	attr |= KVM_PTE_LEAF_ATTR_LO_S2_AF;
+ 	attr |= prot & KVM_PTE_LEAF_ATTR_HI_SW;
+@@ -1322,11 +1315,6 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 	if (prot & KVM_PGTABLE_PROT_W)
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (prot & KVM_PGTABLE_PROT_DBM)
+-		set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+-#endif
+-
+ 	if (prot & KVM_PGTABLE_PROT_X)
+ 		clr |= KVM_PTE_LEAF_ATTR_HI_S2_XN;
+ 
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index 9d315bd54e00..821e366b54f2 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -225,9 +225,6 @@ static int __kvm_vcpu_run_vhe(struct kvm_vcpu *vcpu)
+ 	 * __activate_traps clear HCR_EL2.TGE (among other things).
+ 	 */
+ 	__load_stage2(vcpu->arch.hw_mmu, vcpu->arch.hw_mmu->arch);
+-#ifdef CONFIG_ARM64_HDBSS
+-	__load_hdbss(vcpu);
+-#endif
+ 	__activate_traps(vcpu);
+ 
+ 	__kvm_adjust_pc(vcpu);
+diff --git a/arch/arm64/kvm/hyp/vhe/sysreg-sr.c b/arch/arm64/kvm/hyp/vhe/sysreg-sr.c
+index 6af9196784a1..a633267a476e 100644
+--- a/arch/arm64/kvm/hyp/vhe/sysreg-sr.c
++++ b/arch/arm64/kvm/hyp/vhe/sysreg-sr.c
+@@ -92,10 +92,6 @@ void kvm_vcpu_load_sysregs_vhe(struct kvm_vcpu *vcpu)
+ 	__sysreg_restore_el1_state(guest_ctxt, ctxt_midr_el1(guest_ctxt));
+ 	__mpam_guest_load();
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	__load_hdbss(vcpu);
+-#endif
+-
+ 	vcpu_set_flag(vcpu, SYSREGS_ON_CPU);
+ 
+ 	activate_traps_vhe_load(vcpu);
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index cd7589d05064..016bde6cdffd 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1667,11 +1667,6 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (writable)
+ 		prot |= KVM_PGTABLE_PROT_W;
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (kvm->enable_hdbss && logging_active)
+-		prot |= KVM_PGTABLE_PROT_DBM;
+-#endif
+-
+ 	if (exec_fault)
+ 		prot |= KVM_PGTABLE_PROT_X;
+ 
+@@ -1746,7 +1741,7 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+ 	unsigned long fault_status;
+ 	phys_addr_t fault_ipa;
+ 	struct kvm_memory_slot *memslot;
+-	unsigned long hva, iss2;
++	unsigned long hva;
+ 	bool is_iabt, write_fault, writable;
+ 	gfn_t gfn;
+ 	int ret, idx;
+@@ -1756,16 +1751,6 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+ 	fault_ipa = kvm_vcpu_get_fault_ipa(vcpu);
+ 	is_iabt = kvm_vcpu_trap_is_iabt(vcpu);
+ 
+-#ifdef CONFIG_ARM64_HDBSS
+-	/*
+-	 * HDBSS buffer already flushed when enter handle_trap_exceptions().
+-	 * Nothing to do here.
+-	 */
+-	iss2 = ESR_ELx_ISS2(kvm_vcpu_get_esr(vcpu));
+-	if (fault_status == ESR_ELx_FSC_PERM && (iss2 & ESR_ELx_HDBSSF))
+-		return 1;
+-#endif
+-
+ 	if (fault_status == ESR_ELx_FSC_FAULT) {
+ 		/* Beyond sanitised PARange (which is the IPA limit) */
+ 		if (fault_ipa >= BIT_ULL(get_kvm_ipa_limit())) {
+diff --git a/arch/arm64/kvm/reset.c b/arch/arm64/kvm/reset.c
+index 905f5ef872b0..89bb3cc4ee0e 100644
+--- a/arch/arm64/kvm/reset.c
++++ b/arch/arm64/kvm/reset.c
+@@ -174,7 +174,6 @@ bool kvm_arm_vcpu_is_finalized(struct kvm_vcpu *vcpu)
+ void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu)
+ {
+ 	void *sve_state = vcpu->arch.sve_state;
+-	struct page *hdbss_pg;
+ 
+ 	kvm_vcpu_unshare_task_fp(vcpu);
+ 	kvm_unshare_hyp(vcpu, vcpu + 1);
+@@ -182,16 +181,6 @@ void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu)
+ 		kvm_unshare_hyp(sve_state, sve_state + vcpu_sve_state_size(vcpu));
+ 	kfree(sve_state);
+ 	kfree(vcpu->arch.ccsidr);
+-	kvm_destroy_rec(vcpu);
+-	kfree(vcpu->arch.rec);
+-
+-#ifdef CONFIG_ARM64_HDBSS
+-	if (vcpu->arch.hdbss.br_el2) {
+-		hdbss_pg = phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2));
+-		if (hdbss_pg)
+-			__free_pages(hdbss_pg, HDBSSBR_SZ(vcpu->arch.hdbss.br_el2));
+-	}
+-#endif
+ }
+ 
+ static void kvm_vcpu_reset_sve(struct kvm_vcpu *vcpu)
+diff --git a/arch/arm64/tools/sysreg b/arch/arm64/tools/sysreg
+index 963177485fd8..baded26ab7d7 100644
+--- a/arch/arm64/tools/sysreg
++++ b/arch/arm64/tools/sysreg
+@@ -2477,34 +2477,6 @@ Sysreg	SMCR_EL2	3	4	1	2	6
+ Fields	SMCR_ELx
+ EndSysreg
+ 
+-Sysreg	HDBSSBR_EL2	3	4	2	3	2
+-Res0	63:56
+-Field	55:12	BADDR
+-Res0	11:4
+-Enum	3:0	SZ
+-	0b0001	8KB
+-	0b0010	16KB
+-	0b0011	32KB
+-	0b0100	64KB
+-	0b0101	128KB
+-	0b0110	256KB
+-	0b0111	512KB
+-	0b1000	1MB
+-	0b1001	2MB
+-EndEnum
+-EndSysreg
+-
+-Sysreg	HDBSSPROD_EL2	3	4	2	3	3
+-Res0	63:32
+-Enum	31:26	FSC
+-	0b000000	OK
+-	0b010000	ExternalAbort
+-	0b101000	GPF
+-EndEnum
+-Res0	25:19
+-Field	18:0	INDEX
+-EndSysreg
+-
+ Sysreg	DACR32_EL2	3	4	3	0	0
+ Res0	63:32
+ Field	31:30	D15
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 31d336759c2e..3cfaf2d78094 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -859,9 +859,6 @@ struct kvm {
+ 	struct notifier_block pm_notifier;
+ #endif
+ 	char stats_id[KVM_STATS_NAME_SIZE];
+-#ifdef CONFIG_ARM64_HDBSS
+-	KABI_EXTEND(bool enable_hdbss)
+-#endif
+ };
+ 
+ #define kvm_err(fmt, ...) \
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 0036cfaf5d69..1f67e4d6ff7b 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -102,7 +102,6 @@ struct kvm_userspace_memory_region {
+  */
+ #define KVM_MEM_LOG_DIRTY_PAGES	(1UL << 0)
+ #define KVM_MEM_READONLY	(1UL << 1)
+-#define KVM_MEM_HUGE_POD	(1UL << 9)
+ 
+ /* for KVM_IRQ_LINE */
+ struct kvm_irq_level {
+@@ -821,8 +820,6 @@ enum {
+ 	kvm_ioeventfd_flag_nr_deassign,
+ 	kvm_ioeventfd_flag_nr_virtio_ccw_notify,
+ 	kvm_ioeventfd_flag_nr_fast_mmio,
+-	kvm_ioeventfd_flag_nr_batch_begin,
+-	kvm_ioeventfd_flag_nr_batch_end,
+ 	kvm_ioeventfd_flag_nr_max,
+ };
+ 
+@@ -831,10 +828,6 @@ enum {
+ #define KVM_IOEVENTFD_FLAG_DEASSIGN  (1 << kvm_ioeventfd_flag_nr_deassign)
+ #define KVM_IOEVENTFD_FLAG_VIRTIO_CCW_NOTIFY \
+ 	(1 << kvm_ioeventfd_flag_nr_virtio_ccw_notify)
+-#define KVM_IOEVENTFD_FLAG_BATCH_BEGIN \
+-	(1 << kvm_ioeventfd_flag_nr_batch_begin)
+-#define KVM_IOEVENTFD_FLAG_BATCH_END \
+-	(1 << kvm_ioeventfd_flag_nr_batch_end)
+ 
+ #define KVM_IOEVENTFD_VALID_FLAG_MASK  ((1 << kvm_ioeventfd_flag_nr_max) - 1)
+ 
+@@ -926,25 +919,14 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_S390_SIE_PAGE_OFFSET 1
+ 
+ /*
+- * On arm64, machine type can be used to request both the machine type and
+- * the physical address size for the VM.
+- *
+- * Bits[11-8] are reserved for the ARM specific machine type.
+- *
+- * Bits[7-0] are reserved for the guest PA size shift (i.e, log2(PA_Size)).
+- * For backward compatibility, value 0 implies the default IPA size, 40bits.
++ * On arm64, machine type can be used to request the physical
++ * address size for the VM. Bits[7-0] are reserved for the guest
++ * PA size shift (i.e, log2(PA_Size)). For backward compatibility,
++ * value 0 implies the default IPA size, 40bits.
+  */
+-#define KVM_VM_TYPE_ARM_SHIFT		8
+-#define KVM_VM_TYPE_ARM_MASK		(0xfULL << KVM_VM_TYPE_ARM_SHIFT)
+-#define KVM_VM_TYPE_ARM(_type)		\
+-	(((_type) << KVM_VM_TYPE_ARM_SHIFT) & KVM_VM_TYPE_ARM_MASK)
+-#define KVM_VM_TYPE_ARM_NORMAL		KVM_VM_TYPE_ARM(0)
+-#define KVM_VM_TYPE_ARM_REALM		KVM_VM_TYPE_ARM(1)
+-
+ #define KVM_VM_TYPE_ARM_IPA_SIZE_MASK	0xffULL
+ #define KVM_VM_TYPE_ARM_IPA_SIZE(x)		\
+ 	((x) & KVM_VM_TYPE_ARM_IPA_SIZE_MASK)
+-
+ /*
+  * ioctls for /dev/kvm fds:
+  */
+@@ -1218,11 +1200,6 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_CAP_COUNTER_OFFSET 227
+ #define KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE 228
+ #define KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES 229
+-#define KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES 230
+-
+-#define KVM_CAP_ARM_WRITABLE_IMP_ID_REGS 239
+-
+-#define KVM_CAP_ARM_RME 300
+ 
+ #define KVM_CAP_SEV_ES_GHCB 500
+ #define KVM_CAP_HYGON_COCO_EXT 501
+@@ -1233,9 +1210,6 @@ struct kvm_ppc_resize_hpt {
+ /* support request to inject secret to CSV3 guest */
+ #define KVM_CAP_HYGON_COCO_EXT_CSV3_INJ_SECRET    (1 << 2)
+ 
+-#define KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 502
+-
+-#define KVM_CAP_ARM_HISI_IPIV 798
+ #define KVM_CAP_ARM_VIRT_MSI_BYPASS 799
+ 
+ #ifdef KVM_CAP_IRQ_ROUTING
+@@ -1499,12 +1473,12 @@ enum kvm_device_type {
+ #define KVM_DEV_TYPE_ARM_PV_TIME	KVM_DEV_TYPE_ARM_PV_TIME
+ 	KVM_DEV_TYPE_RISCV_AIA,
+ #define KVM_DEV_TYPE_RISCV_AIA		KVM_DEV_TYPE_RISCV_AIA
+-	KVM_DEV_TYPE_LOONGARCH_IPI,
+-#define KVM_DEV_TYPE_LOONGARCH_IPI	KVM_DEV_TYPE_LOONGARCH_IPI
+-	KVM_DEV_TYPE_LOONGARCH_EIOINTC,
+-#define KVM_DEV_TYPE_LOONGARCH_EIOINTC	KVM_DEV_TYPE_LOONGARCH_EIOINTC
+-	KVM_DEV_TYPE_LOONGARCH_PCHPIC,
+-#define KVM_DEV_TYPE_LOONGARCH_PCHPIC	KVM_DEV_TYPE_LOONGARCH_PCHPIC
++	KVM_DEV_TYPE_LA_IOAPIC = 0x100,
++#define KVM_DEV_TYPE_LA_IOAPIC		KVM_DEV_TYPE_LA_IOAPIC
++	KVM_DEV_TYPE_LA_IPI,
++#define KVM_DEV_TYPE_LA_IPI		KVM_DEV_TYPE_LA_IPI
++	KVM_DEV_TYPE_LA_EXTIOI,
++#define KVM_DEV_TYPE_LA_EXTIOI		KVM_DEV_TYPE_LA_EXTIOI
+ 
+ 	KVM_DEV_TYPE_MAX,
+ 
+@@ -1569,8 +1543,6 @@ struct kvm_user_data {
+ 	struct kvm_numa_info numa_info;
+ };
+ 
+-#define KVM_POD_TOUCHED_LOG       _IO(KVMIO,  0xfe)
+-
+ /* enable ucontrol for s390 */
+ struct kvm_s390_ucas_mapping {
+ 	__u64 user_addr;
+@@ -1659,7 +1631,6 @@ struct kvm_s390_ucas_mapping {
+ #define KVM_ARM_MTE_COPY_TAGS	  _IOR(KVMIO,  0xb4, struct kvm_arm_copy_mte_tags)
+ /* Available with KVM_CAP_COUNTER_OFFSET */
+ #define KVM_ARM_SET_COUNTER_OFFSET _IOW(KVMIO,  0xb5, struct kvm_arm_counter_offset)
+-#define KVM_ARM_GET_REG_WRITABLE_MASKS _IOR(KVMIO,  0xb6, struct reg_mask_range)
+ 
+ /* ioctl for SW vcpu init*/
+ #define KVM_SW64_VCPU_INIT	  _IO(KVMIO,  0xba)
+@@ -2477,13 +2448,4 @@ struct kvm_csv3_handle_memory {
+ /* get tmi version */
+ #define KVM_GET_TMI_VERSION	_IOR(KVMIO, 0xd2, u64)
+ 
+-/* Available with KVM_CAP_ARM_RME, only for VMs with KVM_VM_TYPE_ARM_REALM  */
+-struct kvm_arm_rmm_psci_complete {
+-	__u64 target_mpidr;
+-	__u32 psci_status;
+-	__u32 padding[3];
+-};
+-
+-#define KVM_ARM_VCPU_RMM_PSCI_COMPLETE	_IOW(KVMIO, 0xd6, struct kvm_arm_rmm_psci_complete)
+-
+ #endif /* __LINUX_KVM_H */
+diff --git a/tools/include/uapi/linux/kvm.h b/tools/include/uapi/linux/kvm.h
+index bd1a496b5448..3a2b617b6429 100644
+--- a/tools/include/uapi/linux/kvm.h
++++ b/tools/include/uapi/linux/kvm.h
+@@ -1193,8 +1193,6 @@ struct kvm_ppc_resize_hpt {
+ #define KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE 228
+ #define KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES 229
+ 
+-#define KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 502
+-
+ #ifdef KVM_CAP_IRQ_ROUTING
+ 
+ struct kvm_irq_routing_irqchip {
+-- 
+2.43.0
+

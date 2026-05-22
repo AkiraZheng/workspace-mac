@@ -65,10 +65,11 @@ upstream 是 ~/code/linux/linux
 
 ```
 Phase 0: 下载（脚本）→ /tmp/patches/000N-*.patch + metadata.json
+         → 创建 $KERNEL_REPO_PATH/patch_analysis/
 Phase 1: 并行分析（只读，不写文件）→ 屏幕输出分析结果
-Phase 1.5: 主 Agent 汇总 → merge_tasks.json + analysis_cache.json
-Phase 2: 串行 Merge（写入）→ 每 patch commit 后落盘 analyse.md
-Phase 3: 汇总 → summary.md
+Phase 1.5: 主 Agent 汇总 → patch_analysis/merge_tasks.json + analysis_cache.json
+Phase 2: 串行 Merge（写入）→ 每 patch commit 后落盘 patch_analysis/analyse.md
+Phase 3: 汇总 → patch_analysis/summary.md
 ```
 
 ## 文件清单
@@ -99,6 +100,13 @@ python3 scripts/download_patches.py \
 - `--source`：message-id（`<...@...>` 格式）、URL 或本地路径
 - `--proxy`：可选，不传则自动检测环境变量
 - 产出：`/tmp/patches/0001-*.patch` + `patchset.metadata.json`
+
+**下载完成后立即执行**：
+```bash
+mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
+```
+
+`$KERNEL_REPO_PATH/patch_analysis/` 目录用于存放所有分析阶段的结构化文件（JSON 中间产物 + 分析报告），确保不会因 AI 遗漏输出而丢失数据。**
 
 ---
 
@@ -301,7 +309,7 @@ b4 series-info <message-id>
 
 **步骤 4: 生成 merge_tasks.json 和 analysis_cache.json**
 
-写入 `/tmp/patches/merge_tasks.json` 和 `/tmp/patches/analysis_cache.json`。
+写入 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json` 和 `$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json`。
 
 **merge_tasks.json 必须严格按照以下 schema 生成，不可自行增减字段：**
 
@@ -401,7 +409,7 @@ b4 series-info <message-id>
 ## Phase 2：串行 Merge
 
 ### 启动
-读取 `/tmp/patches/merge_tasks.json`。
+读取 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json`。
 
 **执行顺序**：先遍历 `deps_order`（若有），再遍历 `merge_order`，各自按 `seq` 升序处理。若 `deps_order` 为空则直接从 `merge_order` 开始。
 
@@ -474,7 +482,7 @@ git commit -m "<patch subject>" --author="<patch author>"
 
 **合入过程数据暂存，不写 analyse.md。Phase 3 统一落盘。**
 
-将当前 task 的合入经验追加记录到 `/tmp/patches/merge_tasks.json` 的 `execution_log` 中，供 Phase 3 使用：
+将当前 task 的合入经验追加记录到 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json` 的 `execution_log` 中，供 Phase 3 使用：
 
 - 冲突解决过程：描述 + 解决方式（Ours/Theirs 决策）
 - 编译修复记录：修改了哪些文件、修改原因
@@ -521,7 +529,7 @@ python3 scripts/generate_diff_report.py \
   --patch-file "/tmp/patches/<task_id>-<name>.patch" \
   --repo-path "$KERNEL_REPO_PATH" \
   --commit <commit_hash> \
-  > "/tmp/patches/<task_id>-diff.txt"
+  > "$KERNEL_REPO_PATH/patch_analysis/<task_id>-diff.txt"
 
 # 4. 按模板写入
 ```
@@ -536,13 +544,35 @@ python3 scripts/generate_diff_report.py \
 
 **然后写入汇总**：
 - 读取 `$KERNEL_REPO_PATH/patch_analysis/` 下所有 `*-analys.md`
-- 读取 `/tmp/patches/merge_tasks.json` 获取执行历史
+- 读取 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json` 获取执行历史
 - 按 `references/output-templates.md` 中的 summary.md 模板写入 `$KERNEL_REPO_PATH/patch_analysis/summary.md`
 
 **最终验证**：
 ```bash
 ls -la "$KERNEL_REPO_PATH/patch_analysis/"
 # 应包含：0001-*-analys.md, 0002-*-analys.md, ..., summary.md
+```
+
+**Phase 3 完成后必须输出提醒**（不依赖 AI 记忆，硬编码到流程中）：
+
+```
+═══════════════════════════════════════════════
+  ⚠️ 任务完成 — 请检查分析文件
+═══════════════════════════════════════════════
+
+  执行以下命令检查：
+    ls "$KERNEL_REPO_PATH/patch_analysis/"
+
+  必须包含：
+    ✓ 0001-*-analys.md ~ 000N-*-analys.md  (每个 patch)
+    ✓ summary.md                            (汇总报告)
+    ✓ merge_tasks.json                      (调度文件)
+    ✓ analysis_cache.json                   (分析缓存)
+    ✓ 0001-diff.txt ~ 000N-diff.txt         (diff 报告)
+
+  若缺少任何文件 → 重新加载 merge-patchset skill，
+  告知 AI 补充生成缺少的分析文件。
+═══════════════════════════════════════════════
 ```
 
 ## Phase 4：清理中间产物
@@ -554,6 +584,9 @@ ls -la "$KERNEL_REPO_PATH/patch_analysis/"
 ```
 $KERNEL_REPO_PATH/patch_analysis/000N-*-analys.md  # 每 patch 的分析报告
 $KERNEL_REPO_PATH/patch_analysis/summary.md        # 汇总报告
+$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json  # 合并任务调度文件
+$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json # Phase 1 分析缓存
+$KERNEL_REPO_PATH/patch_analysis/<task_id>-diff.txt  # diff 报告
 git commits（已合入内核仓库）
 ```
 
@@ -562,12 +595,12 @@ git commits（已合入内核仓库）
 | 路径 | 说明 |
 |------|------|
 | `/tmp/patches/0001-*.patch` ~ `000N-*.patch` | 下载的原始 patch 文件 |
-| `/tmp/patches/<task_id>-diff.txt` | 每 patch 的 diff 报告临时文件 |
+| `/tmp/patches/deps/*.patch` | 上游依赖 patch 文件 |
 | `/tmp/patches/patchset.metadata.json` | patchset 元数据 |
-| `/tmp/patches/merge_tasks.json` | 合并任务调度文件 |
-| `/tmp/patches/analysis_cache.json` | Phase 1 分析缓存 |
 | `*.rej`（内核仓库下） | git apply --reject 产生 |
 | 编译产物 | `.o`、`Image` 等 |
+
+⚠️ **不建议清理** `$KERNEL_REPO_PATH/patch_analysis/` — 其中包含分析报告、调度文件和 diff 报告，是本次合入的完整记录，有持久化价值。
 
 ### 输出格式
 
@@ -576,9 +609,12 @@ git commits（已合入内核仓库）
 
 以下中间产物已不再需要，是否需要删除？
 
-1. /tmp/patches/ (N 个 .patch + 3 个 .json) — 下载和分析缓存
-2. *.rej 文件 — git apply 冲突残留
-3. 编译产物（make clean 清理）
+1. /tmp/patches/ (N 个 .patch + 元数据) — 下载的原始 patch
+2. /tmp/patches/deps/ — 上游依赖 patch
+3. *.rej 文件 — git apply 冲突残留
+4. 编译产物（make clean 清理）
+
+⚠️ $KERNEL_REPO_PATH/patch_analysis/ 不建议清理 — 含完整分析记录
 
 请选择要清理的项目（输入编号，逗号分隔，直接回车跳过）：
 ```
@@ -587,7 +623,7 @@ git commits（已合入内核仓库）
 
 ## 任务恢复
 
-重启时读 `merge_tasks.json`，找 `status ≠ "done"` 的 task：
+重启时读 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json`，找 `status ≠ "done"` 的 task：
 - 工作区干净 → 从 PRECHECK 开始
 - 有未提交改动 → 提示用户清理
 - am 中间态 → `git am --abort`，重新开始

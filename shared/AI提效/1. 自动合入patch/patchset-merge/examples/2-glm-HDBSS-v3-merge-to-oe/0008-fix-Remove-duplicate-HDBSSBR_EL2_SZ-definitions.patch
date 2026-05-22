@@ -1,0 +1,36 @@
+From b812b22ac2379e79cddcec30947b9ed8b832d61d Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 22 May 2026 20:26:16 +0800
+Subject: [PATCH 8/8] fix: Remove duplicate HDBSSBR_EL2_SZ definitions
+
+The HDBSSBR_EL2_SZ_* enums are auto-generated from sysreg file,
+so remove manual definitions in sysreg.h to avoid redefinition
+warnings.
+---
+ arch/arm64/include/asm/sysreg.h | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index a6ae771f23cc..141173557fdf 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1160,16 +1160,6 @@
+ #define HDBSS_MAX_SIZE		HDBSSBR_EL2_SZ_2MB
+ 
+ #define HDBSSBR_EL2_SZ_MASK		GENMASK(3, 0)
+-#define HDBSSBR_EL2_SZ_4KB		0
+-#define HDBSSBR_EL2_SZ_8KB		1
+-#define HDBSSBR_EL2_SZ_16KB		2
+-#define HDBSSBR_EL2_SZ_32KB		3
+-#define HDBSSBR_EL2_SZ_64KB		4
+-#define HDBSSBR_EL2_SZ_128KB		5
+-#define HDBSSBR_EL2_SZ_256KB		6
+-#define HDBSSBR_EL2_SZ_512KB		7
+-#define HDBSSBR_EL2_SZ_1MB		8
+-#define HDBSSBR_EL2_SZ_2MB		9
+ 
+ #define HDBSSPROD_EL2_INDEX_MASK	GENMASK(18, 0)
+ 
+-- 
+2.43.0
+

@@ -175,6 +175,9 @@ Phase 3 汇总落盘时使用，由主 Agent 读取所有 analyse.md 后填入�
 
 Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 schema，不可自行增减或重命名字段。**
 
+> **存储路径**：`$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json`
+> **辅助文件**：`$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json`
+
 ```json
 {
   "patchset_info": {
