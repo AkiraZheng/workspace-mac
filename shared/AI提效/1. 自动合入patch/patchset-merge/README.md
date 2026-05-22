@@ -6,7 +6,9 @@ Linux 内核 patchset 多 Agent 自动合入与冲突解决 Skill。
 
 - 从 lore.kernel.org、URL 或本地目录获取 patchset
 - 多 Agent 并行分析每个 patch 的依赖、bugfix、冲突风险
-- 串行合入：`git am --3way` → 冲突解决 → 编译验证 → commit → review
+- PR 聚合：优先找整个 PR 的提交内容，避免遗漏分散 patch
+- 自动拉取上游依赖 patch（Phase 1.5 末尾）
+- 串行合入：`git am --3way` → 冲突解决 → **整个仓库编译验证** → commit → review
 - 每 patch 落盘分析报告，最终汇总
 - 10 轮自动重试上限，超限后输出具体代码级方案供用户选择
 - 跨 patch 修复：rebase → amend → 重编译 → continue
@@ -67,28 +69,39 @@ skill 自动设置的环境变量：
 
 skill 工作流：
 ```
-Phase 0: 下载 → /tmp/patches/
-Phase 1: 并行分析（只读，不写文件）
-Phase 1.5: 主 Agent 汇总 → merge_tasks.json
-Phase 2: 串行 Merge（每 patch commit 后落盘 analyse.md）
-Phase 3: 汇总 → summary.md
-Phase 4: 清理中间产物
+Phase 0:  下载 → /tmp/patches/000N-*.patch + metadata.json
+          → 创建 $KERNEL_REPO_PATH/patch_analysis/
+Phase 1:  并行分析（只读，不写文件）
+Phase 1.5: 主 Agent 汇总 → patch_analysis/merge_tasks.json + analysis_cache.json
+          → 全局预览 → 用户确认 → 拉取上游依赖（自动）
+Phase 2:  串行 Merge → 编译验证 → 每 patch commit 后落盘 analyse.md
+Phase 3:  汇总 → patch_analysis/summary.md → 检查提醒
+Phase 4:  清理中间产物（可选，patch_analysis/ 不清理）
 ```
 
 ## 输出
 
 ```
-./patch_analysis/
-  0001-<name>-analys.md    # 每个 patch 的分析报告
+$KERNEL_REPO_PATH/patch_analysis/
+  0001-<name>-analys.md       # 每个 patch 的分析报告
   0002-<name>-analys.md
   ...
-  summary.md                # 汇总报告
+  summary.md                   # 汇总报告
+  merge_tasks.json             # 合并任务调度文件
+  analysis_cache.json          # Phase 1 分析缓存
+  0001-diff.txt ~ 000N-diff.txt # 每 patch 的 diff 报告
+
+/tmp/patches/
+  0001-*.patch ~ 000N-*.patch  # 下载的原始 patch 文件（可清理）
+  deps/                         # 上游依赖 patch（可清理）
+  patchset.metadata.json        # patchset 元数据（可清理）
 ```
 
 每份分析报告包含：
 - 功能描述与关联模块
 - 依赖分析（高版本/bugfix/前置 patch）
-- Revert 需求评估（必要性等级）
+- PR 映射聚合（优先按 PR 分组）
+- Revert 需求评估（必要性等级 + revert_cmd）
 - 风险程度（高/中/低）
 - 人工 review 需求度
 - 建议验证冒烟内容
@@ -99,26 +112,42 @@ Phase 4: 清理中间产物
 ## 架构
 
 ```
-SKILL.md        # 主 Skill 文件
-scripts/        # 确定性脚本
-  download_patches.py
-  generate_diff_report.py
-references/     # 参考文档
-  diagnostic-guide.md     # Ours/Theirs 决策树
-  output-templates.md     # 分析报告模板
-  code-review-expert/     # 捆绑 review skill
-tests/          # 单元测试
+SKILL.md                      # 主 Skill 文件
+AGENTS.md                     # 开发工作区配置
+scripts/                      # 确定性脚本
+  download_patches.py           # 统一下载入口（b4/wget/本地）
+  generate_diff_report.py       # diff 对比生成
+  topo_sort.py                  # 依赖拓扑排序
+references/                   # 参考文档
+  diagnostic-guide.md           # Ours/Theirs 冲突诊断决策树
+  output-templates.md           # 输出模板 + schema 定义
+  code-review-expert/           # 捆绑 review skill
+features/                     # 草案设计 & 待办
+  topo_sort.md                  # 拓扑排序设计稿
+  revert-lookup.md              # revert 依赖查找设计稿
+  todo-issue.md                 # 已知问题及改进方向
+examples/                     # 实际运行案例
+  1-DS-HDBSS-v3-merge-to-oe/    # DS 模型运行示例
+  2-glm-HDBSS-v3-merge-to-oe/   # GLM5 模型运行示例
+docs/                         # 设计文档（specs/plans）
+tests/                        # 单元测试（113 个）
+  test_download_patches.py      # 下载脚本测试
+  test_generate_diff_report.py  # diff 报告测试
+  test_topo_sort.py             # 拓扑排序测试
+  test_schema.py                # merge_tasks.json + analysis_cache.json schema 校验
+install.sh                    # 一键安装部署脚本
 ```
 
 ## 核心约束
 
 1. 逐个合入 + 逐个 commit
-2. 每 task 完成后停下确认
+2. 仅在出问题时与用户交互（冲突超限/循环依赖/重复 patch）
 3. 每 commit 后 code review
-4. Revert 逐个 commit（逆序）
-5. 每 patch 编译验证
+4. Revert 逐个 commit（逆序），优先按 PR 整体 revert
+5. **每 patch 必须整个仓库编译验证**：0 error + 最终产物存在，禁止跳过或只编译部分文件
 6. Merge 串行，分析并行
 7. 中文输出
-8. 只取改动行
+8. 只取改动行（`+`/`-` 开头的实际修改行）
 9. 修改严格归所属 patch
 10. 编译通过 + 功能正常是第一指标
+11. 结构化文件（JSON）存储到 `patch_analysis/`，永久保留不清理

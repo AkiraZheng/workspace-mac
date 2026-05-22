@@ -442,10 +442,41 @@ git am --3way <patch>
 冲突解决按 Ours/Theirs 决策表（`references/diagnostic-guide.md`）。
 
 ### BUILD
+
+**强制约束：必须编译并验证整个仓库，不可跳过、不可只编译部分文件！**
+
 ```bash
-$BUILD_CMD -j$(nproc)
-# 通过条件: 0 error + 编译产物存在
-# 超时: 120 秒
+# 执行完整仓库编译（不是单个文件、不是单个目录）
+$BUILD_CMD -j$(nproc) 2>&1 | tee /tmp/patch_build.log
+```
+
+**通过条件（必须同时满足，缺一不可）**：
+1. **整个仓库编译 error 数 = 0**：从完整编译输出中提取 error 计数，必须为 0
+   - `grep -c "error:" /tmp/patch_build.log` 或手工检查输出，返回 0 才算通过
+   - warning 不计入 error，但不能忽略 warning 中提示的功能性问题
+2. **最终产物存在**：验证编译产物（如 `arch/$KERNEL_ARCH/boot/Image` 或对应架构的 vmlinux）
+3. **不允许跳过任何编译单元**：不可使用 `-k` 继续编译、不可忽略错误
+
+**产物验证命令**：
+```bash
+# 验证最终产物存在（根据实际 ARCH 调整，如 arm64 用 Image，x86 用 bzImage）
+test -f "arch/$KERNEL_ARCH/boot/Image" && echo "产物存在" || echo "产物缺失，编译不通过"
+```
+
+**不通过时的处理**：
+- **立即停止，禁止进入 COMMIT 步骤**
+- 分析编译错误原因
+- 最小量修改源码修复
+- 重新执行完整编译直到通过
+- 若涉及非本 patch 相关的 config 问题，临时修改 config 后编译，通过后 `git restore` 掉
+
+**每个 task 完成后必须显式输出**（不可省略）：
+```
+[BUILD 强制检查] task_id=<task_id>
+编译范围:  整个仓库（$BUILD_CMD）
+error 数:  <从编译输出提取>
+产物验证:  <ls 检查结果>
+结论:      ✅ 整个仓库编译通过 / ❌ 编译失败，修复中
 ```
 
 ### BUILD_FIX
