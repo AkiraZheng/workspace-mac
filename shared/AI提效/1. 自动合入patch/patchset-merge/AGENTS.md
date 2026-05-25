@@ -2,7 +2,7 @@
 
 ## 仓库角色
 
-本仓库是 **merge-patchset skill 的开发和配置工作区**，并非 skill 的运行目录。实际的 skill 部署在 `/root/.claude/skills/merge-patchset/` 和 `/root/.agents/skills/merge-patchset/`（两者通过 symlink 关联）。修改 skill 文件后需同步到部署目录。
+本仓库是 **merge-patchset skill 的开发和配置工作区**，并非 skill 的运行目录。实际的 skill 部署在 `~/.agents/skills/merge-patchset/`（`~/.claude/skills/merge-patchset/` 和 `~/.config/opencode/skills/merge-patchset/` 通过 symlink 关联）。修改 skill 文件后需同步到部署目录。
 
 ## 目标内核仓库
 
@@ -98,7 +98,7 @@ skill 采用多 agent 并行+串行模式：
 
 ## 编码规范
 
-skill 代码需遵循 karpathy-guidelines（路径：`/root/.config/opencode/skills/karpathy-guidelines/.../SKILL.md`）：
+skill 代码需遵循 karpathy-guidelines（路径：`~/.config/opencode/skills/karpathy-guidelines/.../SKILL.md`）：
 - 先思考再编码，明确假设
 - 最简代码解决问题，不过度抽象
 - 手术式修改，不碰无关代码
@@ -109,11 +109,11 @@ skill 代码需遵循 karpathy-guidelines（路径：`/root/.config/opencode/ski
 ## Skill 部署流程
 
 ```bash
-# 一键安装（运行测试 + 部署到 /root/.agents/skills/merge-patchset/）
+# 一键安装（运行测试 + 部署到 ~/.agents/skills/merge-patchset/）
 bash install.sh
 
 # 手动部署
-cp SKILL.md /root/.claude/skills/merge-patchset/SKILL.md
-cp SKILL.md /mnt/shared/AI提效/1.\ 自动合入patch/patchset-merge/SKILL.md
-cp references/* /root/.claude/skills/merge-patchset/references/
+cp SKILL.md ~/.claude/skills/merge-patchset/SKILL.md
+cp SKILL.md "$WORKSPACE/SKILL.md"
+cp references/* ~/.claude/skills/merge-patchset/references/
 ```

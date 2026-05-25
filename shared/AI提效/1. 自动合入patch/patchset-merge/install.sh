@@ -6,7 +6,7 @@
 set -o pipefail
 
 WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
-SKILL_DIR="/root/.agents/skills/merge-patchset"
+SKILL_DIR="$HOME/.agents/skills/merge-patchset"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -183,6 +183,7 @@ REQUIRED_FILES=(
     "$WORKSPACE/SKILL.md"
     "$WORKSPACE/scripts/download_patches.py"
     "$WORKSPACE/scripts/generate_diff_report.py"
+    "$WORKSPACE/scripts/topo_sort.py"
     "$WORKSPACE/references/diagnostic-guide.md"
     "$WORKSPACE/references/output-templates.md"
     "$WORKSPACE/references/code-review-expert/SKILL.md"
@@ -228,28 +229,48 @@ echo ""
 # ==================================================================
 echo "[4/5] 安装到部署目录..."
 
-mkdir -p "$SKILL_DIR/references/code-review-expert"
-mkdir -p "$SKILL_DIR/scripts"
+DEPLOY_FAILED=0
 
-cp "$WORKSPACE/SKILL.md" "$SKILL_DIR/SKILL.md"
-ok "SKILL.md"
+copy_or_fail() {
+    # $1 = source, $2 = dest (relative to SKILL_DIR)
+    local src="$1" dst="$SKILL_DIR/$2"
+    mkdir -p "$(dirname "$dst")"
+    if [ ! -f "$src" ]; then
+        err "源文件不存在: $src"
+        DEPLOY_FAILED=1
+        return 1
+    fi
+    if cp "$src" "$dst"; then
+        ok "$2"
+        return 0
+    else
+        err "拷贝失败: $src → $dst"
+        DEPLOY_FAILED=1
+        return 1
+    fi
+}
 
-cp "$WORKSPACE/references/diagnostic-guide.md" \
-   "$SKILL_DIR/references/diagnostic-guide.md"
-cp "$WORKSPACE/references/output-templates.md" \
-   "$SKILL_DIR/references/output-templates.md"
-cp "$WORKSPACE/references/code-review-expert/SKILL.md" \
-   "$SKILL_DIR/references/code-review-expert/SKILL.md"
-ok "references/ (3 文件)"
+copy_or_fail "$WORKSPACE/SKILL.md"                              "SKILL.md"
+copy_or_fail "$WORKSPACE/references/diagnostic-guide.md"         "references/diagnostic-guide.md"
+copy_or_fail "$WORKSPACE/references/output-templates.md"         "references/output-templates.md"
+copy_or_fail "$WORKSPACE/references/code-review-expert/SKILL.md" "references/code-review-expert/SKILL.md"
+copy_or_fail "$WORKSPACE/scripts/download_patches.py"            "scripts/download_patches.py"
+copy_or_fail "$WORKSPACE/scripts/generate_diff_report.py"        "scripts/generate_diff_report.py"
+copy_or_fail "$WORKSPACE/scripts/topo_sort.py"                   "scripts/topo_sort.py"
 
-cp "$WORKSPACE/scripts/download_patches.py" \
-   "$SKILL_DIR/scripts/download_patches.py"
-cp "$WORKSPACE/scripts/generate_diff_report.py" \
-   "$SKILL_DIR/scripts/generate_diff_report.py"
-ok "scripts/ (2 文件)"
+# 双向同步：将部署的 SKILL.md 回拷到工作区
+if cp "$SKILL_DIR/SKILL.md" "$WORKSPACE/SKILL.md"; then
+    ok "双向同步完成"
+else
+    warn "双向同步失败（不阻塞安装），请手动执行: cp $SKILL_DIR/SKILL.md $WORKSPACE/SKILL.md"
+fi
 
-cp "$SKILL_DIR/SKILL.md" "$WORKSPACE/SKILL.md"
-ok "双向同步完成"
+if [ "$DEPLOY_FAILED" -eq 1 ]; then
+    echo ""
+    err "部署失败，请检查上方错误信息后重试。"
+    exit 1
+fi
+
 echo ""
 
 # ==================================================================
@@ -257,31 +278,51 @@ echo ""
 # ==================================================================
 echo "[5/5] 验证部署..."
 
-echo "  部署清单:"
-echo "  ─────────────────────────────────────────"
-ls -1 "$SKILL_DIR/"
-echo "  ─────────────────────────────────────────"
-echo "  references/:"
-ls -1 "$SKILL_DIR/references/"
-echo "  ─────────────────────────────────────────"
-echo "  scripts/:"
-ls -1 "$SKILL_DIR/scripts/" 2>/dev/null || echo "  (空)"
+VERIFY_FAILED=0
+
+verify_file() {
+    # $1 = relative path under SKILL_DIR, $2 = display name
+    local path="$SKILL_DIR/$1" name="${2:-$1}"
+    if [ -f "$path" ]; then
+        ok "$name"
+        return 0
+    else
+        err "缺失: $name ($path)"
+        VERIFY_FAILED=1
+        return 1
+    fi
+}
+
+verify_file "SKILL.md"
+verify_file "references/diagnostic-guide.md"
+verify_file "references/output-templates.md"
+verify_file "references/code-review-expert/SKILL.md"
+verify_file "scripts/download_patches.py"
+verify_file "scripts/generate_diff_report.py"
+verify_file "scripts/topo_sort.py"
+
+echo ""
 
 # 确认 symlink
-for link in /root/.claude/skills/merge-patchset /root/.config/opencode/skills/merge-patchset; do
+for link in "$HOME/.claude/skills/merge-patchset" "$HOME/.config/opencode/skills/merge-patchset"; do
     if [ -L "$link" ]; then
-        echo "  ─────────────────────────────────────────"
         ok "$(basename "$(dirname "$link")"):  $(readlink "$link")"
     fi
 done
 
+if [ "$VERIFY_FAILED" -eq 1 ]; then
+    echo ""
+    err "部署验证失败：部分文件未成功拷贝到 $SKILL_DIR"
+    exit 1
+fi
+
 echo ""
 echo "============================================"
-echo "  安装完成!"
+echo "  ${GREEN}安装完成!${NC}"
 echo "============================================"
 echo ""
 echo "  部署位置: $SKILL_DIR"
-echo "  SKILL.md: $(wc -l < "$SKILL_DIR/SKILL.md") 行"
+echo "  SKILL.md: $(wc -l < "$SKILL_DIR/SKILL.md" 2>/dev/null || echo "???") 行"
 echo ""
 
 # 提示缺少的工具
