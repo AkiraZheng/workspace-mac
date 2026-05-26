@@ -108,6 +108,7 @@ Phase 3: 汇总 → patch_analysis/summary.md
 - `$SCRIPTS_DIR/generate_analyse_md.py` — 确定性生成 analyse.md
 - `$SCRIPTS_DIR/generate_summary_md.py` — 确定性生成 summary.md
 - `$SCRIPTS_DIR/verify_analyse_format.py` — 格式验证门禁
+- `$SCRIPTS_DIR/merge_order_sort.py` — 全量排序（revert优先+deps插入+稳定顺序）
 - `$SCRIPTS_DIR/detect_build_target.sh` — 动态检测编译目标
 - `references/diagnostic-guide.md` — 冲突诊断决策树（Ours/Theirs）
 - `references/output-templates.md` — analyse.md / summary.md 模板 + 屏幕输出格式
@@ -322,8 +323,34 @@ b4 series-info <message-id>
 - `introduced` 符号的交叉引用 → 语义冲突
 - `used ∩ introduced` → 强依赖（P_j 调用了 P_i 引入的符号）
 
-**步骤 2: 依赖图 + 拓扑排序**
-构建有向图 → 检测循环依赖 → 输出 merge_order。与原始 patchset 顺序对比，说明调整原因。
+**步骤 2: 依赖图 + 稳定拓扑排序**
+
+**核心原则：原始 patch 相对顺序不变。** 只在发现反向依赖时才调整。
+
+```bash
+# 输入: 从 analysis_cache.json 取每个 patch 的 introduced_symbols 和 referenced_symbols
+# 加上 original_order（从 patch 文件名 0001~000N 提取）
+
+python3 "$SCRIPTS_DIR/topo_sort.py" << 'JSON'
+{
+  "original_order": ["0001","0002","0003","0004","0005"],
+  "0001": {"introduced_symbols": ["func_a"], "referenced_symbols": []},
+  "0002": {"introduced_symbols": [], "referenced_symbols": ["func_a"]},
+  "0003": {"introduced_symbols": ["func_b"], "referenced_symbols": ["func_a"]},
+  ...
+}
+JSON
+```
+
+**排序规则**：
+
+| 条件 | 处理方式 |
+|------|---------|
+| 无依赖冲突 | 保持原始顺序 |
+| B 引用 A 的符号，原始顺序 A < B | 不调整（原本顺序正确） |
+| B 引用 A 的符号，原始顺序 A > B | **调整**：A 移到 B 之前 |
+| 循环依赖 | 暂停，等用户决策 |
+| deps_order / revert 插入 | Phase 1.5 步骤 3/6 处理（插入到需要的位置,不影响原始 patch 相对顺序） |
 
 **步骤 3: 全局 Revert 清单去重 + PR 聚合 + revert_cmd 推荐**
 
@@ -461,7 +488,49 @@ b4 series-info <message-id>
   dep-003: 宏定义修正
 ```
 
-**无上游依赖时**：跳过此步骤，直接进入 Phase 2。
+**无上游依赖时**：跳过此步骤，直接进入步骤 7。
+
+**步骤 7: 全量排序（merge_order_sort）**
+
+deps 拉取完成后，将 deps_order 和 merge_order 按优先级合并为最终执行序列：
+
+```bash
+python3 "$SCRIPTS_DIR/merge_order_sort.py" \
+  --merge-tasks "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --output "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json"
+```
+
+**排序规则（方案 A）**：
+
+| 优先级 | 规则 | 说明 |
+|--------|------|------|
+| 1（最高）| 所有含 `pre_revert` 的任务排在前面 | revert 先执行 |
+| 2 | `deps_order` 按依赖插入到需要的 patch 之前 | dep 插入到最早需要它的 merge 任务之前 |
+| 3 | 原始 patch 保持稳定相对顺序 | topo_sort 已保证 |
+
+脚本行为：
+- revert 组的依赖 dep → 一并放入 revert 组（最前面）
+- apply 组的依赖 dep → 插入到 apply 组内部对应位置
+- deps_order 清空（全部已移入 merge_order）
+- 重新分配 seq 序号
+
+**输出示例**：
+```
+合并排序完成：
+  ✓ 2 个 deps 已插入 merge_order, deps_order 已清空
+  ✓ 2 个 revert 组排在最前面: dep-002, 0002
+    含 1 个 revert 依赖: dep-002
+  总计: 7 个任务
+
+Seq   Task       Action   Subject
+1     dep-002    dep      stage2 refactor
+2     0002       revert   DBM attr
+3     dep-001    dep      helper function
+4     0001       apply    HDBSS sysreg
+5     0003       apply    FEAT cpufeat
+6     0004       apply    HDBSS core
+7     0005       apply    ioctl doc
+```
 
 ---
 
@@ -478,7 +547,7 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --step BUILD --result in_progress
 ```
 
-**执行顺序**：先遍历 `deps_order`（若有），再遍历 `merge_order`，各自按 `seq` 升序处理。若 `deps_order` 为空则直接从 `merge_order` 开始。
+**执行顺序**：遍历 `merge_order`，按 `seq` 升序处理（步骤 7 已将 deps_order 和 revert 全部合并入 merge_order）。
 
 ### 状态机
 
