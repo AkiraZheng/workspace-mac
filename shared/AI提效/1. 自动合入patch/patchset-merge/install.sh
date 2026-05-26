@@ -183,7 +183,10 @@ REQUIRED_FILES=(
     "$WORKSPACE/SKILL.md"
     "$WORKSPACE/scripts/download_patches.py"
     "$WORKSPACE/scripts/generate_diff_report.py"
+    "$WORKSPACE/scripts/detect_build_target.sh"
     "$WORKSPACE/scripts/topo_sort.py"
+    "$WORKSPACE/scripts/verify_build.sh"
+    "$WORKSPACE/scripts/gatekeeper.py"
     "$WORKSPACE/references/diagnostic-guide.md"
     "$WORKSPACE/references/output-templates.md"
     "$WORKSPACE/references/code-review-expert/SKILL.md"
@@ -254,9 +257,15 @@ copy_or_fail "$WORKSPACE/SKILL.md"                              "SKILL.md"
 copy_or_fail "$WORKSPACE/references/diagnostic-guide.md"         "references/diagnostic-guide.md"
 copy_or_fail "$WORKSPACE/references/output-templates.md"         "references/output-templates.md"
 copy_or_fail "$WORKSPACE/references/code-review-expert/SKILL.md" "references/code-review-expert/SKILL.md"
-copy_or_fail "$WORKSPACE/scripts/download_patches.py"            "scripts/download_patches.py"
+copy_or_fail "$WORKSPACE/scripts/download_patches.py"             "scripts/download_patches.py"
 copy_or_fail "$WORKSPACE/scripts/generate_diff_report.py"        "scripts/generate_diff_report.py"
-copy_or_fail "$WORKSPACE/scripts/topo_sort.py"                   "scripts/topo_sort.py"
+copy_or_fail "$WORKSPACE/scripts/detect_build_target.sh"         "scripts/detect_build_target.sh"
+copy_or_fail "$WORKSPACE/scripts/verify_build.sh"           "scripts/verify_build.sh"
+copy_or_fail "$WORKSPACE/scripts/gatekeeper.py"              "scripts/gatekeeper.py"
+
+# 确保 bash 脚本可执行
+chmod +x "$SKILL_DIR/scripts/detect_build_target.sh"
+chmod +x "$SKILL_DIR/scripts/verify_build.sh"
 
 # 双向同步：将部署的 SKILL.md 回拷到工作区
 if cp "$SKILL_DIR/SKILL.md" "$WORKSPACE/SKILL.md"; then
@@ -308,7 +317,9 @@ verify_file "references/output-templates.md"
 verify_file "references/code-review-expert/SKILL.md"
 verify_file "scripts/download_patches.py"
 verify_file "scripts/generate_diff_report.py"
-verify_file "scripts/topo_sort.py"
+verify_file "scripts/detect_build_target.sh"
+verify_file "scripts/verify_build.sh"
+verify_file "scripts/gatekeeper.py"
 
 echo ""
 

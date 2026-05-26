@@ -218,6 +218,13 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
     "target_branch": "$KERNEL_BRANCH",
     "build_target": "$BUILD_CMD"
   },
+  "workflow_hints": {
+    "BUILD_FIX": "只修改 patch 相关文件；config 问题临时修改后 git restore；错误超过 10 个时暂停等待用户决策",
+    "COMMIT_ORDER": "必须按 merge_order 顺序，每个 patch 一个 commit",
+    "REVERT_POLICY": "逆序 revert（最新→最旧），每 revert 一个就 commit 一个",
+    "BUILD_REQUIREMENT": "编译整个仓库 $BUILD_CMD -j$(nproc)，error=0 + 产物存在"
+  },
+  "current_state": null,
   "global_revert_order": [
     {
       "pr_id": "PR #123",
@@ -331,6 +338,7 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
 | `special_notes` | ✓ | string | 合入注意事项 |
 | `pr_mapping` | ✓ | dict | PR 映射聚合（见下方 pr_mapping 字段说明） |
 | `execution_log` | ✓ | list | 初始 `[]`，Phase 2 动态追加 |
+| `state_log` | - | list | gatekeeper 自动追加 `[{"step":"BUILD","time":"...","result":"pass","error_count":0}]` |
 
 ### pr_mapping 字段说明
 
@@ -359,9 +367,32 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
 | 字段 | 必填 | 说明 |
 |------|:--:|------|
 | `patchset_info` | ✓ | 来源/目标/架构等基本信息 |
+| `workflow_hints` | ✓ | 关键流程提示（压缩后恢复上下文用，初始由 gatekeeper 自动注入） |
+| `current_state` | ✓ | 当前执行状态（null 或 `{"phase","task_id","step","status","last_update"}`；gatekeeper 自动管理） |
 | `global_revert_order` | ✓ | PR 聚合的全局 revert 列表，Phase 2 PRE_REVERT 阶段消费 |
 | `deps_order` | ✓ | 上游依赖 patch 列表（初始 `[]`），Phase 1.5 步骤 6 填充 |
 | `merge_order` | ✓ | 主体合入任务列表，Phase 2 主要消费 |
+
+### current_state 字段说明
+
+| 字段 | 说明 |
+|------|------|
+| `phase` | 当前阶段（如 `PHASE_2_MERGE`） |
+| `task_id` | 当前 task_id（如 `0003`） |
+| `step` | 当前步骤（`BUILD`/`COMMIT`/`REVIEW`/`DONE`） |
+| `status` | `in_progress`/`pass`/`fail` |
+| `last_update` | 最后更新时间（ISO 8601） |
+
+**恢复机制**：
+```
+# Phase 0 或任务启动时检查
+python3 gatekeeper.py --merges-file merge_tasks.json --restore
+# exit 10 → 有未完成工作，需要恢复
+# exit 0  → 无未完成工作
+
+# 恢复后清除标记
+python3 gatekeeper.py --merges-file merge_tasks.json --restore --clear
+```
 
 **Phase 2 执行顺序**：先遍历 `deps_order`（若有），再遍历 `merge_order`，各自按 `seq` 升序。
 | `execution_log` | ✓ | list | 初始 `[]`，Phase 2 动态追加 |

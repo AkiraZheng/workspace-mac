@@ -134,7 +134,34 @@ python3 "$SCRIPTS_DIR/download_patches.py" \
 mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
 ```
 
-`$KERNEL_REPO_PATH/patch_analysis/` 目录用于存放所有分析阶段的结构化文件（JSON 中间产物 + 分析报告），确保不会因 AI 遗漏输出而丢失数据。**
+`$KERNEL_REPO_PATH/patch_analysis/` 目录用于存放所有分析阶段的结构化文件（JSON 中间产物 + 分析报告），确保不会因 AI 遗漏输出而丢失数据。
+
+**Phase 0 完成后：恢复检查（关键步骤）**
+
+若 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json` 已存在，检查是否有未完成的 work（session 压缩/中断后恢复）：
+
+```bash
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --restore
+```
+
+| 退出码 | 含义 | 后续操作 |
+|--------|------|---------|
+| 0 | 无未完成工作 或 已完成 | 正常进入 Phase 1 |
+| 10 | 有未完成工作 | 向用户展示 `phase/task_id/step/status`，询问是否恢复 |
+| 1 | merge_tasks.json 不存在 | 正常流程，继续 Phase 1 |
+
+**若用户确认恢复**：
+1. 跳过 Phase 1 和 Phase 1.5（分析已完成）
+2. 从 `current_state.phase` 和 `current_state.task_id` 指示的位置继续执行
+3. 若 skill 内容丢失（上下文压缩），从 `workflow_hints` 读取关键规则
+4. 恢复完成后清除标记：
+   ```bash
+   python3 "$SCRIPTS_DIR/gatekeeper.py" \
+     --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+     --restore --clear
+   ```**
 
 ---
 
@@ -439,6 +466,14 @@ b4 series-info <message-id>
 ### 启动
 读取 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json`。
 
+**Phase 2 首次进入时更新 current_state**（标记 merge 阶段开始）：
+```bash
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<第一个 task_id>" \
+  --step BUILD --result in_progress
+```
+
 **执行顺序**：先遍历 `deps_order`（若有），再遍历 `merge_order`，各自按 `seq` 升序处理。若 `deps_order` 为空则直接从 `merge_order` 开始。
 
 ### 状态机
@@ -473,45 +508,124 @@ git am --3way <patch>
 
 **强制约束：必须编译并验证整个仓库，不可跳过、不可只编译部分文件！**
 
+**BUILD 开始前先标记 in_progress**（上下文压缩后可恢复到此位置）：
 ```bash
-# 执行完整仓库编译（不是单个文件、不是单个目录）
-$BUILD_CMD -j$(nproc) 2>&1 | tee /tmp/patch_build.log
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --step BUILD --result in_progress
 ```
 
-**通过条件（必须同时满足，缺一不可）**：
-1. **整个仓库编译 error 数 = 0**：从完整编译输出中提取 error 计数，必须为 0
-   - `grep -c "error:" /tmp/patch_build.log` 或手工检查输出，返回 0 才算通过
-   - warning 不计入 error，但不能忽略 warning 中提示的功能性问题
-2. **最终产物存在**：验证编译产物（如 `arch/$KERNEL_ARCH/boot/Image` 或对应架构的 vmlinux）
-3. **不允许跳过任何编译单元**：不可使用 `-k` 继续编译、不可忽略错误
+**步骤 1：动态选择编译目标**
 
-**产物验证命令**：
+根据涉改文件判断是否需要编译模块（.ko），避免只编译 Image 漏掉驱动模块：
+
 ```bash
-# 验证最终产物存在（根据实际 ARCH 调整，如 arm64 用 Image，x86 用 bzImage）
-test -f "arch/$KERNEL_ARCH/boot/Image" && echo "产物存在" || echo "产物缺失，编译不通过"
+# 从 merge_tasks.json 读取 files_changed，输出编译目标
+BUILD_TARGET=$(bash "$SCRIPTS_DIR/detect_build_target.sh" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --repo-path "$KERNEL_REPO_PATH")
+# BUILD_TARGET = "Image" 或 "Image modules"
+
+echo "[BUILD] 目标: $BUILD_TARGET"
 ```
 
-**不通过时的处理**：
-- **立即停止，禁止进入 COMMIT 步骤**
-- 分析编译错误原因
-- 最小量修改源码修复
-- 重新执行完整编译直到通过
-- 若涉及非本 patch 相关的 config 问题，临时修改 config 后编译，通过后 `git restore` 掉
+| 涉改文件路径 | 判定 | 编译目标 |
+|-------------|------|---------|
+| `arch/`, `kernel/`, `mm/`... | 核心代码 | `Image` |
+| `drivers/gpu/`, `drivers/net/`... + CONFIG=m | 驱动模块 | `Image modules` |
+| `sound/`, `net/`... + CONFIG=m | 子系统模块 | `Image modules` |
+| `drivers/`... + CONFIG=y | 内置驱动 | `Image`（已链接进 Image） |
+
+**步骤 2：执行编译**
+
+每个 task 使用独立日志文件，避免上下文压缩后误读旧结果：
+
+```bash
+BUILD_LOG="/tmp/patch_build_<task_id>.log"
+# 示例: /tmp/patch_build_0001.log, /tmp/patch_build_0003.log
+
+# 使用动态选择的目标编译整个仓库
+make ARCH=$KERNEL_ARCH $BUILD_TARGET -j$(nproc) 2>&1 | tee "$BUILD_LOG"
+```
+
+**步骤 3：通过条件验证**
+
+必须同时满足：
+1. **error 数 = 0**：`grep -c "error:" "$BUILD_LOG"` 必须为 0
+   - warning 不计入 error，但不能忽略功能性问题
+2. **产物存在**：
+   - Image：`arch/$KERNEL_ARCH/boot/Image`（或对应架构产物）
+   - 模块：涉改模块目录下至少一个 `.ko` 文件存在（自动检测）
+3. **不允许跳过任何编译单元**：不可使用 `-k` 继续编译
+
+**步骤 4：门禁验证（确定性脚本，不可跳过）**
+
+```bash
+# 一条命令完成所有验证（自动检测模块）
+bash "$SCRIPTS_DIR/verify_build.sh" \
+  --log "$BUILD_LOG" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --repo-path "$KERNEL_REPO_PATH" \
+  --product "arch/$KERNEL_ARCH/boot/Image"
+
+# 自动行为:
+# - 读取 files_changed for task_id
+# - 若有 drivers/*/sound/* + CONFIG=m → 自动验证 .ko
+# - 若 log 不存在 → 正确失败（防止误读旧结果）
+
+# 2. 更新状态机（记录 BUILD pass）
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --step BUILD --result pass \
+  --error-count <error_count> \
+  --product "$BUILD_LOG"
+```
+
+> verify_build.sh 退出码非 0 = 门禁未通过。gatekeeper.py 将状态写入 merge_tasks.json。
 
 **每个 task 完成后必须显式输出**（不可省略）：
 ```
 [BUILD 强制检查] task_id=<task_id>
-编译范围:  整个仓库（$BUILD_CMD）
+编译目标:  $BUILD_TARGET
+编译范围:  整个仓库
+日志路径:  /tmp/patch_build_<task_id>.log
 error 数:  <从编译输出提取>
-产物验证:  <ls 检查结果>
+产物验证:  Image ✅ / 模块 ✅（自动检测）
 结论:      ✅ 整个仓库编译通过 / ❌ 编译失败，修复中
 ```
 
+**不通过时的处理**：
+- **立即停止，禁止进入 COMMIT 步骤**
+- 分析编译错误原因，最小量修改源码修复
+- 重新执行完整编译直到通过
+
 ### BUILD_FIX
 编译失败时的错误分类修复（详见 `references/diagnostic-guide.md`）：
-- patch 代码本身的语法/逻辑错误 → 编辑源文件最小修复
-- 调用不存在的符号 → 标记为缺失依赖，尝试最小适配或 stub
-- 非 patch 的 config 问题 → 临时改 `.config` → make → `git restore .config`，记录在 analyse.md
+
+| 错误类型 | 处理方式 |
+|---------|---------|
+| patch 代码本身的语法/逻辑错误 | 编辑源文件最小修复 |
+| 调用不存在的符号 | 标记为缺失依赖，尝试最小适配或 stub |
+| **patch 引入的新功能需要新 CONFIG** | **启用 CONFIG + 保留修改**，记录在 analyse.md |
+| **非 patch 的环境 CONFIG 缺失** | 临时启用 → make → `git restore .config`，记录在 analyse.md |
+
+**CONFIG 操作命令**：
+```bash
+# 启用 CONFIG（推荐 scripts/config，自动处理依赖）
+./scripts/config --enable CONFIG_NEW_FEATURE
+make olddefconfig       # 更新 .config，静默处理新选项
+
+# 或直接改 .config
+sed -i 's/# CONFIG_FOO is not set/CONFIG_FOO=y/' .config
+make olddefconfig
+
+# 编译后恢复环境 CONFIG（仅恢复非 patch 相关的修改）
+git restore .config
+```
 
 ### 10 轮失败处理
 累计 10 次冲突解决或编译修复未通过 → 深度分析根因 → 输出具体方案：
@@ -527,9 +641,32 @@ error 数:  <从编译输出提取>
 
 ### COMMIT
 ```bash
+# 0. COMMIT 开始前标记 in_progress（恢复点）
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --step COMMIT --result in_progress
+
+# 1. 门禁检查：BUILD 必须已通过（不可跳过）
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --step COMMIT --check
+# 若 exit code ≠ 0 → 禁止 commit，回到 BUILD 步骤
+
+# 1. 提交
 git commit -m "<patch subject>" --author="<patch author>"
+
+# 2. 验证只含本 patch 文件
+git diff --staged
+
+# 3. 更新状态机
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --step COMMIT --result pass \
+  --commit <commit_hash>
 ```
-二次确认 `git diff --staged` 只含本 patch 文件。
 
 ### REVIEW
 调用 **code-review-expert skill**（skill 框架按名称自动加载），对 `HEAD~1..HEAD` 做 review。
