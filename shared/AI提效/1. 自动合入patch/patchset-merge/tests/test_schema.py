@@ -8,9 +8,11 @@ import pytest
 
 REQUIRED_TASK_FIELDS = [
     "seq", "task_id", "status", "patch_file", "subject", "author",
-    "files_changed", "action", "skip_reason", "pre_revert", "depends_on",
+    "files_changed", "功能分类", "introduced_symbols", "referenced_symbols",
+    "action", "skip_reason", "pre_revert", "depends_on",
     "risk_level", "review_required", "blame_hits", "duplicate_info",
-    "conflicts_predicted", "special_notes", "pr_mapping", "execution_log",
+    "conflicts_predicted", "special_notes", "build_checkpoint",
+    "pr_mapping", "execution_log",
 ]
 
 REQUIRED_TOP_FIELDS = [
@@ -61,6 +63,9 @@ def _load_sample():
       "subject": "stage2 页表重构",
       "author": "upstream author",
       "files_changed": ["file1.c"],
+      "功能分类": "core",
+      "introduced_symbols": ["stage2_set_pte"],
+      "referenced_symbols": ["kvm_pte_to_phys"],
       "action": "apply",
       "skip_reason": null,
       "pre_revert": [],
@@ -71,6 +76,7 @@ def _load_sample():
       "duplicate_info": {"level": "无重复", "detail": ""},
       "conflicts_predicted": [],
       "special_notes": "上游依赖",
+      "build_checkpoint": false,
       "pr_mapping": {
         "upstream_deps": [],
         "bugfix_deps": [],
@@ -88,6 +94,9 @@ def _load_sample():
       "subject": "arm64/sysreg: Add HDBSS related register information",
       "author": "eillon <yezhenyu2@huawei.com>",
       "files_changed": ["arch/arm64/include/asm/esr.h", "arch/arm64/tools/sysreg"],
+      "功能分类": "infra",
+      "introduced_symbols": ["HDBSS_ENABLE_BIT", "ESR_ELx_HDBSS_SHIFT"],
+      "referenced_symbols": [],
       "action": "apply",
       "skip_reason": null,
       "pre_revert": [],
@@ -98,6 +107,7 @@ def _load_sample():
       "duplicate_info": {"level": "无重复", "detail": ""},
       "conflicts_predicted": [],
       "special_notes": "",
+      "build_checkpoint": true,
       "pr_mapping": {
         "upstream_deps": [
           {

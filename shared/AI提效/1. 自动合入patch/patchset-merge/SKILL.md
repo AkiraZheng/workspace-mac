@@ -190,6 +190,22 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 - `introduced_by_patch`：本 patch 新增/修改的函数名、宏名、类型名
 - `referenced_symbols`：本 patch 调用/引用的符号
 - `changed_files`：涉改文件的路径和行号范围
+- `功能分类`：根据文件路径和 diff 内容判定功能分类
+
+**功能分类判定规则**：
+
+| 分类 | 判定规则 | 示例路径 |
+|------|---------|---------|
+| `infra` | `include/linux/*.h`, `include/uapi/*.h`, `arch/*/include/`, diff 中 `#define`/`typedef`/`struct` 定义行占比 > 30% | `include/linux/kvm_host.h` |
+| `core` | `kernel/`, `mm/`, `arch/*/kernel/`, `arch/*/mm/`, `init/` | `kernel/sched/core.c` |
+| `driver` | `drivers/`, `arch/*/mach-*/` | `drivers/gpu/arm/` |
+| `fs` | `fs/`, `include/linux/fs*.h` | `fs/ext4/` |
+| `net` | `net/`, `include/linux/net*.h`, `include/net/` | `net/core/dev.c` |
+| `sound` | `sound/`, `include/sound/` | `sound/soc/` |
+| `doc` | `Documentation/`, commit message 含 "doc"/"comment"/"documentation" | `Documentation/kvm/` |
+| `bugfix` | commit message 含 "fix"/"bug"/"error"/"patch"/"Fixes:" 且独立于特性系列 | 修复补丁 |
+
+> 优先级：文件路径 > diff 内容（宏定义集中 > 文件路径）> commit message 关键词
 
 **步骤 3: 向后搜索 Bugfix（在 upstream 仓库上执行）**
 
@@ -312,7 +328,21 @@ b4 series-info <message-id>
 ```
 
 **步骤 7: 屏幕输出**
+
 按 `references/output-templates.md` 中的结构化格式输出到屏幕。含 PR 映射结果。
+
+输出中**必须包含 `验证点=待定|false`**：
+
+Agent 根据以下规则做初步判定：
+
+| 条件 | 验证点 值 | 说明 |
+|------|:--:|------|
+| 文件路径匹配 `include/linux/*.h`, `arch/*/include/` 等基础设施模式 | `待定` | 大概率 true，Phase 1.5 最终确认 |
+| risk_level=高 或 conflicts_predicted 非空 | `待定` | 大概率 true，Phase 1.5 最终确认 |
+| 独立 bugfix、文档、skip 的 patch | `false` | 确定不需要 |
+| 上述条件均不满足的普通 patch | `false` | 默认不需要（功能模块最后、被依赖数等由 Phase 1.5 计算） |
+
+> **注意**：即使 agent 判断为 `false`，Phase 1.5 汇总后仍可能被 `calculate_build_checkpoints.py` 覆盖为 `true`（如被 ≥3 个后续 patch 依赖）。Agent 只做初步排除。
 
 ---
 
@@ -413,6 +443,9 @@ JSON
 - `subject` — patch 标题
 - `author` — patch 作者
 - `files_changed` — 涉改文件路径列表
+- `功能分类` — 功能分类（infra/core/driver/fs/net/sound/doc/bugfix，Phase 1 步骤 2 判定）
+- `introduced_symbols` — 本 patch 新增/修改的函数名、宏名、类型名列表，用于跨 patch 依赖统计
+- `referenced_symbols` — 本 patch 调用/引用的符号列表
 - `action` — `apply` | `skip`（判定是否需要合入）
 - `skip_reason` — 若 skip，必须填写具体原因
 - `pre_revert` — 需先 revert 的本地 commit hash 列表
@@ -423,6 +456,7 @@ JSON
 - `duplicate_info` — 目标仓库重复检测结果（step 5 产物）
 - `conflicts_predicted` — 预判冲突点列表（文件:行号:原因）
 - `special_notes` — 合入注意事项
+- `build_checkpoint` — `true` / `false`（是否在此 patch 点做编译验证）
 - `pr_mapping` — PR 映射聚合结果（step 6 产物，见下方格式）
 - `execution_log` — `[]`（初始空数组，Phase 2 动态追加）
 
@@ -534,6 +568,53 @@ Seq   Task       Action   Subject
 
 ---
 
+**步骤 8: 计算编译验证点（calculate_build_checkpoints）**
+
+merge_order_sort 完成后，运行脚本综合所有条件计算最终的 `build_checkpoint`：
+
+```bash
+python3 "$SCRIPTS_DIR/calculate_build_checkpoints.py" \
+  --merge-tasks "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --output "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json"
+```
+
+**计算规则**（按优先级依次判定）：
+
+| 优先级 | 条件 | build_checkpoint | 说明 |
+|--------|------|:---:|------|
+| 1 | `功能分类` == `infra` | `true` | 基础设施/公共头文件/宏定义，影响面最广 |
+| 2 | `introduced_symbols` 被 ≥3 个后续 patch 的 `referenced_symbols` 引用 | `true` | 高依赖点，出错影响多个 patch |
+| 3 | `risk_level` == `"高"` 或 `conflicts_predicted` 非空 | `true` | 高风险 patch |
+| 4 | `action` == `"skip"` 或 `功能分类` == `"doc"` | `false` | 无需编译验证 |
+| 5 | 当前 patch 的 `功能分类` + 路径前缀分组中，组规模 > 1 且它是该组最后一个 patch | `true` | 功能模块完结，做一次验证 |
+| 6 | 最后一个 patch（seq 最大） | `true`（强制） | patchset 最终验证 |
+| 7 | 以上均不满足 | `false` | 普通 patch，不设验证点 |
+
+**后续 patch 范围**：
+- 包含 `merge_order` 和 `deps_order` 中所有的 patch
+- 按 `seq` 排序后，统计当前 patch 的 `introduced_symbols` 被多少后面的 patch 引用
+
+**分组依据**：
+- 按 `功能分类` + 路径前缀（前 3 级目录，如 `drivers/gpu/arm`）分组
+- 每组最后一个 patch 设验证点（组间切换前验证）
+
+**输出示例**：
+```
+📊 编译验证点计算结果：
+
+Seq  Task      功能分类    被引用数   验证点   原因
+1    0001      infra       5         ✅      基础设施（头部文件）
+2    dep-001   core        0         —       普通 patch
+3    0002      driver      3         ✅      被 ≥3 个后续 patch 依赖
+4    0003      driver      0         —       普通 patch（同组中间）
+5    0004      driver      1         ✅      功能模块最后（driver 组完结）
+6    0005      doc         0         ✅      最后一个 patch（强制）
+
+统计: ✅=4 处验证点，预计编译 4 次（共 6 个 patch）
+```
+
+---
+
 ## Phase 2：串行 Merge
 
 ### 启动
@@ -552,8 +633,11 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 ### 状态机
 
 ```
-PRECHECK → PRE_REVERT → APPLY → BUILD → COMMIT → REVIEW → RECORD → DONE
+PRECHECK → PRE_REVERT → APPLY → BUILD (checkpoint only) → COMMIT → REVIEW → RECORD → DONE
 ```
+
+- `build_checkpoint=true` → 完整执行 BUILD→verify→gatekeeper
+- `build_checkpoint=false` → 跳过 BUILD，直接进入 COMMIT
 
 ### PRECHECK
 - 校验 patch 文件存在
@@ -581,6 +665,41 @@ git am --3way <patch>
 
 **强制约束：必须编译并验证整个仓库，不可跳过、不可只编译部分文件！**
 
+**编译策略**：不是每个 patch 都编译，只在对到达 `build_checkpoint=true` 的 patch 时编译验证。Phase 1 分析阶段根据以下规则标注验证点：
+
+**验证点选取规则**：
+
+| 规则 | 说明 | 示例 |
+|------|------|------|
+| 基础设施完成后 | 涉及大量 API/宏定义的 patch 应用后 | sysreg 定义、公共头文件 |
+| 功能模块完成后 | 一个功能子系列的最后一个 patch | HDBSS core 完成后 |
+| 高依赖 patch 之前 | 多个后续 patch 依赖此 patch | depends_on 最多的 patch |
+| 高风险 patch | risk_level=高 或有预判冲突 | 核心逻辑变更 |
+| patchset 末尾 | 最后一个 patch（强制） | 最终验证 |
+| 无需验证 | 独立 bugfix、文档、注释、skip 的 patch | 纯文档变更 |
+
+**Phase 1 分析 Agent 确定验证点**：
+
+```
+分析 agent 在屏幕输出中添加一行：
+验证点=true|false  # 基于上述规则判断
+```
+
+主 Agent 汇总后将 `build_checkpoint: true/false` 写入 merge_order 的每个 task。
+
+**BUILD 开始时检查 checkpoint**：
+
+```bash
+if [ "$build_checkpoint" = "true" ]; then
+    # 执行编译验证（完整流程）
+else
+    echo "[BUILD SKIP] task_id=$task_id 非验证点，跳过编译"
+    # 直接进入 COMMIT
+fi
+```
+
+**编译流程**（仅 build_checkpoint=true 时执行）：
+
 **BUILD 开始前先标记 in_progress**（上下文压缩后可恢复到此位置）：
 ```bash
 python3 "$SCRIPTS_DIR/gatekeeper.py" \
@@ -591,52 +710,23 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 
 **步骤 1：动态选择编译目标**
 
-根据涉改文件判断是否需要编译模块（.ko），避免只编译 Image 漏掉驱动模块：
-
 ```bash
-# 从 merge_tasks.json 读取 files_changed，输出编译目标
 BUILD_TARGET=$(bash "$SCRIPTS_DIR/detect_build_target.sh" \
   --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
   --task-id "<task_id>" \
   --repo-path "$KERNEL_REPO_PATH")
-# BUILD_TARGET = "Image" 或 "Image modules"
-
-echo "[BUILD] 目标: $BUILD_TARGET"
 ```
-
-| 涉改文件路径 | 判定 | 编译目标 |
-|-------------|------|---------|
-| `arch/`, `kernel/`, `mm/`... | 核心代码 | `Image` |
-| `drivers/gpu/`, `drivers/net/`... + CONFIG=m | 驱动模块 | `Image modules` |
-| `sound/`, `net/`... + CONFIG=m | 子系统模块 | `Image modules` |
-| `drivers/`... + CONFIG=y | 内置驱动 | `Image`（已链接进 Image） |
 
 **步骤 2：执行编译**
 
-每个 task 使用独立日志文件，避免上下文压缩后误读旧结果：
-
 ```bash
 BUILD_LOG="/tmp/patch_build_<task_id>.log"
-# 示例: /tmp/patch_build_0001.log, /tmp/patch_build_0003.log
-
-# 使用动态选择的目标编译整个仓库
 make ARCH=$KERNEL_ARCH $BUILD_TARGET -j$(nproc) 2>&1 | tee "$BUILD_LOG"
 ```
 
-**步骤 3：通过条件验证**
-
-必须同时满足：
-1. **error 数 = 0**：`grep -c "error:" "$BUILD_LOG"` 必须为 0
-   - warning 不计入 error，但不能忽略功能性问题
-2. **产物存在**：
-   - Image：`arch/$KERNEL_ARCH/boot/Image`（或对应架构产物）
-   - 模块：涉改模块目录下至少一个 `.ko` 文件存在（自动检测）
-3. **不允许跳过任何编译单元**：不可使用 `-k` 继续编译
-
-**步骤 4：门禁验证（确定性脚本，不可跳过）**
+**步骤 3：通过条件 + 门禁验证**
 
 ```bash
-# 一条命令完成所有验证（自动检测模块）
 bash "$SCRIPTS_DIR/verify_build.sh" \
   --log "$BUILD_LOG" \
   --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
@@ -644,12 +734,6 @@ bash "$SCRIPTS_DIR/verify_build.sh" \
   --repo-path "$KERNEL_REPO_PATH" \
   --product "arch/$KERNEL_ARCH/boot/Image"
 
-# 自动行为:
-# - 读取 files_changed for task_id
-# - 若有 drivers/*/sound/* + CONFIG=m → 自动验证 .ko
-# - 若 log 不存在 → 正确失败（防止误读旧结果）
-
-# 2. 更新状态机（记录 BUILD pass）
 python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
   --task-id "<task_id>" \
@@ -658,46 +742,116 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --product "$BUILD_LOG"
 ```
 
-> verify_build.sh 退出码非 0 = 门禁未通过。gatekeeper.py 将状态写入 merge_tasks.json。
+> 非验证点的 patch 直接跳过 BUILD 步骤，进入 COMMIT。
 
-**每个 task 完成后必须显式输出**（不可省略）：
+**每个 checkpoint 完成后必须显式输出**：
 ```
-[BUILD 强制检查] task_id=<task_id>
+[BUILD CHECKPOINT] task_id=<task_id>
 编译目标:  $BUILD_TARGET
-编译范围:  整个仓库
 日志路径:  /tmp/patch_build_<task_id>.log
-error 数:  <从编译输出提取>
+error 数:  <error_count>
 产物验证:  Image ✅ / 模块 ✅（自动检测）
-结论:      ✅ 整个仓库编译通过 / ❌ 编译失败，修复中
-```
+结论:      ✅ 编译通过
 
-**不通过时的处理**：
-- **立即停止，禁止进入 COMMIT 步骤**
-- 分析编译错误原因，最小量修改源码修复
-- 重新执行完整编译直到通过
+[SKIP] task_id=0002 非验证点，跳过编译
+[SKIP] task_id=0003 非验证点，跳过编译
+```
 
 ### BUILD_FIX
-编译失败时的错误分类修复（详见 `references/diagnostic-guide.md`）：
+
+编译失败时的修复策略。**绝对禁用 `git reset`**，使用 rebase amend 工作流。
+
+**根因定位（按文件/符号/功能反查）**：
+
+编译失败时，错误不一定在当前 checkpoint patch 中，可能来自此 checkpoint 组内的更早 patch。
+
+```bash
+# 步骤 0：确定 checkpoint 组范围
+# 上一个 checkpoint 的 task_id → 当前 checkpoint 的 task_id
+# 例如：上一个 ✅ 是 0001，当前 ✅ 是 0005 → 组内 patch = [0002, 0003, 0004, 0005]
+```
+
+**步骤 1：提取编译错误信息**
+
+从 BUILD_LOG 提取每条 error 的三要素：
+
+```
+错误文件: drivers/gpu/arm/mali_kbase_core.c:150
+错误符号: kbase_reg_write
+错误功能: GPU 寄存器写入
+```
+
+**步骤 2：反查 patch（文件匹配 → 符号匹配 → 功能匹配）**
+
+| 匹配方式 | 查询来源 | 匹配条件 |
+|---------|---------|---------|
+| 文件匹配 | task `files_changed` | 错误文件 ∈ files_changed |
+| 符号匹配 | task `introduced_symbols` + `referenced_symbols` | 错误符号 ∈ introduced_symbols ∪ referenced_symbols |
+| 功能匹配 | task `功能分类` | 错误功能模块 == 功能分类（如 driver ↔ driver 匹配） |
+
+**步骤 3：定位结果输出**
+
+```
+[BUILD_FAIL] 定位错误源：
+
+错误文件: drivers/gpu/arm/mali_kbase_core.c
+错误符号: kbase_reg_write
+错误行号: 150
+
+检查点范围: 0002 (上一个 ✅) → 0005 (当前 ✅)
+组内 patch:
+  0002: drivers/gpu/arm/mali_kbase_ctx.c     (功能: driver)
+  0003: drivers/gpu/arm/mali_kbase_common.h  (功能: driver)  ← 符号匹配
+  0004: drivers/gpu/arm/mali_kbase_core.c    (功能: driver)  ← 文件匹配 ✅
+  0005: drivers/gpu/arm/mali_kbase_debug.c   (功能: driver)
+
+定位结果: 0004 匹配错误文件 + 0003 匹配错误符号
+建议: 先检查 0004 的实现代码，若符号 kbase_reg_write 定义在 0003 则先 amend 0003
+```
+
+**步骤 4：rebase amend 修复**
+
+```bash
+# 假设出错 patch 是 0003，当前在 0005（checkpoint）
+N=3  # 覆盖 0003/0004/0005
+git rebase -i HEAD~3
+# 将 0003 标记为 "edit"
+
+# 在 0003 上修复
+vim <错误文件>
+make $BUILD_TARGET -j$(nproc)    # 验证修复
+
+# 提交修复
+git add <只改过的文件>            # 禁止 -A，禁止 -a
+git commit --amend --no-edit     # 小修不改 message
+git rebase --continue
+
+# 在 checkpoint 重新编译验证
+git log -1 --oneline             # 确认当前在 0005
+make $BUILD_TARGET -j$(nproc)    # 再次验证
+```
+
+**关键原则**：
+- ❌ **绝对禁用 `git reset --hard`** 和 `git reset HEAD~N`
+- ✅ 使用 `git rebase -i` + `edit` + `commit --amend` + `rebase --continue`
+- ✅ 只改属于目标 patch 的代码
+- ✅ `git add` 只加实际改过的文件，禁止 `git add -A`
+
+**错误分类修复**：
 
 | 错误类型 | 处理方式 |
 |---------|---------|
-| patch 代码本身的语法/逻辑错误 | 编辑源文件最小修复 |
-| 调用不存在的符号 | 标记为缺失依赖，尝试最小适配或 stub |
-| **patch 引入的新功能需要新 CONFIG** | **启用 CONFIG + 保留修改**，记录在 analyse.md |
-| **非 patch 的环境 CONFIG 缺失** | 临时启用 → make → `git restore .config`，记录在 analyse.md |
+| 当前 checkpoint 组内某 patch 语法/逻辑错误 | rebase amend 该 patch |
+| 调用不存在的符号 | 标记为缺失依赖，检查是否需要插入新 dep |
+| patch 引入的新功能需要新 CONFIG | 启用 CONFIG + 保留修改，识别为 checkpoint 内正确 patch 后 amend |
+| 非 patch 的环境 CONFIG 缺失 | 临时启用 → make → `git restore .config` |
 
-**CONFIG 操作命令**：
+**CONFIG 操作**：
 ```bash
-# 启用 CONFIG（推荐 scripts/config，自动处理依赖）
 ./scripts/config --enable CONFIG_NEW_FEATURE
-make olddefconfig       # 更新 .config，静默处理新选项
-
-# 或直接改 .config
-sed -i 's/# CONFIG_FOO is not set/CONFIG_FOO=y/' .config
 make olddefconfig
-
-# 编译后恢复环境 CONFIG（仅恢复非 patch 相关的修改）
-git restore .config
+# 编译后若为环境 CONFIG → git restore .config
+# 若为 patch 需要的 CONFIG → amend 到对应 patch
 ```
 
 ### 10 轮失败处理

@@ -248,6 +248,9 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
       "subject": "stage2 页表重构",
       "author": "upstream author",
       "files_changed": ["file1.c"],
+      "功能分类": "core",
+      "introduced_symbols": ["stage2_set_pte", "stage2_get_level"],
+      "referenced_symbols": ["kvm_pte_to_phys"],
       "action": "apply",
       "skip_reason": null,
       "pre_revert": [],
@@ -271,6 +274,9 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
       "subject": "patch subject",
       "author": "patch author",
       "files_changed": ["file1.c", "file2.h"],
+      "功能分类": "driver",
+      "introduced_symbols": ["kbase_reg_write", "HDBSS_ENABLE_BIT"],
+      "referenced_symbols": ["kvm_stage2_get_level"],
       "action": "apply",
       "skip_reason": null,
       "pre_revert": [],
@@ -281,6 +287,7 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
       "duplicate_info": {"level": "无重复", "detail": ""},
       "conflicts_predicted": [],
       "special_notes": "",
+      "build_checkpoint": false,
       "pr_mapping": {
         "upstream_deps": [
           {
@@ -326,6 +333,9 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
 | `subject` | ✓ | string | patch 标题 |
 | `author` | ✓ | string | patch 作者 |
 | `files_changed` | ✓ | list | 涉改文件路径列表 |
+| `功能分类` | ✓ | string | Phase 1 分析判定的功能分类（infra/core/driver/fs/net/sound/doc/bugfix） |
+| `introduced_symbols` | ✓ | list | 本 patch 新增/修改的函数名、宏名、类型名，用于跨 patch 依赖统计和 checkpoint 计算 |
+| `referenced_symbols` | ✓ | list | 本 patch 调用/引用的符号，用于依赖统计 |
 | `action` | ✓ | string | `apply`（需要合入）或 `skip`（跳过） |
 | `skip_reason` | - | string/null | 若 action=skip，必须填写具体原因；否则 null |
 | `pre_revert` | ✓ | list | 需先 revert 的本地 commit hash |
@@ -336,6 +346,7 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
 | `duplicate_info` | ✓ | dict | `{"level": "无重复|精确重复|高概率等效|可能冲突", "detail": "..."}` |
 | `conflicts_predicted` | ✓ | list | 预判冲突点 |
 | `special_notes` | ✓ | string | 合入注意事项 |
+| `build_checkpoint` | ✓ | bool | 是否在此 patch 点做编译验证（Phase 1 判定） |
 | `pr_mapping` | ✓ | dict | PR 映射聚合（见下方 pr_mapping 字段说明） |
 | `execution_log` | ✓ | list | 初始 `[]`，Phase 2 动态追加 |
 | `state_log` | - | list | gatekeeper 自动追加 `[{"step":"BUILD","time":"...","result":"pass","error_count":0}]` |
@@ -458,6 +469,9 @@ Phase 1.5 主 Agent 汇总所有分析 Agent 的屏幕输出后生成。Phase 3 
 |------|:--:|------|
 | `summary` | ✓ | 功能描述 |
 | `modules` | ✓ | 关联模块 |
+| `功能分类` | ✓ | infra/core/driver/fs/net/sound/doc/bugfix（见下方分类规则） |
+| `introduced_symbols` | ✓ | 本 patch 新增/修改的函数名、宏名、类型名列表 |
+| `referenced_symbols` | ✓ | 本 patch 调用/引用的符号列表 |
 | `risk` | ✓ | 风险程度：高/中/低 |
 | `risk_detail` | ✓ | 风险具体说明 |
 | `revert_level` | ✓ | 必须/建议/无须 |
@@ -474,6 +488,19 @@ Phase 1.5 主 Agent 汇总所有分析 Agent 的屏幕输出后生成。Phase 3 
 | `status_in_target` | ✓ | 目标仓库现状描述 |
 | `pr_mapping` | ✓ | PR 映射聚合（Phase 0 步骤 6 产物，字段见 merge_tasks.json 的 pr_mapping 说明） |
 
+### 功能分类规则
+
+| 分类 | 判定规则 | 示例路径 |
+|------|---------|---------|
+| `infra` | `include/linux/*.h`, `include/uapi/*.h`, `arch/*/include/`, diff 中 `#define`/`typedef`/`struct` 定义行占比 > 30% | `include/linux/kvm_host.h` |
+| `core` | `kernel/`, `mm/`, `arch/*/kernel/`, `arch/*/mm/`, `init/` | `kernel/sched/core.c` |
+| `driver` | `drivers/`, `arch/*/mach-*/` | `drivers/gpu/arm/` |
+| `fs` | `fs/`, `include/linux/fs*.h` | `fs/ext4/` |
+| `net` | `net/`, `include/linux/net*.h`, `include/net/` | `net/core/dev.c` |
+| `sound` | `sound/`, `include/sound/` | `sound/soc/` |
+| `doc` | `Documentation/`, commit message 含 "doc"/"comment"/"documentation" | `Documentation/kvm/` |
+| `bugfix` | commit message 含 "fix"/"bug"/"error"/"patch"/"Fixes:" 且独立于特性系列 | 修复补丁 |
+
 ## Phase 1 分析 Agent 屏幕输出格式
 
 分析 Agent 不写文件，用以下结构化格式输出到屏幕（供主 Agent 解析）：
@@ -482,6 +509,7 @@ Phase 1.5 主 Agent 汇总所有分析 Agent 的屏幕输出后生成。Phase 3 
 [PATCH-0001]
 描述=功能描述
 模块=关联模块（逗号分隔）
+功能分类=infra|core|driver|fs|net|sound|doc|bugfix
 风险=高|中|低
 风险详述=具体风险点
 revert=必须|建议|无须 | commit_hash1,commit_hash2
@@ -492,6 +520,7 @@ blame记录=commit_hash1 (类型):描述;commit_hash2 (类型):描述
 review需求=高|中|低
 review理由=原因
 验证项=验证点1;验证点2
+验证点=待定|false
 ```
 
 ### 字段说明
@@ -500,6 +529,7 @@ review理由=原因
 |------|------|------|
 | 描述 | 一句话中文描述 | KVM arm64 引入 5 级页表 stub |
 | 模块 | 逗号分隔 | KVM,mmu,stage-2 |
+| 功能分类 | infra/core/driver/fs/net/sound/doc/bugfix | core |
 | 风险 | 高/中/低 | 中 |
 | 风险详述 | 1-2 句话 | 涉及页表遍历核心路径 |
 | revert | 等级 \| hash列表 | 建议 \| abc123,def456 |
@@ -510,6 +540,7 @@ review理由=原因
 | review需求 | 高/中/低 | 高 |
 | review理由 | 一句话 | 页表级别变更需人工确认 |
 | 验证项 | 分号分隔 | 启动 qemu 验证 KVM;检查 stage-2 页表 |
+| 验证点 | 待定/false | 待定（基础设施 patch，等 Phase 1.5 统计依赖数后最终确定） |
 
 ## Phase 1.5 全局预览模板（展示给用户确认）
 
@@ -617,26 +648,27 @@ Phase 1 分析和 Phase 1.5 汇总完成后，主 Agent 将以下 4 个部分结
   合入计划
 ═══════════════════════════════════════════════
 
-┌─────┬────────┬──────────┬────────┬────────┬────────┬──────────────────────────────┐
-│ Seq │ Patch  │ Subject  │ Action │ 风险   │ Review │ 备注                         │
-├─────┼────────┼──────────┼────────┼────────┼────────┼──────────────────────────────┤
-│  1  │ 0001   │ HDBSS    │ apply  │ 低     │ 低     │ 预判冲突: sysreg 新增条目     │
-│     │        │ 寄存器   │        │        │        │                              │
-├─────┼────────┼──────────┼────────┼────────┼────────┼──────────────────────────────┤
-│  2  │ 0002   │ DBM 属性 │ skip   │ —      │ —      │ 原因: 目标仓库已完全实现      │
-│     │        │ 支持     │        │        │        │                              │
-├─────┼────────┼──────────┼────────┼────────┼────────┼──────────────────────────────┤
-│  3  │ 0003   │ FEAT     │ apply  │ 中     │ 中     │ 依赖: 0001                   │
-│     │        │ cpufeat  │        │        │        │ 预判冲突: cpufeature.c 注册   │
-├─────┼────────┼──────────┼────────┼────────┼────────┼──────────────────────────────┤
-│  4  │ 0004   │ HDBSS    │ skip   │ —      │ 高     │ 原因: 结构性冲突 10+ 维度     │
-│     │        │ 核心实现 │        │        │        │                              │
-├─────┼────────┼──────────┼────────┼────────┼────────┼──────────────────────────────┤
-│  5  │ 0005   │ ioctl    │ apply  │ 低     │ 低     │ 依赖: 0003                   │
-│     │        │ 文档     │        │        │        │                              │
-└─────┴────────┴──────────┴────────┴────────┴────────┴──────────────────────────────┘
+┌─────┬────────┬──────────┬────────┬────────┬────────┬────────────┬──────────────────────────────┐
+│ Seq │ Patch  │ Subject  │ Action │ 风险   │ Review │ 编译验证点 │ 备注                         │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  1  │ 0001   │ HDBSS    │ apply  │ 低     │ 低     │ ✅         │ 预判冲突: sysreg 新增条目     │
+│     │        │ 寄存器   │        │        │        │            │                              │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  2  │ 0002   │ DBM 属性 │ skip   │ —      │ —      │ —          │ 原因: 目标仓库已完全实现      │
+│     │        │ 支持     │        │        │        │            │                              │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  3  │ 0003   │ FEAT     │ apply  │ 中     │ 中     │ —          │ 依赖: 0001                   │
+│     │        │ cpufeat  │        │        │        │            │ 预判冲突: cpufeature.c 注册   │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  4  │ 0004   │ HDBSS    │ skip   │ —      │ 高     │ —          │ 原因: 结构性冲突 10+ 维度     │
+│     │        │ 核心实现 │        │        │        │            │                              │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  5  │ 0005   │ ioctl    │ apply  │ 低     │ 低     │ ✅         │ 依赖: 0003                   │
+│     │        │ 文档     │        │        │        │            │                              │
+└─────┴────────┴──────────┴────────┴────────┴────────┴────────────┴──────────────────────────────┘
 
   统计: apply X | skip Y | 高/中/低风险 Z/W/V
+  编译验证点: ✅=2 个（0001: 基础设施, 0005: patchset 末尾）
 
 ⚠️  高关注项：
   - 0004 跳过但 review 紧急性=高，若后续发现缺失功能，需重新评估
