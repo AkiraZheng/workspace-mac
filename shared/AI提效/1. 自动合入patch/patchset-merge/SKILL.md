@@ -585,9 +585,9 @@ python3 "$SCRIPTS_DIR/calculate_build_checkpoints.py" \
 | 1 | `功能分类` == `infra` | `true` | 基础设施/公共头文件/宏定义，影响面最广 |
 | 2 | `introduced_symbols` 被 ≥3 个后续 patch 的 `referenced_symbols` 引用 | `true` | 高依赖点，出错影响多个 patch |
 | 3 | `risk_level` == `"高"` 或 `conflicts_predicted` 非空 | `true` | 高风险 patch |
-| 4 | `action` == `"skip"` 或 `功能分类` == `"doc"` | `false` | 无需编译验证 |
-| 5 | 当前 patch 的 `功能分类` + 路径前缀分组中，组规模 > 1 且它是该组最后一个 patch | `true` | 功能模块完结，做一次验证 |
-| 6 | 最后一个 patch（seq 最大） | `true`（强制） | patchset 最终验证 |
+| 4 | 最后一个 patch（seq 最大） | `true`（强制） | 覆盖所有规则，skip/doc 也强制验证，确保整个 patchset 最终状态可编译 |
+| 5 | `action` == `"skip"` 或 `功能分类` == `"doc"`（仅对非末 patch） | `false` | 无需编译验证 |
+| 6 | 当前 patch 的 `功能分类` + 路径前缀分组中，组规模 > 1 且它是该组最后一个 patch | `true` | 功能模块完结，做一次验证 |
 | 7 | 以上均不满足 | `false` | 普通 patch，不设验证点 |
 
 **后续 patch 范围**：
@@ -603,12 +603,12 @@ python3 "$SCRIPTS_DIR/calculate_build_checkpoints.py" \
 📊 编译验证点计算结果：
 
 Seq  Task      功能分类    被引用数   验证点   原因
-1    0001      infra       5         ✅      基础设施（头部文件）
-2    dep-001   core        0         —       普通 patch
-3    0002      driver      3         ✅      被 ≥3 个后续 patch 依赖
-4    0003      driver      0         —       普通 patch（同组中间）
-5    0004      driver      1         ✅      功能模块最后（driver 组完结）
-6    0005      doc         0         ✅      最后一个 patch（强制）
+1    0001      infra       5         ✅      基础设施（公共头文件/宏定义）
+2    dep-001   core        0         —       
+3    0002      driver      3         ✅      被 ≥3 个后续 patch 依赖（3 个）
+4    0003      driver      0         —       
+5    0004      driver      1         ✅      功能模块最后 patch（driver/drivers/gpu/arm 组）
+6    0005      doc         0         ✅      最后一个 patch（强制，skip/doc 也验证）
 
 统计: ✅=4 处验证点，预计编译 4 次（共 6 个 patch）
 ```

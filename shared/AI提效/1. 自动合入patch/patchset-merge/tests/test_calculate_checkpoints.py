@@ -199,6 +199,49 @@ class TestCalculateCheckpoints(unittest.TestCase):
         self.assertFalse(updated['merge_order'][1]['build_checkpoint'])  # skip, not last
         self.assertTrue(updated['merge_order'][2]['build_checkpoint'])   # last (forced)
 
+    def test_last_patch_forced_overrides_doc(self):
+        """Rule 4: last patch forced overrides doc, even doc at end must compile."""
+        tasks = {
+            'merge_order': [
+                self.make_patch(1, '0001', func_class='core'),
+                self.make_patch(2, '0002', func_class='doc'),
+            ],
+            'deps_order': [],
+        }
+        updated, results = calculate_checkpoints(tasks)
+        self.assertFalse(updated['merge_order'][0]['build_checkpoint'])
+        self.assertTrue(updated['merge_order'][1]['build_checkpoint'])
+        self.assertIn('最后一个 patch', results[1]['reason'])
+        self.assertIn('doc', results[1]['reason'].lower())
+
+    def test_last_patch_forced_overrides_skip(self):
+        """Rule 4: last patch forced overrides skip, even skip at end must compile."""
+        tasks = {
+            'merge_order': [
+                self.make_patch(1, '0001', func_class='core'),
+                self.make_patch(2, '0002', action='skip'),
+            ],
+            'deps_order': [],
+        }
+        updated, results = calculate_checkpoints(tasks)
+        self.assertFalse(updated['merge_order'][0]['build_checkpoint'])
+        self.assertTrue(updated['merge_order'][1]['build_checkpoint'])
+        self.assertIn('强制', results[1]['reason'])
+        self.assertIn('skip', results[1]['reason'].lower())
+
+    def test_non_last_doc_remains_false(self):
+        """Doc patches that are NOT last stay False."""
+        tasks = {
+            'merge_order': [
+                self.make_patch(1, '0001', func_class='doc'),
+                self.make_patch(2, '0002', func_class='core'),
+            ],
+            'deps_order': [],
+        }
+        updated, results = calculate_checkpoints(tasks)
+        self.assertFalse(updated['merge_order'][0]['build_checkpoint'])
+        self.assertTrue(updated['merge_order'][1]['build_checkpoint'])  # last → forced true
+
     def test_rule7_default_false(self):
         tasks = {
             'merge_order': [

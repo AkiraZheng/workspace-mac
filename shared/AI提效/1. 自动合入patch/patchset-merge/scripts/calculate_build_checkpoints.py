@@ -100,13 +100,21 @@ def calculate_checkpoints(merge_tasks):
                 checkpoint = True
                 reason_parts.append('高风险或有预判冲突')
 
-        # Rule 4: skip or doc → false (early exit, pointless to check further)
+        # Rule 4: last patch overall (FORCED, overrides everything)
+        if seq == last_patch_seq:
+            checkpoint = True
+            if patch.get('action') == 'skip' or func_class == 'doc':
+                reason_parts.append('最后一个 patch（强制，skip/doc 也验证）')
+            else:
+                reason_parts.append('最后一个 patch（强制）')
+
+        # Rule 5: skip or doc → false (only for non-last patches)
         if checkpoint is None:
             if patch.get('action') == 'skip' or func_class == 'doc':
                 checkpoint = False
                 reason_parts.append('跳过或文档类型')
 
-        # Rule 5: last in group (only when group size > 1)
+        # Rule 6: last in group (only when group size > 1)
         if checkpoint is None:
             group_key = (func_class, common_path_prefix(patch.get('files_changed', [])))
             group_patches = groups.get(group_key, [])
@@ -115,23 +123,13 @@ def calculate_checkpoints(merge_tasks):
                 path_prefix = common_path_prefix(patch.get('files_changed', []))
                 reason_parts.append(f'功能模块最后 patch（{func_class}/{path_prefix} 组）')
 
-        # Rule 6: last patch overall (forced)
-        if seq == last_patch_seq:
-            if checkpoint is None:
-                checkpoint = True
-                reason_parts.append('最后一个 patch（强制）')
-            elif checkpoint:
-                # Already a checkpoint, append forced flag
-                reason_parts.append('(也是最后一个 patch)')
-
         # Rule 7: default → false
         if checkpoint is None:
             checkpoint = False
 
-        if not reason_parts and checkpoint is False and (patch.get('action') != 'skip' and func_class != 'doc'):
+        if not reason_parts and checkpoint is False and \
+                (patch.get('action') != 'skip' and func_class != 'doc'):
             pass  # no reason needed for default false
-        elif not reason_parts and checkpoint is False:
-            reason_parts.append('跳过或文档类型')
 
         results.append({
             'task_id': patch.get('task_id', ''),
