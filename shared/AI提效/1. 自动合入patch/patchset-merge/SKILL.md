@@ -105,6 +105,10 @@ Phase 3: 汇总 → patch_analysis/summary.md
 - `SKILL.md` — 本文件
 - `$SCRIPTS_DIR/download_patches.py` — 统一下载入口（b4/wget/本地）
 - `$SCRIPTS_DIR/generate_diff_report.py` — diff 对比生成
+- `$SCRIPTS_DIR/generate_analyse_md.py` — 确定性生成 analyse.md
+- `$SCRIPTS_DIR/generate_summary_md.py` — 确定性生成 summary.md
+- `$SCRIPTS_DIR/verify_analyse_format.py` — 格式验证门禁
+- `$SCRIPTS_DIR/detect_build_target.sh` — 动态检测编译目标
 - `references/diagnostic-guide.md` — 冲突诊断决策树（Ours/Theirs）
 - `references/output-templates.md` — analyse.md / summary.md 模板 + 屏幕输出格式
 - `references/code-review-expert/SKILL.md` — 捆绑的 review skill（安装时自动部署为独立 skill）
@@ -709,58 +713,73 @@ $BUILD_CMD                       # 终验
 
 ## Phase 3：汇总落盘
 
-所有 task 状态为 `done`/`skipped`/`failed` 后，**必须写入以下全部文件，不可只写 summary**：
+所有 task 状态为 `done`/`skipped`/`failed` 后，**使用确定性脚本生成**，确保格式一致：
+
+**步骤 1：对每个 task 生成 analyse.md**
 
 ```bash
-mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
+# 每条命令自动填充结构化字段，AI 仅需补充第 11 节和文字润色
+python3 "$SCRIPTS_DIR/generate_analyse_md.py" \
+  --analysis-cache "$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json" \
+  --merge-tasks "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --diff-script "$SCRIPTS_DIR/generate_diff_report.py" \
+  --repo-path "$KERNEL_REPO_PATH" \
+  --commit "<commit_hash>" \
+  --output "$KERNEL_REPO_PATH/patch_analysis/<task_id>-<name>-analys.md"
 ```
 
-**对每个 task（含 done / skipped / failed）**：
+脚本输出的 analyse.md 中 `{REQUIRES_AI}` 标记的字段需要 AI 补充：
+- 第 2 节功能描述（若 analysis_cache 无完整文本）
+- 第 3 节依赖分析文字说明
+- 第 8 节合入经验（若无 execution_log）
+- 第 11 节 Review 建议
+
+**步骤 2：AI 补充文字性内容后格式验证**
 
 ```bash
-# 1. 从 analysis_cache.json 读取 Phase 1 分析数据
-# 2. 从 merge_tasks.json 的 execution_log 读取 Phase 2 合入经验
-# 3. 生成差异对比报告（只输出偏离部分，不输出完整 diff）
+# 单文件检查
+python3 "$SCRIPTS_DIR/verify_analyse_format.py" \
+  --type analyse \
+  --file "$KERNEL_REPO_PATH/patch_analysis/0001-xxx-analys.md"
 
-# merge 场景：原始 .patch vs 合入后的 commit（带根因分析）
-python3 "$SCRIPTS_DIR/generate_diff_report.py" \
-  --source "patch:/tmp/patches/<task_id>-<name>.patch" \
-  --target <commit_hash> \
-  --repo-path "$KERNEL_REPO_PATH" \
-  --execution-log "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
-  --task-id "<task_id>" \
-  > "$KERNEL_REPO_PATH/patch_analysis/<task_id>-diff.txt"
-
-# revert 场景：被 revert 的 commit vs revert commit（镜像对比 + 根因分析）
-python3 "$SCRIPTS_DIR/generate_diff_report.py" \
-  --source "commit:<被_revert_的_commit_hash>" \
-  --target <revert_commit_hash> \
-  --repo-path "$KERNEL_REPO_PATH" \
-  --mode revert \
-  --execution-log "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
-  --task-id "<task_id>" \
-  > "$KERNEL_REPO_PATH/patch_analysis/<task_id>-diff.txt"
-
-# 4. 按模板写入
+# 目录批量检查
+python3 "$SCRIPTS_DIR/verify_analyse_format.py" \
+  --dir "$KERNEL_REPO_PATH/patch_analysis/"
 ```
 
-**写入路径**：`$KERNEL_REPO_PATH/patch_analysis/<task_id>-<name>-analys.md`
+**退出码含义**：
 
-**必需内容**（每份 analyse.md）：
-- Phase 1 分析数据（analysis_cache.json 中对应条目）
-- Phase 2 合入经验（merge_tasks.json 中 execution_log）
-- 差异对比报告（generate_diff_report.py 输出，只展示偏离，不重复完整内容）
-- 编译验证记录
+| 退出码 | 含义 | 处理 |
+|--------|------|------|
+| 0 | 格式正确 | 继续下一个 task |
+| 1 | 章节缺失 | 补充缺失章节 |
+| 2 | 占位符未替换 | 将 `{xxx}` 替换为实际内容 |
+| 4 | 文件不存在 | 重新生成 analyse.md |
 
-**然后写入汇总**：
-- 读取 `$KERNEL_REPO_PATH/patch_analysis/` 下所有 `*-analys.md`
-- 读取 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json` 获取执行历史
-- 按 `references/output-templates.md` 中的 summary.md 模板写入 `$KERNEL_REPO_PATH/patch_analysis/summary.md`
+**步骤 3：生成 summary.md**
 
-**最终验证**：
+```bash
+python3 "$SCRIPTS_DIR/generate_summary_md.py" \
+  --analyse-dir "$KERNEL_REPO_PATH/patch_analysis/" \
+  --merge-tasks "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --output "$KERNEL_REPO_PATH/patch_analysis/summary.md"
+
+# 验证 summary 格式
+python3 "$SCRIPTS_DIR/verify_analyse_format.py" \
+  --type summary \
+  --file "$KERNEL_REPO_PATH/patch_analysis/summary.md"
+```
+
+**步骤 4：最终验证**
+
 ```bash
 ls -la "$KERNEL_REPO_PATH/patch_analysis/"
 # 应包含：0001-*-analys.md, 0002-*-analys.md, ..., summary.md
+
+# 格式一体验证（确保所有文件无占位符残留）
+python3 "$SCRIPTS_DIR/verify_analyse_format.py" \
+  --dir "$KERNEL_REPO_PATH/patch_analysis/"
 ```
 
 **Phase 3 完成后必须输出提醒**（不依赖 AI 记忆，硬编码到流程中）：
