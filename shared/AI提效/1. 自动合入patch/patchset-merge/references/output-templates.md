@@ -79,17 +79,26 @@
 # merge 场景
 python3 scripts/generate_diff_report.py \
   --source "patch:/tmp/patches/0001-xxx.patch" \
-  --target <commit_hash> --repo-path "$KERNEL_REPO_PATH"
+  --target <commit_hash> --repo-path "$KERNEL_REPO_PATH" \
+  --execution-log "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "0001"
 
-# revert 场景
+# revert 场景（镜像对比）
 python3 scripts/generate_diff_report.py \
   --source "commit:<被_revert_的_commit>" \
-  --target <revert_commit_hash> --repo-path "$KERNEL_REPO_PATH"
+  --target <revert_commit_hash> --repo-path "$KERNEL_REPO_PATH" \
+  --mode revert \
+  --execution-log "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "0001"
 ```
 
 **偏离类型标注**：
 - 源有目标无：patch/原 commit 有此行，实际 commit 无（因冲突跳过/被删除）
 - 目标有源无：实际 commit 有此行，源 patch/原 commit 无（因适配新增/git am 自动调整）
+- revert 模式：源添加→目标应删除，源删除→目标应恢复（镜像匹配）
+
+**根因分析**：
+偏离标注后会从 execution_log 中提取根因（来自 Phase 2 的合入经验：冲突解决过程/编译修复记录/适配原因）。
 
 ```diff
 {差异对比内容，由 generate_diff_report.py 生成}

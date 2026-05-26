@@ -265,6 +265,15 @@ else
     warn "双向同步失败（不阻塞安装），请手动执行: cp $SKILL_DIR/SKILL.md $WORKSPACE/SKILL.md"
 fi
 
+# 安装 code-review-expert 为独立 skill（merge-patchset 运行时需要调用）
+CODE_REVIEW_DIR="$HOME/.agents/skills/code-review-expert"
+mkdir -p "$CODE_REVIEW_DIR"
+if cp "$WORKSPACE/references/code-review-expert/SKILL.md" "$CODE_REVIEW_DIR/SKILL.md" 2>/dev/null; then
+    ok "code-review-expert → $CODE_REVIEW_DIR"
+else
+    warn "code-review-expert 独立安装失败（merge 时 review 步骤将跳过）"
+fi
+
 if [ "$DEPLOY_FAILED" -eq 1 ]; then
     echo ""
     err "部署失败，请检查上方错误信息后重试。"
@@ -302,6 +311,14 @@ verify_file "scripts/generate_diff_report.py"
 verify_file "scripts/topo_sort.py"
 
 echo ""
+
+# 验证 code-review-expert 独立 skill
+REVIEW_SKILL="$HOME/.agents/skills/code-review-expert/SKILL.md"
+if [ -f "$REVIEW_SKILL" ]; then
+    ok "code-review-expert 独立 skill 已就绪"
+else
+    warn "code-review-expert 独立 skill 缺失（merge 时 review 步骤将跳过）"
+fi
 
 # 确认 symlink
 for link in "$HOME/.claude/skills/merge-patchset" "$HOME/.config/opencode/skills/merge-patchset"; do

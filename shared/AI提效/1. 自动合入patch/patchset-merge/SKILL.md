@@ -51,7 +51,7 @@ upstream 是 ~/code/linux/linux
 
 1. **逐个合入 + 逐个 commit**：N 个 patch 产生 N 个 commit，不允许批量
 2. **仅在出现问题时与用户交互**：正常合入→编译通过→commit→review 全过程自动流转；仅当冲突无法自动解决（10 轮上限）、循环依赖、或重复 patch 判定时暂停等用户决策
-3. **每 commit 后调用 code-review-expert skill**（路径：`references/code-review-expert/SKILL.md`，缺则跳过并标注）
+3. **每 commit 后调用 code-review-expert skill**（skill 框架按名称加载；若未安装则跳过并标注）
 4. **revert 逐个 commit**：逆序（最新→最旧），每 revert 一个就 commit 一个
 5. **每 patch 必须编译验证**：执行 `$BUILD_CMD`，0 error + 产物存在
 6. **merge 串行，分析并行**：merge 步骤不可并行，前期分析只读可并行
@@ -60,6 +60,34 @@ upstream 是 ~/code/linux/linux
 9. **修改严格归所属 patch**：不混入无关改动到其他 patch 的 commit
 10. **编译通过 + 功能正常是第一指标**，两者同等优先级
 11. **操作在独立分支**，不在主干分支
+
+## Skill 初始化（任务启动时首先执行）
+
+Agent 在执行任何任务前，必须动态发现 skill 安装目录和 scripts 路径：
+
+```bash
+# 方法 1：按 opencode 约定路径查找（推荐）
+SKILL_DIR="$HOME/.agents/skills/merge-patchset"
+
+# 方法 2：若约定路径不存在，全局搜索
+if [ ! -d "$SKILL_DIR" ]; then
+    SKILL_DIR=$(find "$HOME" -name "merge-patchset" -path "*skills*" -type d 2>/dev/null | head -1)
+fi
+
+# 方法 3：最后 fallback（GPT cli 约定路径）
+if [ -z "$SKILL_DIR" ] || [ ! -d "$SKILL_DIR" ]; then
+    SKILL_DIR="$HOME/.claude/skills/merge-patchset"
+fi
+
+export SKILL_DIR
+export SCRIPTS_DIR="$SKILL_DIR/scripts"
+export REFERENCES_DIR="$SKILL_DIR/references"
+
+echo "SKILL_DIR=$SKILL_DIR"
+echo "SCRIPTS_DIR=$SCRIPTS_DIR"
+```
+
+初始化完成后，所有 scripts 调用均使用 `$SCRIPTS_DIR/xxx.py` 绝对路径，保证 agent 在任何工作目录下都能正确找到脚本。
 
 ## 工作流总览
 
@@ -75,20 +103,20 @@ Phase 3: 汇总 → patch_analysis/summary.md
 ## 文件清单
 
 - `SKILL.md` — 本文件
-- `scripts/download_patches.py` — 统一下载入口（b4/wget/本地）
-- `scripts/generate_diff_report.py` — diff 对比生成
+- `$SCRIPTS_DIR/download_patches.py` — 统一下载入口（b4/wget/本地）
+- `$SCRIPTS_DIR/generate_diff_report.py` — diff 对比生成
 - `references/diagnostic-guide.md` — 冲突诊断决策树（Ours/Theirs）
 - `references/output-templates.md` — analyse.md / summary.md 模板 + 屏幕输出格式
-- `references/code-review-expert/SKILL.md` — 捆绑的 review skill
+- `references/code-review-expert/SKILL.md` — 捆绑的 review skill（安装时自动部署为独立 skill）
 
 ---
 
 ## Phase 0：下载
 
-**执行者**：`scripts/download_patches.py`（确定性脚本，不是 agent）
+**执行者**：`$SCRIPTS_DIR/download_patches.py`（确定性脚本，不是 agent）
 
 ```bash
-python3 scripts/download_patches.py \
+python3 "$SCRIPTS_DIR/download_patches.py" \
   --source "<message-id | url | /path/to/patches>" \
   --output-dir /tmp/patches/ \
   --target-kernel "$KERNEL_REPO_PATH" \
@@ -504,7 +532,7 @@ git commit -m "<patch subject>" --author="<patch author>"
 二次确认 `git diff --staged` 只含本 patch 文件。
 
 ### REVIEW
-加载 `references/code-review-expert/SKILL.md`，对 `HEAD~1..HEAD` 做 review。
+调用 **code-review-expert skill**（skill 框架按名称自动加载），对 `HEAD~1..HEAD` 做 review。
 若 reference 不存在则跳过，标注"未做自动 review"。
 - Must Fix 意见 → 标记需 rebase amend
 - Suggest 意见 → 记录不阻塞
@@ -557,18 +585,23 @@ mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
 # 2. 从 merge_tasks.json 的 execution_log 读取 Phase 2 合入经验
 # 3. 生成差异对比报告（只输出偏离部分，不输出完整 diff）
 
-# merge 场景：原始 .patch vs 合入后的 commit
-python3 scripts/generate_diff_report.py \
+# merge 场景：原始 .patch vs 合入后的 commit（带根因分析）
+python3 "$SCRIPTS_DIR/generate_diff_report.py" \
   --source "patch:/tmp/patches/<task_id>-<name>.patch" \
   --target <commit_hash> \
   --repo-path "$KERNEL_REPO_PATH" \
+  --execution-log "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
   > "$KERNEL_REPO_PATH/patch_analysis/<task_id>-diff.txt"
 
-# revert 场景：被 revert 的 commit vs revert commit
-python3 scripts/generate_diff_report.py \
+# revert 场景：被 revert 的 commit vs revert commit（镜像对比 + 根因分析）
+python3 "$SCRIPTS_DIR/generate_diff_report.py" \
   --source "commit:<被_revert_的_commit_hash>" \
   --target <revert_commit_hash> \
   --repo-path "$KERNEL_REPO_PATH" \
+  --mode revert \
+  --execution-log "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
   > "$KERNEL_REPO_PATH/patch_analysis/<task_id>-diff.txt"
 
 # 4. 按模板写入
