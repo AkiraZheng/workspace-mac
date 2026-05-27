@@ -660,7 +660,7 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 ### 状态机
 
 ```
-PRECHECK → PRE_REVERT → APPLY → BUILD (checkpoint only) → COMMIT → REVIEW → RECORD → DONE
+PRECHECK → PRE_REVERT → APPLY → VERIFY_INTENT → BUILD (checkpoint only) → COMMIT → REVIEW → RECORD → DONE
 ```
 
 - `build_checkpoint=true` → 完整执行 BUILD→verify→gatekeeper
@@ -681,12 +681,44 @@ PRECHECK → PRE_REVERT → APPLY → BUILD (checkpoint only) → COMMIT → REV
 降级链（详见 `references/diagnostic-guide.md`）：
 ```
 git am --3way <patch>
-  ├─ 成功 → BUILD
+  ├─ 成功 → VERIFY_INTENT
   └─ 失败 → git apply --3way --reject
-       ├─ 成功 → 分析 .rej 文件手动填入
-       └─ 失败 → 读取 .patch 逐 hunk 手工匹配
+       ├─ 成功 → 分析 .rej 文件手动填入 → VERIFY_INTENT
+       └─ 失败 → 读取 .patch 逐 hunk 手工匹配 → VERIFY_INTENT
 ```
 冲突解决按 Ours/Theirs 决策表（`references/diagnostic-guide.md`）。
+
+**硬性规则**：
+- **patch 的 `+` 行（新增代码）→ 必须保留**，不可选 Ours 删除
+- **introduced_symbols 所在行 → 必须保留**，不可丢失
+
+### VERIFY_INTENT（APPLY 后强制校验）
+
+**每次 APPLY 完成后必须执行，确保 patch 核心意图未被冲突解决破坏：**
+
+```bash
+python3 "$SCRIPTS_DIR/verify_patch_intent.py" \
+  --patch-file "<patch_file>" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" \
+  --repo-path "$KERNEL_REPO_PATH"
+```
+
+**退出码含义**：
+
+| 退出码 | 含义 | 处理 |
+|--------|------|------|
+| 0 | ✅ patch 意图完整保留 | 进入 BUILD |
+| 1 | ⚠️ 部分 + 行缺失 | 检查缺失行 → 补充 → 重新校验 |
+| **3** | **❌ introduced_symbols 缺失** | **严重：核心功能代码丢失 → 暂停等用户决策** |
+
+**每个 APPLY 完成后必须显式输出**：
+```
+[VERIFY_INTENT] task_id=0001
+introduced_symbols: func_a ✅ / MACRO_B ✅
+patch + 行:  150/150 ✅
+结论: ✅ patch 意图完整保留 → BUILD
+```
 
 ### BUILD
 

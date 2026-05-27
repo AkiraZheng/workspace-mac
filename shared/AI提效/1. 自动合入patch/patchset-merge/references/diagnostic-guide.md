@@ -8,6 +8,8 @@
 
 | 场景 | Ours（目标仓库代码） | Theirs（patch 代码） | 抉择 | 理由 |
 |------|---------------------|---------------------|------|------|
+| **patch 的 `+` 行（新增代码）** | 无对应代码或有冲突 | patch 新增内容 | **Theirs（强制保留）** | 这是 patch 的核心意图，不可丢失 |
+| **patch 引入的关键符号（introduced_symbols）所在行** | 上下文冲突 | patch 定义的新函数/宏 | **Theirs（强制保留）** | 核心符号定义不可删，否则 patch 功能缺失 |
 | 上下文行差异 | 目标仓库真实上下文 | patch 中的上下文行 | **Ours** | 上下文是定位锚点，目标仓库代码是真实代码 |
 | 独立新功能（新增函数/宏/类型） | 无对应代码 | 新增内容 | **Theirs** | 全量接受新功能 |
 | 上游重构 vs 本地 | 上游版本的同函数 | 上游新版本的重构 | **Theirs** | 上游版本更新且权威 |
@@ -41,3 +43,41 @@ git am --3way <patch>
 | patch 代码本身的语法/逻辑错误 | 编辑源文件最小修复 |
 | 调用不存在的符号 | 标记为缺失依赖，尝试最小适配或 stub |
 | 非 patch 的 config 问题 | 临时改 .config → make → git restore .config，记录在 analyse.md |
+
+## APPLY 后意图校验
+
+**每次 APPLY（含冲突解决）完成后，必须执行校验**：
+
+```bash
+python3 "$SCRIPTS_DIR/verify_patch_intent.py" \
+  --patch-file <patch_path> \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id <task_id> \
+  --repo-path "$KERNEL_REPO_PATH"
+```
+
+**退出码**：
+
+| 退出码 | 含义 | 处理 |
+|--------|------|------|
+| 0 | patch 意图完整保留 | 进入 BUILD |
+| 1 | 部分 + 行缺失 | 检查缺失行 → 手动补充 → 重新校验 |
+| 2 | 参数错误 | 检查文件路径 |
+| 3 | introduced_symbols 缺失 | **严重：核心功能代码丢失，暂停等待用户决策** |
+
+**校验流程**：
+```
+APPLY（含冲突解决）
+    │
+    ▼
+verify_patch_intent.py
+    │
+    ├─ 0: → BUILD
+    ├─ 1: → 补充缺失行 → 重新校验
+    └─ 3: → 暂停，输出缺失符号列表 → 用户决策
+```
+
+**自检清单**（AI 在 APPLY 后应确认）：
+1. 冲突解决后，patch 的 `+` 行是否全部保留（不可选 Ours 删除）
+2. introduced_symbols 是否存在于工作区文件中
+3. 若为手动填入 .rej 内容，是否完整无遗漏
