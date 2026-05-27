@@ -40,7 +40,11 @@ SECTION_HEADERS = [
     "11. Review 建议与改进方向",
 ]
 
-PLACEHOLDER_REQUIRES_AI = "{REQUIRES_AI}"
+def _ai(name: str) -> str:
+    """生成唯一命名的 AI 占位符，避免 AI Edit 时出现多匹配错误。"""
+    return f"{{REQUIRES_AI_{name}}}"
+
+PLACEHOLDER_REQUIRES_AI = _ai  # 向后兼容别名
 
 
 def load_json(path: str) -> dict:
@@ -83,13 +87,13 @@ def _dict_val(d, key, default="未填写") -> str:
 
 def generate_section_1(task: dict) -> str:
     dup = task.get("duplicate_info", {})
-    commit = dup.get("detail", "") if dup.get("level") != "无重复" else PLACEHOLDER_REQUIRES_AI
+    commit = dup.get("detail", "") if dup.get("level") != "无重复" else _ai("dup_detail")
     return f"""## 1. 基本信息
 | 项 | 值 |
 |----|-----|
 | Patch 编号 | {task.get("task_id", "?")} |
-| 标题 | {task.get("subject", PLACEHOLDER_REQUIRES_AI)} |
-| 作者 | {task.get("author", PLACEHOLDER_REQUIRES_AI)} |
+| 标题 | {task.get("subject", _ai("subject"))} |
+| 作者 | {task.get("author", _ai("author"))} |
 | 影响文件数 | {len(task.get("files_changed", []))} |
 | 涉改文件 | {_list_val(task.get("files_changed"), "无")} |
 | 合入动作 | {task.get("action", "?")} |
@@ -100,9 +104,9 @@ def generate_section_1(task: dict) -> str:
 
 
 def generate_section_2(analysis: dict) -> str:
-    summary = _dict_val(analysis, "summary", PLACEHOLDER_REQUIRES_AI)
-    modules = _dict_val(analysis, "modules", PLACEHOLDER_REQUIRES_AI)
-    target_status = _dict_val(analysis, "status_in_target", PLACEHOLDER_REQUIRES_AI)
+    summary = _dict_val(analysis, "summary", _ai("summary"))
+    modules = _dict_val(analysis, "modules", _ai("modules"))
+    target_status = _dict_val(analysis, "status_in_target", _ai("status_in_target"))
     return f"""## 2. 功能描述与关联模块
 
 {summary}
@@ -158,9 +162,9 @@ def generate_section_3(task: dict, analysis: dict) -> str:
 
 
 def generate_section_4(analysis: dict) -> str:
-    level = _dict_val(analysis, "revert_level", PLACEHOLDER_REQUIRES_AI) if analysis else PLACEHOLDER_REQUIRES_AI
+    level = _dict_val(analysis, "revert_level", _ai("revert_level")) if analysis else _ai("revert_level")
     commits = _list_val(analysis.get("revert_commits", []) if analysis else [], "无")
-    reason = _dict_val(analysis, "revert_reason", PLACEHOLDER_REQUIRES_AI) if analysis else PLACEHOLDER_REQUIRES_AI
+    reason = _dict_val(analysis, "revert_reason", _ai("revert_reason")) if analysis else _ai("revert_reason")
     return f"""## 4. Revert 需求评估
 
 | 必要性等级 | {level} |
@@ -171,8 +175,8 @@ def generate_section_4(analysis: dict) -> str:
 
 
 def generate_section_5(analysis: dict) -> str:
-    risk = _dict_val(analysis, "risk", PLACEHOLDER_REQUIRES_AI) if analysis else PLACEHOLDER_REQUIRES_AI
-    detail = _dict_val(analysis, "risk_detail", PLACEHOLDER_REQUIRES_AI) if analysis else PLACEHOLDER_REQUIRES_AI
+    risk = _dict_val(analysis, "risk", _ai("risk")) if analysis else _ai("risk")
+    detail = _dict_val(analysis, "risk_detail", _ai("risk_detail")) if analysis else _ai("risk_detail")
     return f"""## 5. 风险程度
 
 **{risk}**
@@ -181,8 +185,8 @@ def generate_section_5(analysis: dict) -> str:
 
 
 def generate_section_6(analysis: dict) -> str:
-    req = _dict_val(analysis, "review_required", PLACEHOLDER_REQUIRES_AI) if analysis else PLACEHOLDER_REQUIRES_AI
-    reason = _dict_val(analysis, "review_reason", PLACEHOLDER_REQUIRES_AI) if analysis else PLACEHOLDER_REQUIRES_AI
+    req = _dict_val(analysis, "review_required", _ai("review_required")) if analysis else _ai("review_required")
+    reason = _dict_val(analysis, "review_reason", _ai("review_reason")) if analysis else _ai("review_reason")
     return f"""## 6. 人工 Review 需求度
 
 **{req}**
@@ -192,7 +196,7 @@ def generate_section_6(analysis: dict) -> str:
 
 def generate_section_7(analysis: dict) -> str:
     tests = analysis.get("smoke_tests", []) if analysis else []
-    items = "\n".join(f"- {t}" for t in tests) if tests else PLACEHOLDER_REQUIRES_AI
+    items = "\n".join(f"- {t}" for t in tests) if tests else _ai("smoke_tests")
     return f"""## 7. 建议验证冒烟内容
 {items}
 """
@@ -216,9 +220,9 @@ def generate_section_8(execution_log: list) -> str:
             build_count += 1
 
     if not conflict_info:
-        conflict_info = PLACEHOLDER_REQUIRES_AI
+        conflict_info = _ai("conflict_info")
     if not build_info:
-        build_info = PLACEHOLDER_REQUIRES_AI
+        build_info = _ai("build_info")
 
     return f"""## 8. 合入实际经验
 
@@ -232,7 +236,7 @@ def generate_section_8(execution_log: list) -> str:
 
 def generate_section_9(diff_content: str) -> str:
     if not diff_content or diff_content.strip() == "":
-        diff_content = PLACEHOLDER_REQUIRES_AI
+        diff_content = _ai("diff_content")
     return f"""## 9. 与源 Patch/Commit 的差异对比
 
 {diff_content}
@@ -241,7 +245,7 @@ def generate_section_9(diff_content: str) -> str:
 
 def generate_section_10(task: dict, execution_log: list) -> str:
     error_count = 0
-    product = PLACEHOLDER_REQUIRES_AI
+    product = _ai("product")
     retry = 0
 
     for entry in execution_log:
@@ -266,16 +270,16 @@ def generate_section_11() -> str:
     return f"""## 11. Review 建议与改进方向
 
 ### 功能改进建议
-{PLACEHOLDER_REQUIRES_AI}
+{_ai("review_improvement")}
 
 ### 潜在 Bug 提示
-{PLACEHOLDER_REQUIRES_AI}
+{_ai("review_bug_hint")}
 
 ### 代码质量建议
-{PLACEHOLDER_REQUIRES_AI}
+{_ai("review_code_quality")}
 
 ### 适配建议
-{PLACEHOLDER_REQUIRES_AI}
+{_ai("review_adapter")}
 """
 
 
@@ -303,7 +307,7 @@ def run_diff_script(diff_script: str, merge_tasks_path: str,
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return PLACEHOLDER_REQUIRES_AI
+        return _ai("diff_result")
 
 
 def generate_analyse_md(analysis_cache: dict, merge_data: dict,
@@ -373,7 +377,8 @@ def main():
     with open(args.output, "w") as f:
         f.write(content)
 
-    placeholder_count = content.count(PLACEHOLDER_REQUIRES_AI)
+    AI_PREFIX = "{REQUIRES_AI_"
+    placeholder_count = content.count(AI_PREFIX)
     print(f"[GEN] {args.output} 已生成 ({placeholder_count} 个 AI 待填字段)")
     sys.exit(0)
 

@@ -227,7 +227,7 @@ class TestGenerateAnalyseMd(unittest.TestCase):
             SAMPLE_ANALYSIS, SAMPLE_MERGE_TASKS, "0001",
             self.merges, "/usr/bin/false", self.tmp, "",
         )
-        self.assertIn(gen_analyse.PLACEHOLDER_REQUIRES_AI, content)
+        self.assertIn("{REQUIRES_AI_", content)
         self.assertIn("## 11.", content)
 
 
@@ -280,7 +280,7 @@ class TestVerifyAnalyseFormat(unittest.TestCase):
     def test_with_ai_placeholders_still_pass(self):
         """AI placeholders are allowed, other {xxx} are not."""
         sections = "\n\n".join(
-            f"## {s}\n{gen_analyse.PLACEHOLDER_REQUIRES_AI}"
+            f"## {s}\n{{REQUIRES_AI_test}}"
             for s in verify_fmt.ANALYSE_SECTIONS
         )
         content = f"# Patch 0001: Test\n\n{sections}"

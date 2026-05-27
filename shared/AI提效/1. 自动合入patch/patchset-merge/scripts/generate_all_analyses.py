@@ -98,7 +98,7 @@ def generate_all(analysis_cache_path: str, merge_tasks_path: str,
             with open(output_file, "w") as f:
                 f.write(content)
 
-            placeholder_count = content.count(gen.PLACEHOLDER_REQUIRES_AI)
+            placeholder_count = content.count("{REQUIRES_AI_")
             print(f"[GEN] {task_id} → {os.path.basename(output_file)} "
                   f"({placeholder_count} 个 AI 待填字段)")
             success.append((task_id, output_file))
