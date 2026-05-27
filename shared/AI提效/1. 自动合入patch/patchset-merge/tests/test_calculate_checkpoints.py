@@ -242,6 +242,86 @@ class TestCalculateCheckpoints(unittest.TestCase):
         self.assertFalse(updated['merge_order'][0]['build_checkpoint'])
         self.assertTrue(updated['merge_order'][1]['build_checkpoint'])  # last → forced true
 
+    def test_reverse_depender_excluded(self):
+        """Reverse depender → completely excluded (Rule 1a), even if it is infra/risk=高."""
+        tasks = {
+            'merge_order': [
+                self.make_patch(1, '0001', func_class='infra',
+                                introduced_syms=[],
+                                referenced_syms=['func_a']),
+                self.make_patch(2, '0002', func_class='core',
+                                introduced_syms=['func_a'],
+                                referenced_syms=[]),
+            ],
+            'deps_order': [],
+        }
+        updated, results = calculate_checkpoints(tasks)
+        # 0001 is reverse depender (references func_a defined by 0002)
+        # → excluded even though it's infra!
+        self.assertFalse(updated['merge_order'][0]['build_checkpoint'])
+        self.assertIn('反向依赖者', results[0]['reason'])
+        # 0002 is last → forced True
+        self.assertTrue(updated['merge_order'][1]['build_checkpoint'])
+
+    def test_reverse_provider_forced(self):
+        """Reverse provider → forced checkpoint (Rule 1b)."""
+        tasks = {
+            'merge_order': [
+                self.make_patch(1, '0001', func_class='bugfix',
+                                introduced_syms=[],
+                                referenced_syms=['func_a', 'MACRO_B']),
+                self.make_patch(2, '0002', func_class='bugfix',
+                                introduced_syms=[],
+                                referenced_syms=[]),
+                self.make_patch(3, '0003', func_class='driver',
+                                introduced_syms=['func_a', 'MACRO_B'],
+                                referenced_syms=[]),
+            ],
+            'deps_order': [],
+        }
+        updated, results = calculate_checkpoints(tasks)
+        # 0001: reverse depender → excluded
+        self.assertFalse(updated['merge_order'][0]['build_checkpoint'])
+        # 0002: same group as 0001 (bugfix), last in group → can be True,
+        # but since 0003 is last overall → 0003 has highest priority.
+        # 0002 could be True via rule 6 (last in bugfix group), or False otherwise.
+        # Either way, 0003 must be True.
+        # 0003: reverse provider + last patch → forced True
+        self.assertTrue(updated['merge_order'][2]['build_checkpoint'])
+        self.assertIn('反向依赖', results[2]['reason'])
+
+    def test_reverse_provider_forced_even_if_few_refs(self):
+        """Reverse provider forced even if referenced by only 1 patch (<3 rule)."""
+        tasks = {
+            'merge_order': [
+                self.make_patch(1, '0001', referenced_syms=['func_a']),
+                self.make_patch(2, '0002', introduced_syms=['func_a']),
+            ],
+            'deps_order': [],
+        }
+        updated, results = calculate_checkpoints(tasks)
+        # 0001: reverse depender → excluded
+        self.assertFalse(updated['merge_order'][0]['build_checkpoint'])
+        # 0002: reverse provider (1 ref, <3, but forced by rule 1b)
+        self.assertTrue(updated['merge_order'][1]['build_checkpoint'])
+        self.assertIn('反向依赖', results[1]['reason'])
+        self.assertIn('func_a', results[1]['reason'])
+
+    def test_multi_reverse_dependers_same_provider(self):
+        """Multiple patches depend on same later patch → all excluded, provider forced."""
+        tasks = {
+            'merge_order': [
+                self.make_patch(1, '0001', referenced_syms=['func_a']),
+                self.make_patch(2, '0002', referenced_syms=['func_a']),
+                self.make_patch(3, '0003', introduced_syms=['func_a']),
+            ],
+            'deps_order': [],
+        }
+        updated, results = calculate_checkpoints(tasks)
+        self.assertFalse(updated['merge_order'][0]['build_checkpoint'])  # depender excluded
+        self.assertFalse(updated['merge_order'][1]['build_checkpoint'])  # depender excluded
+        self.assertTrue(updated['merge_order'][2]['build_checkpoint'])   # provider forced
+
     def test_rule7_default_false(self):
         tasks = {
             'merge_order': [

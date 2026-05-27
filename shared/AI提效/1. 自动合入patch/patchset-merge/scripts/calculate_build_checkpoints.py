@@ -2,14 +2,16 @@
 """
 Calculate build_checkpoint for each task in merge_tasks.json.
 
-Rules (priority order):
-  1. 功能分类 == 'infra'                          → True
-  2. introduced_symbols referenced by >= 3 later patches → True
-  3. risk_level == '高' or conflicts_predicted non-empty → True
-  4. Last patch in its (功能分类, path_prefix) group   → True
-  5. Last patch overall (max seq)                   → True (forced)
-  6. action == 'skip' or 功能分类 == 'doc'          → False
-  7. All others                                     → False
+Rules (priority order, short-circuit):
+  1a. 反向依赖者（前面的 patch 引用后面 patch 的符号）→ False（完全排除）
+  1b. 反向依赖的被依赖者（定义符号被前面 patch 引用）→ True（强制）
+  1.  功能分类 == 'infra'                                 → True
+  2.  introduced_symbols referenced by >= 3 later patches  → True
+  3.  risk_level == '高' or conflicts_predicted non-empty  → True
+  4.  Last patch overall (max seq)                         → True (forced)
+  5.  action == 'skip' or 功能分类 == 'doc'                → False
+  6.  Last patch in its (功能分类, path_prefix) group      → True
+  7.  All others                                           → False
 """
 
 import argparse
@@ -45,13 +47,67 @@ def count_references(introduced_symbols, later_patches):
     return count
 
 
+def detect_reverse_dependencies(all_patches):
+    """Detect reverse dependencies in patch order.
+
+    A reverse dependency occurs when a patch at an EARLIER position (lower seq)
+    references symbols introduced by a patch at a LATER position (higher seq).
+
+    Returns:
+      reverse_dependers: set of task_ids that reference later symbols
+                         → these patches get checkpoint=False (completely excluded)
+      reverse_providers: dict {task_id: set of symbols}
+                         → these patches get checkpoint=True (forced by reverse dep)
+    """
+    symbol_owner = {}
+    for patch in all_patches:
+        for sym in patch.get('introduced_symbols', []):
+            symbol_owner[sym] = patch['task_id']
+
+    reverse_dependers = set()
+    reverse_providers = defaultdict(set)
+
+    for patch in all_patches:
+        pid = patch['task_id']
+        for sym in patch.get('referenced_symbols', []):
+            owner = symbol_owner.get(sym)
+            if owner is None or owner == pid:
+                continue
+
+            owner_seq = None
+            pid_seq = None
+            for p in all_patches:
+                if p['task_id'] == owner:
+                    owner_seq = p.get('seq', 0)
+                if p['task_id'] == pid:
+                    pid_seq = p.get('seq', 0)
+
+            if owner_seq is None or pid_seq is None:
+                continue
+
+            # Reverse: depender comes BEFORE provider in original order
+            if pid_seq < owner_seq:
+                reverse_dependers.add(pid)
+                reverse_providers[owner].add(sym)
+
+    # Convert sets to sorted lists for JSON serialization
+    reverse_providers_out = {
+        k: sorted(v) for k, v in reverse_providers.items()
+    }
+
+    return reverse_dependers, reverse_providers_out
+
+
 def calculate_checkpoints(merge_tasks):
     all_patches = merge_tasks.get('merge_order', []) + merge_tasks.get('deps_order', [])
     if not all_patches:
-        return merge_tasks
+        return merge_tasks, []
 
-    # Sort by seq to establish order
+    # Sort by seq to establish original order
     all_patches.sort(key=lambda p: p.get('seq', 9999))
+
+    # Detect reverse dependencies BEFORE rule evaluation
+    reverse_dependers, reverse_providers = detect_reverse_dependencies(all_patches)
 
     # Group by (功能分类, path_prefix)
     groups = defaultdict(list)
@@ -71,19 +127,54 @@ def calculate_checkpoints(merge_tasks):
     last_patch_overall = max(all_patches, key=lambda p: p.get('seq', 0))
     last_patch_seq = last_patch_overall.get('seq', 0)
 
+    # Pre-compute reverse dependency info for display
+    depender_targets = {}
+    for depender_id in reverse_dependers:
+        targets = []
+        for provider_id, symbols in reverse_providers.items():
+            for p in all_patches:
+                if p['task_id'] == depender_id:
+                    for sym in p.get('referenced_symbols', []):
+                        if sym in symbols and id(provider_id) == id(provider_id):
+                            if provider_id not in targets:
+                                targets.append(f"{'→'.join(sorted(symbols))}@{provider_id}")
+            depender_targets[depender_id] = targets
+
     results = []
     for idx, patch in enumerate(all_patches):
         seq = patch.get('seq', 0)
+        task_id = patch.get('task_id', '')
         func_class = patch.get('功能分类', 'core')
         reason_parts = []
         checkpoint = None
 
-        # Rule 1: infra → true
-        if func_class == 'infra':
+        # ── Rule 1a: 反向依赖者 → 完全排除 ──
+        if task_id in reverse_dependers:
+            checkpoint = False
+            symbols_info = reverse_providers.get(task_id, {})
+            depender_symbols = []
+            for sym in patch.get('referenced_symbols', []):
+                for provider_id, prov_symbols in reverse_providers.items():
+                    if sym in prov_symbols:
+                        depender_symbols.append(f"{sym}→{provider_id}")
+            if depender_symbols:
+                reason_parts.append(f'反向依赖者（引用后面 patch 的符号: {";".join(depender_symbols[:3])}）')
+            else:
+                reason_parts.append('反向依赖者（引用后面 patch 的符号）')
+
+        # ── Rule 1b: 反向依赖的被依赖者 → 强制验证 ──
+        if checkpoint is None and task_id in reverse_providers:
+            checkpoint = True
+            symbols = reverse_providers[task_id]
+            sym_list = ', '.join(sorted(symbols)[:3])
+            reason_parts.append(f'反向依赖：定义符号 {sym_list}（被前面 patch 引用）')
+
+        # ── Rule 1 (original): infra → true ──
+        if checkpoint is None and func_class == 'infra':
             checkpoint = True
             reason_parts.append('基础设施（公共头文件/宏定义）')
 
-        # Rule 2: referenced by >= 3 later patches
+        # ── Rule 2: referenced by >= 3 later patches ──
         if checkpoint is None:
             later_patches = all_patches[idx + 1:]
             ref_count = count_references(
@@ -93,14 +184,14 @@ def calculate_checkpoints(merge_tasks):
                 checkpoint = True
                 reason_parts.append(f'被 ≥3 个后续 patch 依赖（{ref_count} 个）')
 
-        # Rule 3: risk_level == "高" or conflicts_predicted non-empty
+        # ── Rule 3: risk_level == "高" or conflicts_predicted ──
         if checkpoint is None:
             if (patch.get('risk_level') == '高' or
                     patch.get('conflicts_predicted')):
                 checkpoint = True
                 reason_parts.append('高风险或有预判冲突')
 
-        # Rule 4: last patch overall (FORCED, overrides everything)
+        # ── Rule 4: last patch overall (FORCED) ──
         if seq == last_patch_seq:
             checkpoint = True
             if patch.get('action') == 'skip' or func_class == 'doc':
@@ -108,13 +199,13 @@ def calculate_checkpoints(merge_tasks):
             else:
                 reason_parts.append('最后一个 patch（强制）')
 
-        # Rule 5: skip or doc → false (only for non-last patches)
+        # ── Rule 5: skip or doc → false ──
         if checkpoint is None:
             if patch.get('action') == 'skip' or func_class == 'doc':
                 checkpoint = False
                 reason_parts.append('跳过或文档类型')
 
-        # Rule 6: last in group (only when group size > 1)
+        # ── Rule 6: last in group ──
         if checkpoint is None:
             group_key = (func_class, common_path_prefix(patch.get('files_changed', [])))
             group_patches = groups.get(group_key, [])
@@ -123,16 +214,12 @@ def calculate_checkpoints(merge_tasks):
                 path_prefix = common_path_prefix(patch.get('files_changed', []))
                 reason_parts.append(f'功能模块最后 patch（{func_class}/{path_prefix} 组）')
 
-        # Rule 7: default → false
+        # ── Rule 7: default → false ──
         if checkpoint is None:
             checkpoint = False
 
-        if not reason_parts and checkpoint is False and \
-                (patch.get('action') != 'skip' and func_class != 'doc'):
-            pass  # no reason needed for default false
-
         results.append({
-            'task_id': patch.get('task_id', ''),
+            'task_id': task_id,
             'seq': seq,
             '功能分类': func_class,
             'checkpoint': checkpoint,
@@ -150,15 +237,13 @@ def print_results(results):
     print()
     print('\U0001f4ca 编译验证点计算结果：')
     print()
-    header = f"{'Seq':<5} {'Task':<10} {'功能分类':<10} {'被引用数':<8} {'验证点':<6} {'原因'}"
+    header = f"{'Seq':<5} {'Task':<10} {'功能分类':<10} {'验证点':<6} {'原因'}"
     print(header)
     print('-' * len(header))
 
-    # Re-count references for display
-    all_patches_buf = []
     for r in results:
         mark = '\u2705' if r['checkpoint'] else '\u2014'
-        print(f"{r['seq']:<5} {r['task_id']:<10} {r['功能分类']:<10} {'':<8} {mark:<6} {r['reason']}")
+        print(f"{r['seq']:<5} {r['task_id']:<10} {r['功能分类']:<10} {mark:<6} {r['reason']}")
 
     checkpoint_count = sum(1 for r in results if r['checkpoint'])
     total = len(results)
