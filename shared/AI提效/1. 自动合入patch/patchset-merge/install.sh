@@ -192,6 +192,7 @@ REQUIRED_FILES=(
     "$WORKSPACE/scripts/verify_build.sh"
     "$WORKSPACE/scripts/gatekeeper.py"
     "$WORKSPACE/scripts/calculate_build_checkpoints.py"
+    "$WORKSPACE/scripts/generate_all_analyses.py"
     "$WORKSPACE/references/diagnostic-guide.md"
     "$WORKSPACE/references/output-templates.md"
     "$WORKSPACE/references/code-review-expert/SKILL.md"
@@ -272,6 +273,7 @@ copy_or_fail "$WORKSPACE/scripts/detect_build_target.sh"         "scripts/detect
 copy_or_fail "$WORKSPACE/scripts/verify_build.sh"           "scripts/verify_build.sh"
 copy_or_fail "$WORKSPACE/scripts/gatekeeper.py"              "scripts/gatekeeper.py"
 copy_or_fail "$WORKSPACE/scripts/calculate_build_checkpoints.py"  "scripts/calculate_build_checkpoints.py"
+copy_or_fail "$WORKSPACE/scripts/generate_all_analyses.py"       "scripts/generate_all_analyses.py"
 
 # 确保脚本可执行
 chmod +x "$SKILL_DIR/scripts/detect_build_target.sh"
@@ -336,6 +338,7 @@ verify_file "scripts/detect_build_target.sh"
 verify_file "scripts/verify_build.sh"
 verify_file "scripts/gatekeeper.py"
 verify_file "scripts/calculate_build_checkpoints.py"
+verify_file "scripts/generate_all_analyses.py"
 
 echo ""
 

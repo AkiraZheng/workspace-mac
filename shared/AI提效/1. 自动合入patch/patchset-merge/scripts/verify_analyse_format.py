@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import json
 import argparse
 
 ANALYSE_SECTIONS = [
@@ -68,6 +69,7 @@ ERR_SECTION = 1
 ERR_PLACEHOLDER = 2
 ERR_EMPTY = 3
 ERR_MISSING = 4
+ERR_EXPECTED_MISSING = 5  # --expected-from 检测到应有文件缺失
 
 
 def check_sections(content: str, required: list[str]) -> list[str]:
@@ -123,6 +125,53 @@ def check_required_tables(content: str) -> list[str]:
     return empty_tables
 
 
+def build_expected_files(merge_tasks_path: str, output_dir: str) -> list[str]:
+    """Build list of expected analyse.md files from merge_tasks.json.
+
+    Returns list of expected absolute file paths.
+    """
+    with open(merge_tasks_path) as f:
+        data = json.load(f)
+
+    expected = []
+    for section in ["deps_order", "merge_order"]:
+        for task in data.get(section, []):
+            task_id = task.get("task_id", "unknown")
+            subject = task.get("subject", task_id)
+            slug = slugify_subject(subject)
+            path = os.path.join(output_dir, f"{task_id}-{slug}-analys.md")
+            expected.append(path)
+    return expected
+
+
+def check_expected_files(expected_files: list[str]) -> tuple[list[str], list[str]]:
+    """Check which expected files exist and which are missing.
+
+    Returns:
+      present: list of existing file paths
+      missing: list of missing file paths
+    """
+    present = []
+    missing = []
+    for fp in expected_files:
+        if os.path.exists(fp):
+            present.append(fp)
+        else:
+            missing.append(fp)
+    return present, missing
+
+
+def slugify_subject(subject: str, max_len: int = 40) -> str:
+    """Create a short filename-safe slug from patch subject."""
+    s = subject.strip()
+    s = s.replace("/", "-").replace(":", "-").replace(" ", "-")
+    s = "".join(c for c in s if c.isalnum() or c in "._-")
+    s = s.strip("_-")
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("_-")
+    return s if s else "patch"
+
+
 def verify_file(filepath: str, file_type: str = "analyse") -> int:
     if not os.path.exists(filepath):
         print(f"[FAIL] 文件不存在: {filepath}", file=sys.stderr)
@@ -169,9 +218,12 @@ def verify_file(filepath: str, file_type: str = "analyse") -> int:
 
 
 def main():
+    import glob
+
     parser = argparse.ArgumentParser(description="格式验证门禁")
     parser.add_argument("--file", help="单个文件路径")
     parser.add_argument("--dir", help="目录批量检查")
+    parser.add_argument("--expected-from", help="merge_tasks.json 路径（检测应有文件是否都存在）")
     parser.add_argument("--type", default="analyse",
                         choices=["analyse", "summary"],
                         help="文件类型")
@@ -183,9 +235,29 @@ def main():
 
     codes = []
 
+    # ── expected-from check (runs before dir scan) ──
+    if args.expected_from and args.dir:
+        if not os.path.exists(args.expected_from):
+            print(f"[FAIL] merge_tasks.json 不存在: {args.expected_from}", file=sys.stderr)
+            sys.exit(4)
+
+        expected_files = build_expected_files(args.expected_from, args.dir)
+        present_files, missing_files = check_expected_files(expected_files)
+
+        if missing_files:
+            print(f"\n[FAIL] 应有 {len(expected_files)} 个 analyse.md，缺失 {len(missing_files)} 个:", file=sys.stderr)
+            for fp in missing_files:
+                task_id = os.path.basename(fp).split("-")[0] if "-" in fp else "?"
+                print(f"  缺失: {os.path.basename(fp)} (task_id: {task_id})", file=sys.stderr)
+            codes.append(ERR_EXPECTED_MISSING)
+        else:
+            print(f"\n✅ 预期文件检查通过: {len(expected_files)} 个文件全部存在")
+
+    # ── single file check ──
     if args.file:
         codes.append(verify_file(args.file, args.type))
 
+    # ── directory scan ──
     if args.dir:
         if not os.path.isdir(args.dir):
             print(f"[FAIL] 目录不存在: {args.dir}", file=sys.stderr)
@@ -196,17 +268,19 @@ def main():
         else:
             pattern = "summary.md"
 
-        import glob
         files = sorted(glob.glob(os.path.join(args.dir, pattern)))
         if not files:
             print(f"[FAIL] 未找到文件: {pattern} 在 {args.dir}", file=sys.stderr)
-            sys.exit(4)
-
-        for fp in files:
-            codes.append(verify_file(fp, "analyse"))
+            codes.append(ERR_MISSING)
+        else:
+            for fp in files:
+                codes.append(verify_file(fp, "analyse"))
 
     max_code = max(codes) if codes else OK
-    print(f"\n{len(codes)} 个文件检查完成, 退出码={max_code}")
+    if max_code == OK:
+        print(f"\n{len(codes)} 个文件检查完成, 全部通过 ✓")
+    else:
+        print(f"\n{len(codes)} 个文件检查完成, 退出码={max_code}")
     sys.exit(max_code)
 
 

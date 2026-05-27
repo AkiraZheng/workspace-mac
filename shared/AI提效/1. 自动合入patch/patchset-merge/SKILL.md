@@ -963,51 +963,54 @@ $BUILD_CMD                       # 终验
 
 ## Phase 3：汇总落盘
 
-所有 task 状态为 `done`/`skipped`/`failed` 后，**使用确定性脚本生成**，确保格式一致：
+所有 task 状态为 `done`/`skipped`/`failed` 后，**批量确定性生成**，确保所有 patch 的分析文件不遗漏：
 
-**步骤 1：对每个 task 生成 analyse.md**
+**步骤 1：批量生成所有 analyse.md**
 
 ```bash
-# 每条命令自动填充结构化字段，AI 仅需补充第 11 节和文字润色
-python3 "$SCRIPTS_DIR/generate_analyse_md.py" \
+# 一条命令生成所有 patch 的 analyse.md（遍历 merge_order + deps_order）
+python3 "$SCRIPTS_DIR/generate_all_analyses.py" \
   --analysis-cache "$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json" \
   --merge-tasks "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
-  --task-id "<task_id>" \
   --diff-script "$SCRIPTS_DIR/generate_diff_report.py" \
   --repo-path "$KERNEL_REPO_PATH" \
-  --commit "<commit_hash>" \
-  --output "$KERNEL_REPO_PATH/patch_analysis/<task_id>-<name>-analys.md"
+  --output-dir "$KERNEL_REPO_PATH/patch_analysis/"
 ```
 
-脚本输出的 analyse.md 中 `{REQUIRES_AI}` 标记的字段需要 AI 补充：
+**退出码含义**：
+| 退出码 | 含义 | 处理 |
+|--------|------|------|
+| 0 | 全部成功 | 进入步骤 2 |
+| 1 | 部分失败 | 检查失败列表，修复后重新运行 |
+| 2 | 参数错误 | 检查文件路径 |
+
+**步骤 2：AI 补充文字性内容**
+
+脚本生成的 analyse.md 中 `{REQUIRES_AI}` 标记的字段需要 AI 补充：
 - 第 2 节功能描述（若 analysis_cache 无完整文本）
 - 第 3 节依赖分析文字说明
 - 第 8 节合入经验（若无 execution_log）
 - 第 11 节 Review 建议
 
-**步骤 2：AI 补充文字性内容后格式验证**
+**步骤 3：门禁验证（确定性脚本，确保所有文件存在且格式正确）**
 
 ```bash
-# 单文件检查
+# 一体验证：应有文件存在 + 格式完整 + 无占位符残留
 python3 "$SCRIPTS_DIR/verify_analyse_format.py" \
-  --type analyse \
-  --file "$KERNEL_REPO_PATH/patch_analysis/0001-xxx-analys.md"
-
-# 目录批量检查
-python3 "$SCRIPTS_DIR/verify_analyse_format.py" \
-  --dir "$KERNEL_REPO_PATH/patch_analysis/"
+  --dir "$KERNEL_REPO_PATH/patch_analysis/" \
+  --expected-from "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json"
 ```
 
 **退出码含义**：
-
 | 退出码 | 含义 | 处理 |
 |--------|------|------|
-| 0 | 格式正确 | 继续下一个 task |
+| 0 | 全部通过 | 进入步骤 4 |
 | 1 | 章节缺失 | 补充缺失章节 |
 | 2 | 占位符未替换 | 将 `{xxx}` 替换为实际内容 |
-| 4 | 文件不存在 | 重新生成 analyse.md |
+| 4 | 文件不存在 | 重新运行 generate_all_analyses.py |
+| **5** | **应有文件缺失** | 对比 merge_tasks.json 与实际文件，运行步骤 1 补充生成 |
 
-**步骤 3：生成 summary.md**
+**步骤 4：生成 summary.md**
 
 ```bash
 python3 "$SCRIPTS_DIR/generate_summary_md.py" \
@@ -1021,7 +1024,7 @@ python3 "$SCRIPTS_DIR/verify_analyse_format.py" \
   --file "$KERNEL_REPO_PATH/patch_analysis/summary.md"
 ```
 
-**步骤 4：最终验证**
+**步骤 5：最终验证**
 
 ```bash
 ls -la "$KERNEL_REPO_PATH/patch_analysis/"
