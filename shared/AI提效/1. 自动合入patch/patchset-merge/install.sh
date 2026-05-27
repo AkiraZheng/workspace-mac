@@ -273,9 +273,10 @@ copy_or_fail "$WORKSPACE/scripts/verify_build.sh"           "scripts/verify_buil
 copy_or_fail "$WORKSPACE/scripts/gatekeeper.py"              "scripts/gatekeeper.py"
 copy_or_fail "$WORKSPACE/scripts/calculate_build_checkpoints.py"  "scripts/calculate_build_checkpoints.py"
 
-# 确保 bash 脚本可执行
+# 确保脚本可执行
 chmod +x "$SKILL_DIR/scripts/detect_build_target.sh"
 chmod +x "$SKILL_DIR/scripts/verify_build.sh"
+chmod +x "$SKILL_DIR/scripts/"*.py
 
 # 双向同步：将部署的 SKILL.md 回拷到工作区
 if cp "$SKILL_DIR/SKILL.md" "$WORKSPACE/SKILL.md"; then
