@@ -346,10 +346,33 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
 | `duplicate_info` | ✓ | dict | `{"level": "无重复|精确重复|高概率等效|可能冲突", "detail": "..."}` |
 | `conflicts_predicted` | ✓ | list | 预判冲突点 |
 | `special_notes` | ✓ | string | 合入注意事项 |
-| `build_checkpoint` | ✓ | bool | 是否在此 patch 点做编译验证（Phase 1 判定） |
+| `build_checkpoint` | ✓ | bool | 是否在此 patch 点做编译验证（Phase 1.5 步骤 8 判定） |
+| `checkpoint_reason` | - | dict | Phase 1.5 步骤 8 产物，checkpoint 判定依据：`{rules_triggered, primary_reason, excluded, forced_by, reverse_dep_detail}` |
 | `pr_mapping` | ✓ | dict | PR 映射聚合（见下方 pr_mapping 字段说明） |
-| `execution_log` | ✓ | list | 初始 `[]`，Phase 2 动态追加 |
-| `state_log` | - | list | gatekeeper 自动追加 `[{"step":"BUILD","time":"...","result":"pass","error_count":0}]` |
+| `execution_log` | ✓ | list | 初始 `[]`，Phase 2 RECORD 步骤手动追加（冲突/编译修复细节） |
+| `state_log` | ✓ | list | gatekeeper 自动追加 `[{step, time, result, error_count, product, build_target, module_dirs, module_count, commit}]`（仅 `build_checkpoint=true` 时有 BUILD 记录） |
+
+> **state_log BUILD 记录语义**：
+> - `build_checkpoint=true` → gatekeeper 记录 BUILD pass/fail（真编译）
+> - `build_checkpoint=false` → **不调用 gatekeeper BUILD**，state_log 无 BUILD 记录
+> - 判断是否真的编译：`state_log` 有 `{"step":"BUILD","result":"pass"}` 记录 ←→ 确实编译过
+>
+> **state_log BUILD 记录格式**：
+> ```json
+> {
+>   "step": "BUILD",
+>   "time": "2025-05-27T15:00:00Z",
+>   "result": "pass",
+>   "error_count": 0,
+>   "product": "arch/arm64/boot/Image",
+>   "build_target": "Image modules",
+>   "module_dirs": ["drivers/gpu/drm"],
+>   "module_count": 5
+> }
+> ```
+> - `build_target`：`"Image"` 或 `"Image modules"`（来自 detect_build_target.sh）
+> - `module_dirs`：编译的模块目录列表（仅 `build_target=Image modules` 时有）
+> - `module_count`：`.ko` 文件总数
 
 ### pr_mapping 字段说明
 
@@ -406,7 +429,6 @@ python3 gatekeeper.py --merges-file merge_tasks.json --restore --clear
 ```
 
 **Phase 2 执行顺序**：先遍历 `deps_order`（若有），再遍历 `merge_order`，各自按 `seq` 升序。
-| `execution_log` | ✓ | list | 初始 `[]`，Phase 2 动态追加 |
 
 ## analysis_cache.json 固定 Schema
 

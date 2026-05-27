@@ -522,9 +522,11 @@ JSON
 
 **analysis_cache.json** 按 `references/output-templates.md` 中定义的字段生成（含 `pr_mapping`）。
 
-**步骤 5: 校验 + 屏幕预览 → 用户确认**
+**步骤 5: 校验 + 屏幕预览 → 用户确认 → 保存预览**
 
-写入后必须校验每个 task 的必填字段完整，然后按 `references/output-templates.md` 中"Phase 1.5 全局预览模板"的 4 部分格式展示给用户确认：依赖汇总 → Revert 清单 → 合入计划 → 确认交互。
+1. **保存预览文本**：将四部分预览的完整输出写入 `$KERNEL_REPO_PATH/patch_analysis/phase1_preview.md`（中断恢复/审计追溯用）
+2. **展示预览**：按 `references/output-templates.md` 中"Phase 1.5 全局预览模板"的 4 部分格式展示：依赖汇总 → Revert 清单 → 合入计划 → 确认交互
+3. **用户确认**：等待用户选择
 
 **步骤 6: 拉取上游依赖（用户确认"继续"后自动执行）**
 
@@ -598,13 +600,17 @@ Seq   Task       Action   Subject
 
 **步骤 8: 计算编译验证点（calculate_build_checkpoints）**
 
-merge_order_sort 完成后，运行脚本综合所有条件计算最终的 `build_checkpoint`：
+merge_order_sort 完成后，运行脚本综合所有条件计算最终的 `build_checkpoint` 和 `checkpoint_reason`：
 
 ```bash
 python3 "$SCRIPTS_DIR/calculate_build_checkpoints.py" \
   --merge-tasks "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
   --output "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json"
 ```
+
+**写入字段**（嵌入每个 task）：
+- `build_checkpoint` — `true` / `false`
+- `checkpoint_reason` — 判定依据 `{rules_triggered, primary_reason, excluded, forced_by, reverse_dep_detail}`
 
 **计算规则**（按优先级依次判定）：
 
@@ -750,12 +756,16 @@ patch + 行:  150/150 ✅
 
 ```bash
 if [ "$build_checkpoint" = "true" ]; then
-    # 执行编译验证（完整流程）
+    # 执行编译验证（完整流程），完成后调用 gatekeeper --step BUILD
 else
     echo "[BUILD SKIP] task_id=$task_id 非验证点，跳过编译"
+    # ⚠️ 不调用 gatekeeper --step BUILD，state_log 不会有 BUILD 记录
     # 直接进入 COMMIT
 fi
 ```
+
+> **约束**：`build_checkpoint=false` 的 task **不调用 gatekeeper --step BUILD**。
+> Phase 3 查询时：`state_log` 有 BUILD pass 记录 → 必定是验证点，且真的编译过。
 
 **编译流程**（仅 build_checkpoint=true 时执行）：
 
@@ -780,10 +790,39 @@ BUILD_TARGET=$(bash "$SCRIPTS_DIR/detect_build_target.sh" \
 
 ```bash
 BUILD_LOG="/tmp/patch_build_<task_id>.log"
+echo "编译目标: $BUILD_TARGET"
 make ARCH=$KERNEL_ARCH $BUILD_TARGET -j$(nproc) 2>&1 | tee "$BUILD_LOG"
 ```
 
-**步骤 3：通过条件 + 门禁验证**
+**步骤 3：提取模块目录信息**
+
+```bash
+# 从 files_changed 提取驱动/声卡目录，用于记录编译范围
+MODULE_DIRS=$(python3 -c "
+import json, sys
+d = json.load(open('$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json'))
+for section in ['deps_order', 'merge_order']:
+    for t in d.get(section, []):
+        if t.get('task_id') == '<task_id>':
+            dirs = set()
+            for f in t.get('files_changed', []):
+                if f.startswith('drivers/') or f.startswith('sound/'):
+                    dirs.add(f.rsplit('/', 1)[0])
+            print(','.join(sorted(dirs)) if dirs else '')
+            sys.exit(0)
+") || true
+
+# 统计 .ko 文件数量（如有）
+MODULE_COUNT=0
+if [ -n "$MODULE_DIRS" ]; then
+    for d in $(echo "$MODULE_DIRS" | tr ',' ' '); do
+        cnt=$(find "$d" -name "*.ko" -type f 2>/dev/null | wc -l)
+        MODULE_COUNT=$((MODULE_COUNT + cnt))
+    done
+fi
+```
+
+**步骤 4：通过条件 + 门禁验证**
 
 ```bash
 bash "$SCRIPTS_DIR/verify_build.sh" \
@@ -798,7 +837,10 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --task-id "<task_id>" \
   --step BUILD --result pass \
   --error-count <error_count> \
-  --product "$BUILD_LOG"
+  --product "arch/$KERNEL_ARCH/boot/Image" \
+  --build-target "$BUILD_TARGET" \
+  --module-dirs "$MODULE_DIRS" \
+  --module-count "$MODULE_COUNT"
 ```
 
 > 非验证点的 patch 直接跳过 BUILD 步骤，进入 COMMIT。
@@ -807,6 +849,8 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 ```
 [BUILD CHECKPOINT] task_id=<task_id>
 编译目标:  $BUILD_TARGET
+模块目录:  ${MODULE_DIRS:-无}
+模块产物:  ${MODULE_COUNT:-0} 个 .ko
 日志路径:  /tmp/patch_build_<task_id>.log
 error 数:  <error_count>
 产物验证:  Image ✅ / 模块 ✅（自动检测）

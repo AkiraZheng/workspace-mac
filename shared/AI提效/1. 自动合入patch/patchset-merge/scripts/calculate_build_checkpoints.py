@@ -54,18 +54,16 @@ def detect_reverse_dependencies(all_patches):
     references symbols introduced by a patch at a LATER position (higher seq).
 
     Returns:
-      reverse_dependers: set of task_ids that reference later symbols
-                         → these patches get checkpoint=False (completely excluded)
-      reverse_providers: dict {task_id: set of symbols}
-                         → these patches get checkpoint=True (forced by reverse dep)
+      reverse_dependers: dict {task_id: {symbol: provider_task_id}}
+      reverse_providers: dict {task_id: {symbol: [depender_task_ids]}}
     """
     symbol_owner = {}
     for patch in all_patches:
         for sym in patch.get('introduced_symbols', []):
             symbol_owner[sym] = patch['task_id']
 
-    reverse_dependers = set()
-    reverse_providers = defaultdict(set)
+    reverse_dependers = defaultdict(dict)
+    reverse_providers = defaultdict(lambda: defaultdict(list))
 
     for patch in all_patches:
         pid = patch['task_id']
@@ -85,17 +83,20 @@ def detect_reverse_dependencies(all_patches):
             if owner_seq is None or pid_seq is None:
                 continue
 
-            # Reverse: depender comes BEFORE provider in original order
             if pid_seq < owner_seq:
-                reverse_dependers.add(pid)
-                reverse_providers[owner].add(sym)
+                reverse_dependers[pid][sym] = owner
+                reverse_providers[owner][sym].append(pid)
 
-    # Convert sets to sorted lists for JSON serialization
+    # Convert defaultdict to plain dict for JSON serialization
+    reverse_dependers_out = {
+        k: dict(v) for k, v in reverse_dependers.items()
+    }
     reverse_providers_out = {
-        k: sorted(v) for k, v in reverse_providers.items()
+        k: {sym: sorted(pids) for sym, pids in v.items()}
+        for k, v in reverse_providers.items()
     }
 
-    return reverse_dependers, reverse_providers_out
+    return reverse_dependers_out, reverse_providers_out
 
 
 def calculate_checkpoints(merge_tasks):
@@ -127,54 +128,51 @@ def calculate_checkpoints(merge_tasks):
     last_patch_overall = max(all_patches, key=lambda p: p.get('seq', 0))
     last_patch_seq = last_patch_overall.get('seq', 0)
 
-    # Pre-compute reverse dependency info for display
-    depender_targets = {}
-    for depender_id in reverse_dependers:
-        targets = []
-        for provider_id, symbols in reverse_providers.items():
-            for p in all_patches:
-                if p['task_id'] == depender_id:
-                    for sym in p.get('referenced_symbols', []):
-                        if sym in symbols and id(provider_id) == id(provider_id):
-                            if provider_id not in targets:
-                                targets.append(f"{'→'.join(sorted(symbols))}@{provider_id}")
-            depender_targets[depender_id] = targets
-
     results = []
     for idx, patch in enumerate(all_patches):
         seq = patch.get('seq', 0)
         task_id = patch.get('task_id', '')
         func_class = patch.get('功能分类', 'core')
         reason_parts = []
+        rules_triggered = []
+        forced_by = []
         checkpoint = None
+        reverse_dep_detail = None
 
         # ── Rule 1a: 反向依赖者 → 完全排除 ──
         if task_id in reverse_dependers:
             checkpoint = False
-            symbols_info = reverse_providers.get(task_id, {})
-            depender_symbols = []
-            for sym in patch.get('referenced_symbols', []):
-                for provider_id, prov_symbols in reverse_providers.items():
-                    if sym in prov_symbols:
-                        depender_symbols.append(f"{sym}→{provider_id}")
-            if depender_symbols:
-                reason_parts.append(f'反向依赖者（引用后面 patch 的符号: {";".join(depender_symbols[:3])}）')
-            else:
-                reason_parts.append('反向依赖者（引用后面 patch 的符号）')
+            rules_triggered.append("Rule_1a")
+            rd = reverse_dependers[task_id]
+            depender_symbols = [f"{sym}→{owner}" for sym, owner in rd.items()]
+            reason_parts.append(f'反向依赖者（引用后面 patch 的符号: {";".join(depender_symbols[:3])}）')
+            reverse_dep_detail = {
+                "type": "depender",
+                "referenced_symbols": {sym: owner for sym, owner in rd.items()},
+                "depender_symbols_list": depender_symbols
+            }
 
         # ── Rule 1b: 反向依赖的被依赖者 → 强制验证 ──
         if checkpoint is None and task_id in reverse_providers:
             checkpoint = True
-            symbols = reverse_providers[task_id]
-            sym_list = ', '.join(sorted(symbols)[:3])
-            reason_parts.append(f'反向依赖：定义符号 {sym_list}（被前面 patch 引用）')
+            rules_triggered.append("Rule_1b")
+            forced_by.append("reverse_provider")
+            rp = reverse_providers[task_id]
+            sym_list = sorted(rp.keys())
+            reason_parts.append(f'反向依赖：定义符号 {", ".join(sym_list[:3])}（被前面 patch 引用）')
+            reverse_dep_detail = {
+                "type": "provider",
+                "provided_symbols": rp
+            }
 
-        # ── Rule 1 (original): infra → true ──
+        # ── Rule 2: infra → true ──
         if checkpoint is None and func_class == 'infra':
             checkpoint = True
+            rules_triggered.append("Rule_2")
+            forced_by.append("infra")
             reason_parts.append('基础设施（公共头文件/宏定义）')
 
-        # ── Rule 2: referenced by >= 3 later patches ──
+        # ── Rule 3: referenced by >= 3 later patches ──
         if checkpoint is None:
             later_patches = all_patches[idx + 1:]
             ref_count = count_references(
@@ -182,52 +180,73 @@ def calculate_checkpoints(merge_tasks):
             )
             if ref_count >= 3:
                 checkpoint = True
+                rules_triggered.append("Rule_3")
+                forced_by.append(">=3_refs")
                 reason_parts.append(f'被 ≥3 个后续 patch 依赖（{ref_count} 个）')
 
-        # ── Rule 3: risk_level == "高" or conflicts_predicted ──
+        # ── Rule 4: risk_level == "高" or conflicts_predicted ──
         if checkpoint is None:
             if (patch.get('risk_level') == '高' or
                     patch.get('conflicts_predicted')):
                 checkpoint = True
+                rules_triggered.append("Rule_4")
+                forced_by.append("high_risk")
                 reason_parts.append('高风险或有预判冲突')
 
-        # ── Rule 4: last patch overall (FORCED) ──
+        # ── Rule 5: last patch overall (FORCED) ──
         if seq == last_patch_seq:
             checkpoint = True
+            rules_triggered.append("Rule_5")
+            forced_by.append("last_patch")
             if patch.get('action') == 'skip' or func_class == 'doc':
                 reason_parts.append('最后一个 patch（强制，skip/doc 也验证）')
             else:
                 reason_parts.append('最后一个 patch（强制）')
 
-        # ── Rule 5: skip or doc → false ──
+        # ── Rule 6: skip or doc → false ──
         if checkpoint is None:
             if patch.get('action') == 'skip' or func_class == 'doc':
                 checkpoint = False
+                rules_triggered.append("Rule_6")
                 reason_parts.append('跳过或文档类型')
 
-        # ── Rule 6: last in group ──
+        # ── Rule 7: last in group ──
         if checkpoint is None:
             group_key = (func_class, common_path_prefix(patch.get('files_changed', [])))
             group_patches = groups.get(group_key, [])
             if len(group_patches) > 1 and last_in_group.get(id(patch)):
                 checkpoint = True
+                rules_triggered.append("Rule_7")
+                forced_by.append("group_last")
                 path_prefix = common_path_prefix(patch.get('files_changed', []))
                 reason_parts.append(f'功能模块最后 patch（{func_class}/{path_prefix} 组）')
 
-        # ── Rule 7: default → false ──
+        # ── Rule 8: default → false ──
         if checkpoint is None:
             checkpoint = False
+            rules_triggered.append("Rule_8")
+
+        primary_reason = '; '.join(reason_parts) if reason_parts else '默认（无特殊条件触发）'
+
+        checkpoint_reason = {
+            "rules_triggered": rules_triggered,
+            "primary_reason": primary_reason,
+            "excluded": not checkpoint,
+            "forced_by": forced_by if forced_by else None,
+            "reverse_dep_detail": reverse_dep_detail,
+        }
 
         results.append({
             'task_id': task_id,
             'seq': seq,
             '功能分类': func_class,
             'checkpoint': checkpoint,
-            'reason': '; '.join(reason_parts) if reason_parts else ''
+            'reason': primary_reason
         })
 
         # Update patch in-place
         patch['build_checkpoint'] = checkpoint
+        patch['checkpoint_reason'] = checkpoint_reason
 
     return merge_tasks, results
 

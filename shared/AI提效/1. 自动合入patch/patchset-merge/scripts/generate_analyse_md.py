@@ -244,24 +244,47 @@ def generate_section_9(diff_content: str) -> str:
 
 
 def generate_section_10(task: dict, execution_log: list) -> str:
-    error_count = 0
-    product = _ai("product")
-    retry = 0
+    state_log = task.get("state_log", [])
+    checkpoint_reason = task.get("checkpoint_reason", {})
 
-    for entry in execution_log:
-        if entry.get("result") == "pass" and entry.get("step") == "BUILD":
-            error_count = entry.get("error_count", 0)
-            product = entry.get("product", product)
-        if entry.get("step") == "BUILD":
-            retry += 1
+    build_entries = [e for e in state_log if e.get("step") == "BUILD"]
+    pass_entries = [e for e in build_entries if e.get("result") == "pass"]
+
+    # ── 非验证点（build_checkpoint=false，state_log 无 BUILD 记录）──
+    if not build_entries:
+        if task.get("build_checkpoint") == False:
+            reason_text = checkpoint_reason.get("primary_reason", "未知")
+            rules_text = ", ".join(checkpoint_reason.get("rules_triggered", []))
+            return f"""## 10. 编译验证记录
+
+```
+非验证点，跳过编译。
+规则判定: {rules_text}
+原因: {reason_text}
+```
+"""
+
+    # ── 验证点（state_log 有 BUILD 记录）──
+    error_count = pass_entries[-1].get("error_count", 0) if pass_entries else "未知"
+    product = pass_entries[-1].get("product", _ai("product")) if pass_entries else _ai("product")
+    retry = len(build_entries)
+    build_target = pass_entries[-1].get("build_target", "Image") if pass_entries else "Image"
+    module_dirs = pass_entries[-1].get("module_dirs", []) if pass_entries else []
+    module_count = pass_entries[-1].get("module_count", 0) if pass_entries else 0
+
+    module_info = ""
+    if module_dirs:
+        dirs = ", ".join(module_dirs)
+        module_info = f"  模块目录: {dirs}\n  模块产物: {module_count} 个 .ko\n"
 
     return f"""## 10. 编译验证记录
 
 ```
 编译结果：
-  错误数: {error_count}
-  产物:   {product}
-  重试:   {retry} 次
+  编译目标: {build_target}
+{module_info}  错误数:   {error_count}
+  产物:     {product}
+  重试:     {retry} 次
 ```
 """
 

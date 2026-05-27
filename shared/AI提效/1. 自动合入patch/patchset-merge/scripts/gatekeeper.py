@@ -192,6 +192,12 @@ def do_record(args):
         extra["product"] = args.product
     if args.commit:
         extra["commit"] = args.commit
+    if args.build_target:
+        extra["build_target"] = args.build_target
+    if args.module_dirs:
+        extra["module_dirs"] = args.module_dirs.split(",")
+    if args.module_count is not None:
+        extra["module_count"] = args.module_count
 
     record_step(state_log, args.step, args.result, extra or None)
 
@@ -283,6 +289,12 @@ def main():
                         help="编译产物路径")
     parser.add_argument("--commit",
                         help="commit hash")
+    parser.add_argument("--build-target",
+                        help="编译目标（如 Image / Image modules）")
+    parser.add_argument("--module-dirs",
+                        help="验证的模块目录（逗号分隔）")
+    parser.add_argument("--module-count", type=int,
+                        help=".ko 文件数量")
     parser.add_argument("--restore", action="store_true",
                         help="恢复模式：检查 current_state 是否有未完成工作")
     parser.add_argument("--clear", action="store_true",
