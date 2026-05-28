@@ -94,6 +94,7 @@ echo "SCRIPTS_DIR=$SCRIPTS_DIR"
 Phase 0: 下载（脚本）→ /tmp/patches/000N-*.patch + metadata.json
          → 创建 $KERNEL_REPO_PATH/patch_analysis/
 Phase 1: 并行分析（只读，不写文件）→ 屏幕输出分析结果
+    ⚠️ 所有 Agent 必须用 Task tool 一次性并行启动，禁止串行
 Phase 1.5: 主 Agent 汇总 → patch_analysis/merge_tasks.json + analysis_cache.json
 Phase 2: 串行 Merge（写入）→ 每 patch commit 后落盘 patch_analysis/analyse.md
 Phase 3: 汇总 → patch_analysis/summary.md
@@ -181,6 +182,26 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 | ≤3 | 全部 | 1（主 Agent 兼任） |
 | 4-8 | 2-3 个 | 2-3 |
 | ≥9 | ≤4 个 | N/4 向上取整 |
+
+### 并行启动方式
+
+**主 Agent 必须在一条消息中同时启动所有分析 Agent**（使用多个 Task tool 调用），而不是逐个串行启动。
+
+```
+正确示例（并行）：一条消息中同时发送 3 个 Task tool
+  Task(agent-A, patches 0001-0003, ...)
+  Task(agent-B, patches 0004-0006, ...)
+  Task(agent-C, patches 0007-0009, ...)
+
+错误示例（串行 — 禁止）：
+  Task(agent-A, ...) → 等 A 完成 → Task(agent-B, ...) → 等 B 完成 → ...
+```
+
+每个 Agent 收到以下信息：
+- 负责的 patch 文件列表（绝对路径 `/tmp/patches/000N-*.patch`）
+- 目标仓库路径 `$KERNEL_REPO_PATH` 和目标分支 `$KERNEL_BRANCH`
+- 上游仓库路径 `$UPSTREAM_REPO_PATH`（如不可用，明确告知降级模式）
+- 输出格式：严格按 `references/output-templates.md` 中 "Phase 1 分析 Agent 屏幕输出格式" 输出
 
 ### 分析 Agent 执行流程
 
