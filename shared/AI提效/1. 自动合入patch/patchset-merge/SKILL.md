@@ -112,6 +112,7 @@ Phase 3: 汇总 → patch_analysis/summary.md
 - `$SCRIPTS_DIR/detect_duplicate.py` — 重复检测 + PR 聚合 + revert 决策
 - `$SCRIPTS_DIR/generate_revert_plan.py` — 从分析结果生成 revert_plan.json + revert_plan.sh
 - `$SCRIPTS_DIR/execute_revert.py` — 执行 revert 计划（预执行 + 正式执行 + 失败处理 + 回滚）
+- `$SCRIPTS_DIR/validate_phase1_artifacts.py` — Phase 1.5→2 / 2→3 硬性门禁（schema 校验）
 - `$SCRIPTS_DIR/detect_build_target.sh` — 动态检测编译目标
 - `references/diagnostic-guide.md` — 冲突诊断决策树（Ours/Theirs）
 - `references/output-templates.md` — analyse.md / summary.md 模板 + 屏幕输出格式
@@ -630,6 +631,23 @@ Seq  Task      功能分类  验证点  原因
 
 ---
 
+### 步骤 9：硬性门禁（禁止绕过，必须通过脚本验证）
+
+> **⚠️ 此门禁为强制步骤，exit 非 0 则禁止进入 Phase 2。**
+
+```bash
+python3 "$SCRIPTS_DIR/validate_phase1_artifacts.py" \
+  --merge-tasks "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --analysis-cache "$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json"
+```
+
+**校验内容**：
+- `merge_tasks.json` 存在、Schema 合法（顶层字段 + 每个 task 22 个必填字段）
+- `analysis_cache.json` 存在、每个 task_id 有对应条目、Schema 合法
+- 不通过则退出，不允许进入 Phase 2
+
+---
+
 ## Phase 2：串行 Merge
 
 ### 启动
@@ -1045,6 +1063,15 @@ $BUILD_CMD                       # 终验
 ## Phase 3：汇总落盘
 
 所有 task 状态为 `done`/`skipped`/`failed` 后，**批量确定性生成**，确保所有 patch 的分析文件不遗漏：
+
+> **⚠️ 硬性门禁**：Phase 3 依赖 `analysis_cache.json` 和 `merge_tasks.json` 存在。
+> 进入 Phase 3 前先验证：
+> ```bash
+> python3 "$SCRIPTS_DIR/validate_phase1_artifacts.py" \
+>   --merge-tasks "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+>   --analysis-cache "$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json"
+> ```
+> **必须通过脚本落盘，禁止 agent 手动绕过脚本直接写文件。**
 
 **步骤 1：批量生成所有 analyse.md**
 
