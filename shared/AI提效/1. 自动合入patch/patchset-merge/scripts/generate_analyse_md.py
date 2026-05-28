@@ -153,10 +153,23 @@ def generate_section_3(task: dict, analysis: dict) -> str:
     dup = task.get("duplicate_info", {})
     level = dup.get("level", "无重复")
     detail = dup.get("detail", "")
+    similarity = dup.get("similarity_score")
+    matched_commit = dup.get("matched_commit", "")
+    pr_id = dup.get("pr_id", "")
+
     if level == "无重复":
         lines.append(f"{level}")
     else:
-        lines.append(f"{level}: {detail}")
+        info_parts = [f"{level}"]
+        if similarity is not None:
+            info_parts.append(f"相似度 {similarity}%")
+        if matched_commit:
+            info_parts.append(f"commit {matched_commit[:12]}")
+        if pr_id and pr_id != "独立 commit":
+            info_parts.append(f"({pr_id})")
+        lines.append(": ".join(info_parts))
+        if detail:
+            lines.append(f"详情: {detail}")
 
     return "\n".join(lines)
 

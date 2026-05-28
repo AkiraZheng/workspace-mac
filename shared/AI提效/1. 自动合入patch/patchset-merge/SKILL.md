@@ -109,6 +109,9 @@ Phase 3: 汇总 → patch_analysis/summary.md
 - `$SCRIPTS_DIR/generate_summary_md.py` — 确定性生成 summary.md
 - `$SCRIPTS_DIR/verify_analyse_format.py` — 格式验证门禁
 - `$SCRIPTS_DIR/merge_order_sort.py` — 全量排序（revert优先+deps插入+稳定顺序）
+- `$SCRIPTS_DIR/detect_duplicate.py` — 重复检测 + PR 聚合 + revert 决策
+- `$SCRIPTS_DIR/generate_revert_plan.py` — 从分析结果生成 revert_plan.json + revert_plan.sh
+- `$SCRIPTS_DIR/execute_revert.py` — 执行 revert 计划（预执行 + 正式执行 + 失败处理 + 回滚）
 - `$SCRIPTS_DIR/detect_build_target.sh` — 动态检测编译目标
 - `references/diagnostic-guide.md` — 冲突诊断决策树（Ours/Theirs）
 - `references/output-templates.md` — analyse.md / summary.md 模板 + 屏幕输出格式
@@ -240,92 +243,56 @@ git -C "$KERNEL_REPO_PATH" branch --contains <commit>
 - 仅从 patch commit message 中提取 Fixes/Depends-on 标签
 - 在 analyse.md 中标注 `未找到 blame 记录` / `未找到依赖`
 
-**步骤 5: 检测目标仓库中的重复/等效 patch（在目标仓库上执行）**
+**步骤 5: 检测目标仓库中的重复/等效 patch + PR 聚合 + revert 决策**
 
-在目标内核仓库中检查是否已有同等功能的 patch（已合入的 backport 或其他来源的等效实现）。
+> **核心策略**：要合入的 patch **绝不跳过**。检测到重复/等效时，写入 `pre_revert` 列表，
+> 先 revert 目标仓库的实现，再合入新 patch。禁止使用 `action: skip`。
+
+调用 `detect_duplicate.py` 自动完成搜索、diff 对比、PR 聚合、revert 决策：
 
 ```bash
-# 方法 1：搜索相同 commit subject
-git -C "$KERNEL_REPO_PATH" log --all --oneline --grep="<patch subject 关键词>"
-
-# 方法 2：搜索 patch 引入的关键函数是否已存在
-git -C "$KERNEL_REPO_PATH" log --all --oneline -S "<key_function_name>"
-
-# 方法 3：检查涉改文件行范围的修改历史
-git -C "$KERNEL_REPO_PATH" log --oneline -L <start>,<end>:<file>
+python3 "$SCRIPTS_DIR/detect_duplicate.py" \
+  --patch-dir /tmp/patches/ \
+  --repo-path "$KERNEL_REPO_PATH" \
+  --output "$KERNEL_REPO_PATH/patch_analysis/duplicate_analysis.json"
 ```
 
-判定标准：
+**脚本内部流程**：
 
-| 匹配程度 | 判定 | 处理 |
-|---------|------|------|
-| 包含相同 upstream commit hash | **精确重复** | 建议跳过，不重复合入 |
-| subject 高度相似 + 改动相同函数 | **高概率等效** | 建议跳过 + 人工确认 |
-| 同一文件区域有功能相似改动 | **可能冲突** | 合入时需特别注意 |
-| 无匹配 | **无重复** | 正常流程 |
+| 阶段 | 操作 |
+|------|------|
+| **候选搜索** | `git log --grep`（subject 匹配）+ `git log -S`（符号匹配）+ 涉改文件 commit |
+| **diff 对比** | patch add lines vs commit add lines，计算交集比例 |
+| **功能对比** | 函数名/宏名重叠度（符号提取），功能等效但代码不同的 patch 也能识别 |
+| **综合判定** | 取 diff 和 symbol 中较高者（任一 >=80% 即高匹配）；都不高取均值 |
+| **PR 聚合** | 解析 commit message Link 标签，按 PR 聚合候选 commits |
 
-**步骤 6: PR 映射聚合**
+**判定标准**：
 
-对步骤 3/4/5 中找到的 commit 列表，解析 PR 归属并聚合展示。优先找整个 PR 的提交内容（PR 可能包含多个分散的 patch，整体比逐个 commit 更安全）。
+| 条件 | 判定 | 处理 |
+|------|------|------|
+| 综合相似度 >= 80%（diff 或 symbol 任一高） | **高匹配**（计入 PR 覆盖率） | → 写入 `pre_revert` |
+| 综合相似度 50-79% | **中匹配**（不计入覆盖率） | → 标记 `可能冲突`，不 revert |
+| 综合相似度 < 50% | **低匹配** | → 忽略 |
+| 无候选 commit | **无重复** | → 正常流程 |
+| symbol >= 80% 但 diff < 50% | **功能等效**（v1→v2 替换） | → 仍为高匹配，revert v1 保留 v2 |
 
-**方法 1：解析 commit message 中的 PR 链接**
-```bash
-# 提取 Link 标签中的 PR URL
-git -C "$UPSTREAM_REPO_PATH" log --format="%H %b" <commit-range> | grep -E "Link:.*(github\.com|lore\.kernel\.org)"
+**PR 聚合后 revert 决策**：
 
-# 示例输出：
-# Link: https://github.com/torvalds/linux/pull/1234
-# Link: https://lore.kernel.org/all/xxx@yyy/  → 解析 series 信息
+| PR 覆盖率 | revert 策略 | urgency |
+|----------|------------|---------|
+| >= 75% | revert 整个 PR | 必须 |
+| 50-74% | revert 匹配的 commits（逐个，逆序） | 建议 |
+| < 50% | 不自动 revert，合入时冲突解决 | 无须 |
+
+**覆盖率计算**：`高匹配 commit 数 / PR 内总 commit 数 * 100`
+
+**Agent 输出格式**：分析 Agent 读取 `duplicate_analysis.json` 结果，按以下格式输出：
+```
+重复检测=高匹配:abc123(PR#123,95%);中匹配:def456(PR#456,65%);无重复
 ```
 
-**方法 2：git log 搜索 PR 号**
-```bash
-# 在 commit subject 或 body 中搜索 PR 引用
-git -C "$UPSTREAM_REPO_PATH" log --all --grep="PR #" --format="%H %s"
-git -C "$UPSTREAM_REPO_PATH" log --all --grep="#[0-9]\+" --format="%H %s"
-```
-
-**方法 3：b4 解析 lore.kernel.org series**
-```bash
-# b4 可解析 patchset series 信息
-b4 series-info <message-id>
-# 输出包含 series 总数、cover letter 等
-```
-
-**聚合逻辑**：
-- 同一 PR 的多个 commit → 标记为 `[PR #xxx]` 组，推荐整体合入/revert
-- 无 PR 归属的独立 commit → 标记为 `[独立 commit]`
-- 输出格式（存入 analysis_cache.json）：
-```json
-{
-  "pr_mapping": {
-    "upstream_deps": [
-      {
-        "pr_id": "PR #123",
-        "pr_url": "https://github.com/torvalds/linux/pull/123",
-        "commits": ["abc123", "def456"],
-        "cover_letter_msgid": "xxx@lore.kernel.org",
-        "reason": "缺失函数 stage2_try_set_pte"
-      }
-    ],
-    "bugfix_deps": [
-      {
-        "pr_id": "独立 commit",
-        "commits": ["ghi789"],
-        "reason": "修复空指针"
-      }
-    ],
-    "revert_candidates": [
-      {
-        "pr_id": "PR #456",
-        "commits": ["local-abc", "local-def"],
-        "subject": "本地 HDBSS 实现",
-        "urgency": "必须"
-      }
-    ]
-  }
-}
-```
+> **步骤 6 已合并入步骤 5**。PR 映射聚合由 `detect_duplicate.py` 统一完成。
 
 **步骤 7: 屏幕输出**
 
@@ -410,39 +377,26 @@ JSON
 
 **选择 [2] 时的处理**：重新运行旧版 topo_sort 调整顺序后重算 build_checkpoint。
 
-**步骤 3: 全局 Revert 清单去重 + PR 聚合 + revert_cmd 推荐**
+**步骤 3: 全局 Revert 清单 → 生成执行计划**
 
-1. **去重合并**：所有 agent 报告的 revert commit 去重
-2. **PR 聚合**：解析每个 commit 的 PR 归属（优先找整个 PR 的提交内容）
-3. **两层输出**（存入 `global_revert_order`）：
-   - **PR 维度**：同一 PR 的多个 commit 归为一组，推荐整体 revert
-   - **Commit 维度**：每个 commit 的明细
+> Phase 1 步骤 5 已由 `detect_duplicate.py` 完成 PR 聚合和 revert 决策。
+> 主 Agent 调用 `generate_revert_plan.py` 生成 users 确认的执行计划。
 
-`global_revert_order` 格式（替代旧的扁平列表）：
-```json
-[
-  {
-    "pr_id": "PR #123",
-    "pr_url": "https://github.com/torvalds/linux/pull/123",
-    "subject": "HDBSS 功能系列",
-    "commits": ["abc123", "def456", "ghi789"],
-    "commit_count": 3,
-    "revert_strategy": "整体 revert PR #123",
-    "revert_cmd": "git revert --ancestry-path abc123^..ghi789",
-    "urgency": "必须",
-    "related_patches": ["0001", "0003", "0004"]
-  },
-  {
-    "pr_id": "独立 commit",
-    "commits": ["jkl012"],
-    "commit_count": 1,
-    "revert_strategy": "单独 revert",
-    "revert_cmd": "git revert jkl012",
-    "urgency": "建议",
-    "related_patches": ["0004"]
-  }
-]
+```bash
+python3 "$SCRIPTS_DIR/generate_revert_plan.py" \
+  --duplicate-analysis "$KERNEL_REPO_PATH/patch_analysis/duplicate_analysis.json" \
+  --repo-path "$KERNEL_REPO_PATH" \
+  --output-dir "$KERNEL_REPO_PATH/patch_analysis/"
 ```
+
+**输出文件**：
+- `revert_plan.json` — 用户确认后的执行计划（Phase 2 输入）
+- `revert_plan.sh` — 手动执行备选脚本
+
+**策略说明**：
+- **要合入的 patch 绝不跳过**。重复/等效 → `pre_revert` 列表中追加目标 commit
+- revert 顺序按 commit 时间逆序（最新→最早）
+- `revert_plan.json` 包含完整 revert 方案：commit 详情、相似度、风险评估、依赖检测
 
 **revert 策略优先级**：
 | 场景 | revert_cmd |
@@ -679,9 +633,32 @@ PRECHECK → PRE_REVERT → APPLY → VERIFY_INTENT → BUILD (checkpoint only) 
 - 工作区干净：`git diff --quiet && git diff --cached --quiet`
 
 ### PRE_REVERT
-- 按逆序逐个 `git revert <commit> --no-edit`
-- 冲突按 `references/diagnostic-guide.md` 决策树解决
-- 失败回滚：`git revert --abort` + `git reset --hard HEAD~N`
+
+读取 `$KERNEL_REPO_PATH/patch_analysis/revert_plan.json` 执行：
+
+```bash
+python3 "$SCRIPTS_DIR/execute_revert.py" \
+  --plan "$KERNEL_REPO_PATH/patch_analysis/revert_plan.json" \
+  --repo-path "$KERNEL_REPO_PATH"
+```
+
+**执行流程**：
+1. 创建回滚 checkpoint（`git branch -f BACKUP_PRE_REVERT HEAD`）
+2. 逐 item 执行：
+   - 预执行：`git revert --no-commit <commit>`（dry-run 检查冲突）
+   - 成功 → 正式执行：`git commit`
+   - 失败 → 自动降级（整体 PR → 逐个 commit）→ 暂停等用户决策
+3. 全部完成 → 清理 checkpoint
+
+**失败处理选项**：
+| 选项 | 操作 | 适用场景 |
+|------|------|---------|
+| [1] 跳过此项 | `git checkout -- .` 清理 → 继续下一个 | 非关键独立 commit |
+| [2] 回退全部 | `git reset --hard BACKUP_PRE_REVERT` | 方案需重新设计 |
+| [3] 中止导出 | 保存状态退出 | 离线分析冲突 |
+| [4] 手动修复 | 用户解决冲突 → 继续 | 冲突小可解决 |
+
+也可手动执行 `bash $KERNEL_REPO_PATH/patch_analysis/revert_plan.sh <repo_path>`。
 
 ### APPLY
 降级链（详见 `references/diagnostic-guide.md`）：

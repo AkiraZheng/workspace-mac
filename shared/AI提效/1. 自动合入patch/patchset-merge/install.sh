@@ -276,6 +276,9 @@ copy_or_fail "$WORKSPACE/scripts/gatekeeper.py"              "scripts/gatekeeper
 copy_or_fail "$WORKSPACE/scripts/calculate_build_checkpoints.py"  "scripts/calculate_build_checkpoints.py"
 copy_or_fail "$WORKSPACE/scripts/generate_all_analyses.py"       "scripts/generate_all_analyses.py"
 copy_or_fail "$WORKSPACE/scripts/verify_patch_intent.py"        "scripts/verify_patch_intent.py"
+copy_or_fail "$WORKSPACE/scripts/detect_duplicate.py"         "scripts/detect_duplicate.py"
+copy_or_fail "$WORKSPACE/scripts/generate_revert_plan.py"     "scripts/generate_revert_plan.py"
+copy_or_fail "$WORKSPACE/scripts/execute_revert.py"           "scripts/execute_revert.py"
 
 # 确保脚本可执行
 chmod +x "$SKILL_DIR/scripts/detect_build_target.sh"
@@ -342,6 +345,9 @@ verify_file "scripts/gatekeeper.py"
 verify_file "scripts/calculate_build_checkpoints.py"
 verify_file "scripts/generate_all_analyses.py"
 verify_file "scripts/verify_patch_intent.py"
+verify_file "scripts/detect_duplicate.py"
+verify_file "scripts/generate_revert_plan.py"
+verify_file "scripts/execute_revert.py"
 
 echo ""
 

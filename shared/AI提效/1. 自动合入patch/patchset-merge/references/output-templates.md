@@ -343,7 +343,7 @@ Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 s
 | `risk_level` | ✓ | string | `高` / `中` / `低` |
 | `review_required` | ✓ | string | `高` / `中` / `低` |
 | `blame_hits` | ✓ | list | bugfix commit 列表 |
-| `duplicate_info` | ✓ | dict | `{"level": "无重复|精确重复|高概率等效|可能冲突", "detail": "..."}` |
+| `duplicate_info` | ✓ | dict | `{"level": "无重复|高匹配|中匹配", "detail": "...", "similarity_score": 95.0, "matched_commit": "abc123", "pr_id": "PR #123"}` |
 | `conflicts_predicted` | ✓ | list | 预判冲突点 |
 | `special_notes` | ✓ | string | 合入注意事项 |
 | `build_checkpoint` | ✓ | bool | 是否在此 patch 点做编译验证（Phase 1.5 步骤 8 判定） |
@@ -538,7 +538,7 @@ revert=必须|建议|无须 | commit_hash1,commit_hash2
 revert理由=原因
 依赖=缺失符号1:commit_hash1;缺失符号2:commit_hash2
 blame记录=commit_hash1 (类型):描述;commit_hash2 (类型):描述
-重复检测=无重复|精确重复:hash|高概率等效:hash:原因|可能冲突:原因
+重复检测=无重复|高匹配:hash(PR_id,相似度%);中匹配:hash(PR_id,相似度%)
 review需求=高|中|低
 review理由=原因
 验证项=验证点1;验证点2
@@ -768,3 +768,79 @@ Phase 1 分析和 Phase 1.5 汇总完成后，主 Agent 将以下 4 个部分结
 | `[3] 跳过` | 将指定 patch 的 action 改为 skip，更新 skip_count 和 skip_reason |
 | `[4] 中止` | 将已生成的 merge_tasks.json 和 analysis_cache.json 保存为草稿 |
 | `[5] 查看详情` | 输出该 patch 的 Phase 1 分析报告摘要 |
+
+## duplicate_analysis.json Schema
+
+Phase 1 步骤 5 由 `detect_duplicate.py` 生成，Phase 1.5 步骤 3 读取。
+
+```json
+{
+  "patch_duplicate_map": {
+    "0001": [
+      {
+        "commit": "abc123",
+        "similarity": 95.0,
+        "level": "高匹配",
+        "pr_info": {"pr_id": "PR #123", "source": "commit_msg_link"},
+        "matched_patch": "0001",
+        "patch_add_line_count": 120,
+        "common_lines": 114
+      }
+    ]
+  },
+  "pr_aggregation": {
+    "PR #123": {
+      "commits": ["abc123", "def456", "ghi789"],
+      "matched_patches": [
+        {"commit": "abc123", "similarity": 95.0, "level": "高匹配", "matched_patch": "0001"},
+        {"commit": "def456", "similarity": 85.0, "level": "高匹配", "matched_patch": "0002"},
+        {"commit": "ghi789", "similarity": 20.0, "level": "低匹配", "matched_patch": null}
+      ],
+      "decision": {
+        "strategy": "revert 匹配的 commits（逐个）",
+        "urgency": "建议",
+        "coverage_rate": 66.7,
+        "total_commits": 3,
+        "high_match_count": 2,
+        "revert_targets": ["abc123", "def456"]
+      }
+    }
+  },
+  "global_revert_order": [
+    {
+      "pr_id": "PR #123",
+      "pr_info": {"pr_id": "PR #123", "source": "commit_msg_link"},
+      "commits": ["abc123", "def456", "ghi789"],
+      "commit_count": 3,
+      "revert_strategy": "revert 匹配的 commits（逐个）",
+      "revert_cmd": ["git revert def456", "git revert abc123"],
+      "urgency": "建议",
+      "coverage_rate": 66.7,
+      "high_match_count": 2,
+      "related_patches": ["0001", "0002"]
+    }
+  ],
+  "thresholds": {
+    "single_similarity_high": 80,
+    "single_similarity_medium": 50,
+    "pr_coverage_whole": 75
+  }
+}
+```
+
+### 字段说明
+
+| 字段 | 说明 |
+|------|------|
+| `patch_duplicate_map` | 每个 patch 的候选 commit 列表（含相似度） |
+| `pr_aggregation` | 按 PR 聚合后的匹配矩阵 |
+| `global_revert_order` | 建议的 revert 顺序（PR 级别 + 独立 commit） |
+| `thresholds` | 判定阈值 |
+
+### revert 决策规则
+
+| 覆盖率 | revert 策略 | urgency |
+|--------|------------|---------|
+| >= 75% | revert 整个 PR | 必须 |
+| 50-74% | revert 匹配的 commits（逐个） | 建议 |
+| < 50% | 不自动 revert | 无须 |
