@@ -42,7 +42,7 @@ upstream 是 ~/code/linux/linux
 | `UPSTREAM_REPO_PATH` | "upstream是/源仓库是/" 后的路径 | `…upstream 是 ~/linux/linux` | `~/linux/linux` |
 | | | 未提及 / "没有源仓库" → **自动降级** | | 仅 metadata 推断，**不暂停、不询问用户** |
 | `KERNEL_ARCH` | grep `CONFIG_ARM64=y` `.config` → arm64 | 自动 | |
-| `BUILD_CMD` | `make ARCH=$KERNEL_ARCH Image` | 自动 | |
+| `BUILD_CMD` | `make ARCH=$KERNEL_ARCH $(detect_build_target.sh 输出)` | 自动 | 脚本根据涉改文件动态决定 Image 或 Image modules |
 
 ## 硬性约束
 

@@ -80,26 +80,42 @@ if [ "$HAS_DRIVER" -eq 0 ]; then
     exit 0
 fi
 
-# 有驱动文件 → 无 .config 则保守按 Image 处理
+# 有驱动文件 → 无 .config 则保守：也需要 modules
 if [ -z "$REPO_PATH" ] || [ ! -f "$REPO_PATH/.config" ]; then
-    echo "Image"
+    echo "Image modules"
     exit 0
 fi
 
-# 用文件路径匹配 .config 中 CONFIG_XXX=m 的名称
+# ── 解析 Makefile obj-$(CONFIG_XXX) + 查 .config ──
 HAS_MODULE_CONFIG=0
+
 for f in $DRIVER_DIRS; do
-    file_path=$(dirname "$f")
-    while IFS= read -r line; do
-        cfg_name=$(echo "$line" | cut -d= -f1 | sed 's/^CONFIG_//' | tr '[:upper:]' '[:lower:]')
-        if echo "$file_path" | grep -qi "$cfg_name"; then
-            HAS_MODULE_CONFIG=1
-            break
-        fi
-    done < <(grep '=m$' "$REPO_PATH/.config" 2>/dev/null || true)
-    if [ "$HAS_MODULE_CONFIG" -eq 1 ]; then
+    dir_path=$(dirname "$f")
+    makefile="${REPO_PATH}/${dir_path}/Makefile"
+
+    if [ ! -f "$makefile" ]; then
+        # 所在目录无 Makefile → 保守：需要 modules
+        HAS_MODULE_CONFIG=1
         break
     fi
+
+    # 提取 Makefile 中所有 obj-$(CONFIG_XXX) 的 CONFIG 名
+    configs=$(grep -oP 'obj-\$\((\w+)\)' "$makefile" 2>/dev/null \
+        | sed 's/obj-\$(\(.*\))/\1/' | sort -u || true)
+
+    if [ -z "$configs" ]; then
+        # Makefile 没有 obj-$(CONFIG_XXX) → 保守：需要 modules
+        HAS_MODULE_CONFIG=1
+        break
+    fi
+
+    # 查 .config 是否有任一 CONFIG=m
+    for cfg in $configs; do
+        if grep -q "^${cfg}=m$" "$REPO_PATH/.config" 2>/dev/null; then
+            HAS_MODULE_CONFIG=1
+            break 2
+        fi
+    done
 done
 
 if [ "$HAS_MODULE_CONFIG" -eq 1 ]; then
