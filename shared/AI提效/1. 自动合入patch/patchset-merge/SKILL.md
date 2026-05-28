@@ -40,8 +40,7 @@ upstream 是 ~/code/linux/linux
 | `KERNEL_BRANCH` | "分支/branch" 后的词 | `…的 xxx 分支` | `xxx` |
 | | | 未指定 → repo 当前分支 | | `git branch --show-current` |
 | `UPSTREAM_REPO_PATH` | "upstream是/源仓库是/" 后的路径 | `…upstream 是 ~/linux/linux` | `~/linux/linux` |
-| | | "没有源仓库" / "无upstream" → 降级模式 | | 仅 metadata 推断 |
-| | | 未提及 → 自动检测 `~/.cache/linux-upstream` | | 不存在则浅克隆，不可用则降级 |
+| | | 未提及 / "没有源仓库" → **自动降级** | | 仅 metadata 推断，**不暂停、不询问用户** |
 | `KERNEL_ARCH` | grep `CONFIG_ARM64=y` `.config` → arm64 | 自动 | |
 | `BUILD_CMD` | `make ARCH=$KERNEL_ARCH Image` | 自动 | |
 
@@ -212,6 +211,8 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 
 **步骤 3: 向后搜索 Bugfix（在 upstream 仓库上执行）**
 
+> **前提**：`$UPSTREAM_REPO_PATH` 可用时执行，不可用则跳过，仅从 patch metadata 推断。
+
 ```bash
 # 对每个 changed_file，blame 追踪后续改动
 git -C "$UPSTREAM_REPO_PATH" blame -L <start>,<end> <branch> -- <file>
@@ -224,6 +225,8 @@ git -C "$UPSTREAM_REPO_PATH" log --grep="Fixes:.*<upstream-commit-short>" \
 ```
 
 **步骤 4: 向前搜索依赖**
+
+> **前提**：`$UPSTREAM_REPO_PATH` 可用时执行，不可用时跳过 `git log -S`，仅用 `grep` 检查目标仓库。
 
 ```bash
 # 在目标内核中检查符号是否存在
