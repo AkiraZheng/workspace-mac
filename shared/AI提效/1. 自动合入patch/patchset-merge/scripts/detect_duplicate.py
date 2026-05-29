@@ -151,18 +151,18 @@ def search_candidates(repo_path: str, subject: str,
     keyword_list = [k for k in keywords.split() if len(k) >= 4]
     for kw in keyword_list[:5]:
         result = run_git(
-            repo_path, "log", "--all", "--oneline", "--format=%H",
+            repo_path, "log", "--oneline", "--format=%H",
             f"--grep={kw}",
         )
         for line in result.split("\n"):
             if line:
                 candidates.add(line.strip())
 
-    # 方法 2: 搜索引入的符号
+    # 方法 2: 搜索引入的符号（仅当前分支）
     for sym in sorted(symbols)[:10]:
         result = run_git(
-            repo_path, "log", "--all", "--oneline", "--format=%H",
-            f"-S={sym}",
+            repo_path, "log", "--oneline", "--format=%H",
+            "-n", "3", f"-S={sym}",
         )
         for line in result.split("\n"):
             if line:
