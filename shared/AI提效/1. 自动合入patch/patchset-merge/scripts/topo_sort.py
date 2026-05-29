@@ -191,12 +191,7 @@ def main() -> None:
         result["说明"] = "所有引用均为正向依赖（定义在前，引用在后），无需特殊处理"
 
     if deps:
-        result["正向依赖"] = deps
-
-    result["字段说明"] = {
-        "反向依赖": "前面的 patch 引用后面 patch 的符号（异常，需处理）",
-        "正向依赖": "后面的 patch 引用前面 patch 的符号（正常依赖关系）",
-    }
+        result["依赖关系"] = deps
 
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     print()

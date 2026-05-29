@@ -2,18 +2,20 @@
 
 Linux 内核 patchset 多 Agent 自动合入与冲突解决 Skill。
 
-- 26.5.23：当前版本在opencode+ds场景下执行稳定，在glm下不咋行
+- 26.5.29：v2 架构重构 — 三层 Agent 分工（脚本/语义/裁决），关键词+目录聚合替代作者分组，revert 检测三策略降级，编译门禁+落盘门禁写入 AGENTS.md
 
 ## 功能
 
 - 从 lore.kernel.org、URL 或本地目录获取 patchset
 - 多 Agent 并行分析每个 patch 的依赖、bugfix、冲突风险
+- 版本升级场景识别：自动检测目标仓库中的旧版本 commit，用户确认后全量 revert
 - PR 聚合：优先找整个 PR 的提交内容，避免遗漏分散 patch
 - 自动拉取上游依赖 patch（Phase 1.5 末尾）
 - 串行合入：`git am --3way` → 冲突解决 → **整个仓库编译验证** → commit → review
 - 每 patch 落盘分析报告，最终汇总
 - 10 轮自动重试上限，超限后输出具体代码级方案供用户选择
 - 跨 patch 修复：rebase → amend → 重编译 → continue
+- 编译门禁 + 落盘门禁：BUILD 不过禁止 COMMIT，崩溃恢复读盘重来
 
 ## 依赖
 
@@ -118,8 +120,15 @@ SKILL.md                      # 主 Skill 文件
 AGENTS.md                     # 开发工作区配置
 scripts/                      # 确定性脚本
   download_patches.py           # 统一下载入口（b4/wget/本地）
+  detect_duplicate.py           # 重复/等效 patch 检测 + 版本升级聚合
+  generate_revert_plan.py       # revert 执行计划生成
+  execute_revert.py             # revert 执行器
   generate_diff_report.py       # diff 对比生成
   topo_sort.py                  # 依赖拓扑排序
+  calculate_build_checkpoints.py # 编译验证点计算
+  merge_order_sort.py           # 全量排序
+  gatekeeper.py                 # 状态机门禁
+  verify_build.sh              # 编译验证门禁
 references/                   # 参考文档
   diagnostic-guide.md           # Ours/Theirs 冲突诊断决策树
   output-templates.md           # 输出模板 + schema 定义
@@ -128,6 +137,7 @@ features/                     # 草案设计 & 待办
   topo_sort.md                  # 拓扑排序设计稿
   revert-lookup.md              # revert 依赖查找设计稿
   todo-issue.md                 # 已知问题及改进方向
+docs/                         # 设计文档（specs/plans）
 examples/                     # 实际运行案例
   1-DS-HDBSS-v3-merge-to-oe/    # DS 模型运行示例
   2-glm-HDBSS-v3-merge-to-oe/   # GLM5 模型运行示例
@@ -143,13 +153,12 @@ install.sh                    # 一键安装部署脚本
 ## 核心约束
 
 1. 逐个合入 + 逐个 commit
-2. 仅在出问题时与用户交互（冲突超限/循环依赖/重复 patch）
+2. 仅在出问题时与用户交互（冲突超限/循环依赖/重复 patch/场景分类）
 3. 每 commit 后 code review
 4. Revert 逐个 commit（逆序），优先按 PR 整体 revert
-5. **每 patch 必须整个仓库编译验证**：0 error + 最终产物存在，禁止跳过或只编译部分文件
+5. **每 patch 整个仓库编译验证**：0 error + 产物存在，禁止跳过
 6. Merge 串行，分析并行
 7. 中文输出
-8. 只取改动行（`+`/`-` 开头的实际修改行）
-9. 修改严格归所属 patch
-10. 编译通过 + 功能正常是第一指标
-11. 结构化文件（JSON）存储到 `patch_analysis/`，永久保留不清理
+8. 编译必过 + 每步落盘（门禁脚本不可绕过）
+9. 禁止静默跳过 BUILD/COMMIT/REVIEW
+10. 结构化文件（JSON）存储到 `patch_analysis/`，永久保留不清理

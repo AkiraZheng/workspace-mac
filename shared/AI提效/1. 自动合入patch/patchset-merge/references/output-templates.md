@@ -455,6 +455,10 @@ Phase 1.5 主 Agent 汇总所有分析 Agent 的屏幕输出后生成。Phase 3 
     "smoke_tests": ["验证点1", "验证点2"],
     "changed_files": ["file1.c", "file2.h"],
     "status_in_target": "在目标仓库中的现状描述",
+    "feature_signature": {
+      "keywords": ["HDBSS", "Hardware Dirty Bit State Save", "DBM", "HDBSSF"],
+      "scope_dirs": ["arch/arm64/kvm/", "arch/arm64/tools/", "arch/arm64/include/"]
+    },
     "pr_mapping": {
       "upstream_deps": [
         {

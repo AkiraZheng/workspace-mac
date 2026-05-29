@@ -149,5 +149,5 @@ class TestLocalCopy(unittest.TestCase):
                     f.write("dummy patch content\n")
                 results = dp.copy_from_local(srcdir, dstdir)
                 self.assertEqual(len(results), 1)
-                dest = os.path.join(dstdir, os.path.basename(src))
+                dest = os.path.join(dstdir, "0001-some-patch.patch")
                 self.assertTrue(os.path.exists(dest))
