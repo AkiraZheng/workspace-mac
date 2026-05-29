@@ -187,7 +187,6 @@ REQUIRED_FILES=(
     "$WORKSPACE/scripts/generate_summary_md.py"
     "$WORKSPACE/scripts/verify_analyse_format.py"
     "$WORKSPACE/scripts/merge_order_sort.py"
-    "$WORKSPACE/scripts/detect_build_target.sh"
     "$WORKSPACE/scripts/topo_sort.py"
     "$WORKSPACE/scripts/verify_build.sh"
     "$WORKSPACE/scripts/gatekeeper.py"
@@ -270,8 +269,8 @@ copy_or_fail "$WORKSPACE/scripts/generate_analyse_md.py"         "scripts/genera
 copy_or_fail "$WORKSPACE/scripts/generate_summary_md.py"         "scripts/generate_summary_md.py"
 copy_or_fail "$WORKSPACE/scripts/verify_analyse_format.py"       "scripts/verify_analyse_format.py"
 copy_or_fail "$WORKSPACE/scripts/merge_order_sort.py"            "scripts/merge_order_sort.py"
-copy_or_fail "$WORKSPACE/scripts/detect_build_target.sh"         "scripts/detect_build_target.sh"
-copy_or_fail "$WORKSPACE/scripts/verify_build.sh"           "scripts/verify_build.sh"
+# 确保脚本可执行
+chmod +x "$SKILL_DIR/scripts/verify_build.sh"
 copy_or_fail "$WORKSPACE/scripts/gatekeeper.py"              "scripts/gatekeeper.py"
 copy_or_fail "$WORKSPACE/scripts/calculate_build_checkpoints.py"  "scripts/calculate_build_checkpoints.py"
 copy_or_fail "$WORKSPACE/scripts/generate_all_analyses.py"       "scripts/generate_all_analyses.py"
@@ -282,7 +281,6 @@ copy_or_fail "$WORKSPACE/scripts/execute_revert.py"           "scripts/execute_r
 copy_or_fail "$WORKSPACE/scripts/validate_phase1_artifacts.py" "scripts/validate_phase1_artifacts.py"
 
 # 确保脚本可执行
-chmod +x "$SKILL_DIR/scripts/detect_build_target.sh"
 chmod +x "$SKILL_DIR/scripts/verify_build.sh"
 chmod +x "$SKILL_DIR/scripts/"*.py
 
@@ -340,7 +338,6 @@ verify_file "scripts/generate_analyse_md.py"
 verify_file "scripts/generate_summary_md.py"
 verify_file "scripts/verify_analyse_format.py"
 verify_file "scripts/merge_order_sort.py"
-verify_file "scripts/detect_build_target.sh"
 verify_file "scripts/verify_build.sh"
 verify_file "scripts/gatekeeper.py"
 verify_file "scripts/calculate_build_checkpoints.py"

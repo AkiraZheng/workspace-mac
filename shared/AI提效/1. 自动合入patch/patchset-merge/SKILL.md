@@ -42,7 +42,7 @@ upstream 是 ~/code/linux/linux
 | `UPSTREAM_REPO_PATH` | "upstream是/源仓库是/" 后的路径 | `…upstream 是 ~/linux/linux` | `~/linux/linux` |
 | | | 未提及 / "没有源仓库" → **自动降级** | | 仅 metadata 推断，**不暂停、不询问用户** |
 | `KERNEL_ARCH` | grep `CONFIG_ARM64=y` `.config` → arm64 | 自动 | |
-| `BUILD_CMD` | `make ARCH=$KERNEL_ARCH $(detect_build_target.sh 输出)` | 自动 | 脚本根据涉改文件动态决定 Image 或 Image modules |
+| `BUILD_CMD` | `make ARCH=$KERNEL_ARCH -j$(nproc)`（有 perf 文件则追加 `make -C tools/perf`） | 自动 | |
 
 ## 硬性约束
 
@@ -113,7 +113,6 @@ Phase 3: 汇总 → patch_analysis/summary.md
 - `$SCRIPTS_DIR/generate_revert_plan.py` — 从分析结果生成 revert_plan.json + revert_plan.sh
 - `$SCRIPTS_DIR/execute_revert.py` — 执行 revert 计划（预执行 + 正式执行 + 失败处理 + 回滚）
 - `$SCRIPTS_DIR/validate_phase1_artifacts.py` — Phase 1.5→2 / 2→3 硬性门禁（schema 校验）
-- `$SCRIPTS_DIR/detect_build_target.sh` — 动态检测编译目标
 - `references/diagnostic-guide.md` — 冲突诊断决策树（Ours/Theirs）
 - `references/output-templates.md` — analyse.md / summary.md 模板 + 屏幕输出格式
 - `references/code-review-expert/SKILL.md` — 捆绑的 review skill（安装时自动部署为独立 skill）
@@ -753,27 +752,7 @@ patch + 行:  150/150 ✅
 
 **强制约束：必须编译并验证整个仓库，不可跳过、不可只编译部分文件！**
 
-**编译策略**：不是每个 patch 都编译，只在对到达 `build_checkpoint=true` 的 patch 时编译验证。Phase 1 分析阶段根据以下规则标注验证点：
-
-**验证点选取规则**：
-
-| 规则 | 说明 | 示例 |
-|------|------|------|
-| 基础设施完成后 | 涉及大量 API/宏定义的 patch 应用后 | sysreg 定义、公共头文件 |
-| 功能模块完成后 | 一个功能子系列的最后一个 patch | HDBSS core 完成后 |
-| 高依赖 patch 之前 | 多个后续 patch 依赖此 patch | depends_on 最多的 patch |
-| 高风险 patch | risk_level=高 或有预判冲突 | 核心逻辑变更 |
-| patchset 末尾 | 最后一个 patch（强制） | 最终验证 |
-| 无需验证 | 独立 bugfix、文档、注释、skip 的 patch | 纯文档变更 |
-
-**Phase 1 分析 Agent 确定验证点**：
-
-```
-分析 agent 在屏幕输出中添加一行：
-验证点=true|false  # 基于上述规则判断
-```
-
-主 Agent 汇总后将 `build_checkpoint: true/false` 写入 merge_order 的每个 task。
+**编译策略**：不是每个 patch 都编译，只在 `build_checkpoint=true` 的 patch 时编译验证。
 
 **BUILD 开始时检查 checkpoint**：
 
@@ -782,7 +761,7 @@ if [ "$build_checkpoint" = "true" ]; then
     # 执行编译验证（完整流程），完成后调用 gatekeeper --step BUILD
 else
     echo "[BUILD SKIP] task_id=$task_id 非验证点，跳过编译"
-    # ⚠️ 不调用 gatekeeper --step BUILD，state_log 不会有 BUILD 记录
+    # 不调用 gatekeeper --step BUILD，state_log 不会有 BUILD 记录
     # 直接进入 COMMIT
 fi
 ```
@@ -792,7 +771,8 @@ fi
 
 **编译流程**（仅 build_checkpoint=true 时执行）：
 
-**BUILD 开始前先标记 in_progress**（上下文压缩后可恢复到此位置）：
+**BUILD 开始前先标记 in_progress**：
+
 ```bash
 python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
@@ -800,29 +780,102 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --step BUILD --result in_progress
 ```
 
-**步骤 1：动态选择编译目标**
+**步骤 1：确定编译目标**（确定，不依赖外部脚本）
 
 ```bash
-BUILD_TARGET=$(bash "$SCRIPTS_DIR/detect_build_target.sh" \
-  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
-  --task-id "<task_id>" \
-  --repo-path "$KERNEL_REPO_PATH")
+# 基础编译目标
+BUILD_CMD="make ARCH=$KERNEL_ARCH -j$(nproc)"
+
+# 有 tools/perf 文件 → 追加 perf 编译
+PERF_FILES=$(python3 -c "
+import json
+d = json.load(open('$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json'))
+for s in ['deps_order', 'merge_order']:
+    for t in d.get(s, []):
+        for f in t.get('files_changed', []):
+            if f.startswith('tools/perf/'):
+                print('1')
+                exit(0)
+" 2>/dev/null) || true
+if [ -n "$PERF_FILES" ]; then
+    BUILD_CMD="$BUILD_CMD && make -C tools/perf"
+fi
 ```
 
-**步骤 2：执行编译**
+**步骤 2：驱动模块临时开启 CONFIG=m（强制执行，不可跳过）**
+
+> **⚠️ 只要涉改文件包含 drivers/* 或 sound/*，就必须执行此步骤。**
+
+```bash
+cd "$KERNEL_REPO_PATH"
+
+# 提取所有涉改的驱动文件
+DRIVER_FILES=$(python3 -c "
+import json
+d = json.load(open('$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json'))
+for s in ['deps_order', 'merge_order']:
+    for t in d.get(s, []):
+        for f in t.get('files_changed', []):
+            if f.startswith('drivers/') or f.startswith('sound/'):
+                print(f)
+" 2>/dev/null)
+
+if [ -n "$DRIVER_FILES" ]; then
+    echo "[DRIVER] 检测到驱动文件，开启对应 CONFIG=m"
+    
+    for f in $DRIVER_FILES; do
+        dir_path=$(dirname "$f")
+        makefile="$KERNEL_REPO_PATH/$dir_path/Makefile"
+        
+        if [ ! -f "$makefile" ]; then
+            continue
+        fi
+        
+        # 解析 Makefile 中的 obj-$(CONFIG_XXX) → 提取 CONFIG 名
+        configs=$(grep -oP 'obj-\$\((\w+)\)' "$makefile" 2>/dev/null \
+            | sed 's/obj-\$(\(.*\))/\1/' | sort -u || true)
+        
+        for cfg in $configs; do
+            # 已是 m 或 y → 跳过
+            if grep -q "^${cfg}=[my]$" "$KERNEL_REPO_PATH/.config" 2>/dev/null; then
+                continue
+            fi
+            # 不是 m → 临时开启
+            echo "  临时开启: $cfg=m"
+            $KERNEL_REPO_PATH/scripts/config --module "$cfg" 2>/dev/null || true
+            CONFIG_CHANGED=1
+        done
+    done
+    
+    if [ "${CONFIG_CHANGED:-0}" -eq 1 ]; then
+        # 刷新 .config（旧 defconfig 可能冲突）
+        make ARCH=$KERNEL_ARCH olddefconfig 2>/dev/null || true
+    fi
+fi
+```
+
+**步骤 3：执行编译**
 
 ```bash
 BUILD_LOG="/tmp/patch_build_<task_id>.log"
-echo "编译目标: $BUILD_TARGET"
-make ARCH=$KERNEL_ARCH $BUILD_TARGET -j$(nproc) 2>&1 | tee "$BUILD_LOG"
+echo "编译命令: $BUILD_CMD"
+$BUILD_CMD 2>&1 | tee "$BUILD_LOG"
 ```
 
-**步骤 3：提取模块目录信息**
+**步骤 4：恢复 .config（不污染仓库）**
 
 ```bash
-# 从 files_changed 提取驱动/声卡目录，用于记录编译范围
+if [ "${CONFIG_CHANGED:-0}" -eq 1 ]; then
+    git checkout .config
+    echo "[RESTORE] .config 已恢复"
+fi
+```
+
+**步骤 5：提取模块信息 + 门禁验证**
+
+```bash
 MODULE_DIRS=$(python3 -c "
-import json, sys
+import json
 d = json.load(open('$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json'))
 for section in ['deps_order', 'merge_order']:
     for t in d.get(section, []):
@@ -835,7 +888,6 @@ for section in ['deps_order', 'merge_order']:
             sys.exit(0)
 ") || true
 
-# 统计 .ko 文件数量（如有）
 MODULE_COUNT=0
 if [ -n "$MODULE_DIRS" ]; then
     for d in $(echo "$MODULE_DIRS" | tr ',' ' '); do
@@ -843,11 +895,7 @@ if [ -n "$MODULE_DIRS" ]; then
         MODULE_COUNT=$((MODULE_COUNT + cnt))
     done
 fi
-```
 
-**步骤 4：通过条件 + 门禁验证**
-
-```bash
 bash "$SCRIPTS_DIR/verify_build.sh" \
   --log "$BUILD_LOG" \
   --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
@@ -861,7 +909,7 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --step BUILD --result pass \
   --error-count <error_count> \
   --product "arch/$KERNEL_ARCH/boot/Image" \
-  --build-target "$BUILD_TARGET" \
+  --build-target "$BUILD_CMD" \
   --module-dirs "$MODULE_DIRS" \
   --module-count "$MODULE_COUNT"
 ```
@@ -871,12 +919,12 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 **每个 checkpoint 完成后必须显式输出**：
 ```
 [BUILD CHECKPOINT] task_id=<task_id>
-编译目标:  $BUILD_TARGET
+编译命令:  $BUILD_CMD
 模块目录:  ${MODULE_DIRS:-无}
 模块产物:  ${MODULE_COUNT:-0} 个 .ko
 日志路径:  /tmp/patch_build_<task_id>.log
 error 数:  <error_count>
-产物验证:  Image ✅ / 模块 ✅（自动检测）
+产物验证:  Image ✅ / 模块 ✅
 结论:      ✅ 编译通过
 
 [SKIP] task_id=0002 非验证点，跳过编译
