@@ -181,18 +181,6 @@ echo "[2/5] 校验工作区文件..."
 
 REQUIRED_FILES=(
     "$WORKSPACE/SKILL.md"
-    "$WORKSPACE/scripts/download_patches.py"
-    "$WORKSPACE/scripts/generate_diff_report.py"
-    "$WORKSPACE/scripts/generate_analyse_md.py"
-    "$WORKSPACE/scripts/generate_summary_md.py"
-    "$WORKSPACE/scripts/verify_analyse_format.py"
-    "$WORKSPACE/scripts/merge_order_sort.py"
-    "$WORKSPACE/scripts/topo_sort.py"
-    "$WORKSPACE/scripts/verify_build.sh"
-    "$WORKSPACE/scripts/gatekeeper.py"
-    "$WORKSPACE/scripts/calculate_build_checkpoints.py"
-    "$WORKSPACE/scripts/generate_all_analyses.py"
-    "$WORKSPACE/scripts/verify_patch_intent.py"
     "$WORKSPACE/references/diagnostic-guide.md"
     "$WORKSPACE/references/output-templates.md"
     "$WORKSPACE/references/code-review-expert/SKILL.md"
@@ -207,6 +195,15 @@ for f in "${REQUIRED_FILES[@]}"; do
         ALL_OK=false
     fi
 done
+
+# 通配符检查 scripts/ 下所有 .py 和 .sh
+SCRIPT_COUNT=$(find "$WORKSPACE/scripts" -maxdepth 1 \( -name "*.py" -o -name "*.sh" \) 2>/dev/null | wc -l)
+if [ "$SCRIPT_COUNT" -gt 0 ]; then
+    ok "scripts/ 目录: $SCRIPT_COUNT 个脚本"
+else
+    err "scripts/ 目录无有效脚本"
+    ALL_OK=false
+fi
 
 if [ "$ALL_OK" = false ]; then
     echo ""
@@ -263,26 +260,20 @@ copy_or_fail "$WORKSPACE/SKILL.md"                              "SKILL.md"
 copy_or_fail "$WORKSPACE/references/diagnostic-guide.md"         "references/diagnostic-guide.md"
 copy_or_fail "$WORKSPACE/references/output-templates.md"         "references/output-templates.md"
 copy_or_fail "$WORKSPACE/references/code-review-expert/SKILL.md" "references/code-review-expert/SKILL.md"
-copy_or_fail "$WORKSPACE/scripts/download_patches.py"             "scripts/download_patches.py"
-copy_or_fail "$WORKSPACE/scripts/generate_diff_report.py"        "scripts/generate_diff_report.py"
-copy_or_fail "$WORKSPACE/scripts/generate_analyse_md.py"         "scripts/generate_analyse_md.py"
-copy_or_fail "$WORKSPACE/scripts/generate_summary_md.py"         "scripts/generate_summary_md.py"
-copy_or_fail "$WORKSPACE/scripts/verify_analyse_format.py"       "scripts/verify_analyse_format.py"
-copy_or_fail "$WORKSPACE/scripts/merge_order_sort.py"            "scripts/merge_order_sort.py"
-# 确保脚本可执行
-chmod +x "$SKILL_DIR/scripts/verify_build.sh"
-copy_or_fail "$WORKSPACE/scripts/gatekeeper.py"              "scripts/gatekeeper.py"
-copy_or_fail "$WORKSPACE/scripts/calculate_build_checkpoints.py"  "scripts/calculate_build_checkpoints.py"
-copy_or_fail "$WORKSPACE/scripts/generate_all_analyses.py"       "scripts/generate_all_analyses.py"
-copy_or_fail "$WORKSPACE/scripts/verify_patch_intent.py"        "scripts/verify_patch_intent.py"
-copy_or_fail "$WORKSPACE/scripts/detect_duplicate.py"         "scripts/detect_duplicate.py"
-copy_or_fail "$WORKSPACE/scripts/generate_revert_plan.py"     "scripts/generate_revert_plan.py"
-copy_or_fail "$WORKSPACE/scripts/execute_revert.py"           "scripts/execute_revert.py"
-copy_or_fail "$WORKSPACE/scripts/validate_phase1_artifacts.py" "scripts/validate_phase1_artifacts.py"
+
+# 通配符拷贝所有 scripts（新增脚本无需改 install.sh）
+mkdir -p "$SKILL_DIR/scripts"
+rm -f "$SKILL_DIR/scripts/"*.py "$SKILL_DIR/scripts/"*.sh 2>/dev/null
+if cp "$WORKSPACE/scripts/"*.py "$SKILL_DIR/scripts/" 2>/dev/null && \
+   cp "$WORKSPACE/scripts/"*.sh "$SKILL_DIR/scripts/" 2>/dev/null; then
+    ok "scripts/ → $SCRIPT_COUNT 个脚本已部署"
+else
+    err "scripts 拷贝失败"
+    DEPLOY_FAILED=1
+fi
 
 # 确保脚本可执行
-chmod +x "$SKILL_DIR/scripts/verify_build.sh"
-chmod +x "$SKILL_DIR/scripts/"*.py
+chmod +x "$SKILL_DIR/scripts/"*.py "$SKILL_DIR/scripts/"*.sh 2>/dev/null
 
 # 双向同步：将部署的 SKILL.md 回拷到工作区
 if cp "$SKILL_DIR/SKILL.md" "$WORKSPACE/SKILL.md"; then
@@ -332,21 +323,20 @@ verify_file "SKILL.md"
 verify_file "references/diagnostic-guide.md"
 verify_file "references/output-templates.md"
 verify_file "references/code-review-expert/SKILL.md"
-verify_file "scripts/download_patches.py"
-verify_file "scripts/generate_diff_report.py"
-verify_file "scripts/generate_analyse_md.py"
-verify_file "scripts/generate_summary_md.py"
-verify_file "scripts/verify_analyse_format.py"
-verify_file "scripts/merge_order_sort.py"
-verify_file "scripts/verify_build.sh"
-verify_file "scripts/gatekeeper.py"
-verify_file "scripts/calculate_build_checkpoints.py"
-verify_file "scripts/generate_all_analyses.py"
-verify_file "scripts/verify_patch_intent.py"
-verify_file "scripts/detect_duplicate.py"
-verify_file "scripts/generate_revert_plan.py"
-verify_file "scripts/execute_revert.py"
-verify_file "scripts/validate_phase1_artifacts.py"
+
+# 通配符验证所有 scripts
+DEPLOYED_SCRIPT_COUNT=0
+for f in "$SKILL_DIR/scripts/"*.py "$SKILL_DIR/scripts/"*.sh; do
+    if [ -f "$f" ]; then
+        DEPLOYED_SCRIPT_COUNT=$((DEPLOYED_SCRIPT_COUNT + 1))
+    fi
+done
+if [ "$DEPLOYED_SCRIPT_COUNT" -eq "$SCRIPT_COUNT" ] 2>/dev/null; then
+    ok "scripts/ → $DEPLOYED_SCRIPT_COUNT/$SCRIPT_COUNT 个脚本"
+else
+    err "scripts 数量不匹配: 工作区 $SCRIPT_COUNT, 部署 $DEPLOYED_SCRIPT_COUNT"
+    VERIFY_FAILED=1
+fi
 
 echo ""
 
