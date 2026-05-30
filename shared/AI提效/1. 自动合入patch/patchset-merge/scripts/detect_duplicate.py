@@ -232,7 +232,12 @@ def resolve_pr_affiliation(repo_path: str, commit_hash: str) -> dict | None:
     subject = run_git(repo_path, "log", "--format=%s", "-1", commit_hash)
     m = re.search(r'^!(\d{4,6})\b', subject)
     if m:
-        return {"pr_id": f"PR!{m.group(1)}", "source": "openEuler_MR"}
+        result = {"pr_id": f"PR!{m.group(1)}", "source": "openEuler_MR"}
+        # 如果该 commit 本身就是 merge commit，附带 merge_commit 字段
+        parents = run_git(repo_path, "log", "--format=%P", "-1", commit_hash, timeout=5)
+        if len(parents.split()) >= 2:
+            result["merge_commit"] = commit_hash
+        return result
 
     if body:
         pr_pattern = re.compile(

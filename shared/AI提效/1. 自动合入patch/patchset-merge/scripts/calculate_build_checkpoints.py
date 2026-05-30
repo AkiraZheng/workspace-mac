@@ -5,6 +5,7 @@ Calculate build_checkpoint for each task in merge_tasks.json.
 Rules (priority order, short-circuit):
   1a. 反向依赖者（前面的 patch 引用后面 patch 的符号）→ False（完全排除）
   1b. 反向依赖的被依赖者（定义符号被前面 patch 引用）→ True（强制）
+  1c. 含 pre_revert（需要 revert 旧 commit）          → True（强制验证）
   1.  功能分类 == 'infra'                                 → True
   2.  introduced_symbols referenced by >= 3 later patches  → True
   3.  risk_level == '高' or conflicts_predicted non-empty  → True
@@ -164,6 +165,15 @@ def calculate_checkpoints(merge_tasks):
                 "type": "provider",
                 "provided_symbols": rp
             }
+
+        # ── Rule 1c: 含 pre_revert（需要 revert 旧 commit）→ 强制验证 ──
+        if checkpoint is None:
+            pre_revert = patch.get('pre_revert')
+            if pre_revert and len(pre_revert) > 0:
+                checkpoint = True
+                rules_triggered.append("Rule_1c")
+                forced_by.append("pre_revert")
+                reason_parts.append(f'含 revert 操作（{len(pre_revert)} 个 commit 需回退）')
 
         # ── Rule 2: infra → true ──
         if checkpoint is None and func_class == 'infra':

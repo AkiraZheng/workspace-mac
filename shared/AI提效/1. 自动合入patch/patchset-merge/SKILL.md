@@ -99,8 +99,10 @@ Phase 0: 下载（脚本）→ /tmp/patches/000N-*.patch + metadata.json
          → 创建 $KERNEL_REPO_PATH/patch_analysis/
 Phase 0.5: 场景问询（脚本 detect_duplicate.py --version-upgrade）
          → 检测旧版本 → 用户选择 upgrade/backport
-Phase 1: 并行分析（只读，不写文件）→ 屏幕输出分析结果
-    ⚠️ 所有 Agent 必须用 Task tool 一次性并行启动，禁止串行
+Phase 1: L1 脚本（extract_patch_symbols.py）→ analysis_cache.json 骨架
+         L2 Agent（并行，只读）:
+           agent_analysis — 语义分析/依赖/风险
+           agent_revert  — 审核 revert 候选（upgrade 模式深度搜索）
 Phase 1.5: 主 Agent 汇总 → patch_analysis/merge_tasks.json + analysis_cache.json
 Phase 2: 串行 Merge（写入）→ 每 patch commit 后落盘 patch_analysis/analyse.md
 Phase 3: 汇总 → patch_analysis/summary.md
@@ -109,7 +111,9 @@ Phase 3: 汇总 → patch_analysis/summary.md
 ## 文件清单
 
 - `SKILL.md` — 本文件
-- `$SCRIPTS_DIR/download_patches.py` — 统一下载入口（b4/wget/本地）
+- `$SCRIPTS_DIR/download_patches.py` — 统一下载入口（b4/wget/本地 .patch/.mbox）
+- `$SCRIPTS_DIR/detect_duplicate.py` — 重复检测 + PR 聚合 + revert 决策 + 版本升级模式（--version-upgrade）
+- `$SCRIPTS_DIR/extract_patch_symbols.py` — L1 确定性脚本：从 .patch 提取符号/功能分类 → analysis_cache.json 骨架
 - `$SCRIPTS_DIR/generate_diff_report.py` — diff 对比生成
 - `$SCRIPTS_DIR/generate_analyse_md.py` — 确定性生成 analyse.md
 - `$SCRIPTS_DIR/generate_summary_md.py` — 确定性生成 summary.md
@@ -294,8 +298,8 @@ python3 "$SCRIPTS_DIR/detect_duplicate.py" \
 
 | 选择 | 后续 |
 |------|------|
-| [1] 版本升级 | 记录场景为 `upgrade`，Phase 1 subagent 收到 `duplicate_analysis.json` + `old_version_batches`，执行 revert 后合入 |
-| [2] 纯新增 | 记录场景为 `backport`，直接进入 Phase 1，不执行 revert |
+| [1] 版本升级 | 记录场景为 `upgrade`，Phase 1 agent_revert 在 L2 做 AI 深度搜索旧版本 |
+| [2] 纯新增 | 记录场景为 `backport`，Phase 1 agent_revert 只做严格审核（diff ≥90% → 暂停） |
 | [3] 查看详细 | 展示指定 patch 的 `patch_duplicate_map[task_id]` 详细内容 |
 | [4] 中止 | 退出，`duplicate_analysis.json` 已保存，用户可手动审查 |
 
@@ -315,171 +319,111 @@ Phase 0.5 的 `duplicate_analysis.json` 输出包含以下字段，Phase 1 subag
 
 ---
 
-## Phase 1：并行分析（只读，不写文件）
+## Phase 1：符号提取 + 语义分析
 
-### 分析 Agent 分配策略
+### L1 脚本层（确定性，并行执行）
 
-| Patch 总数 | 每 Agent 负责 | Agent 数 |
-|-----------|-------------|---------|
-| ≤3 | 全部 | 1（主 Agent 兼任） |
-| 4-8 | 2-3 个 | 2-3 |
-| ≥9 | ≤4 个 | min(N/4 向上取整, **10**) |
-| ≥40 | 自动增加 | **10**（上限） |
+在启动 L2 Agent 前，先运行 L1 确定性脚本。`detect_duplicate.py` 已在 Phase 0.5 完成，
+此处运行 `extract_patch_symbols.py` 提取符号骨架：
 
-> **Agent 总数上限为 10**。超过 40 个 patch 时，每 agent 负责的 patch 数自动增加。
-> 例如：60 个 patch → 10 个 agent，每 agent 负责 6 个 patch。
+```bash
+# L1: 符号提取（生成 analysis_cache.json 骨架）
+python3 "$SCRIPTS_DIR/extract_patch_symbols.py" \
+  --patch-dir /tmp/patches/ \
+  --output "$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json"
+```
 
-### 并行启动方式
+产出 `analysis_cache.json`，含每个 patch 的：
+- `introduced_symbols`：patch 新增/修改的函数名、宏名、结构体名
+- `referenced_symbols`：patch 调用/引用的外部符号
+- `功能分类`：按文件路径初步判定（infra/core/driver/fs/net/sound/doc/bugfix）
+- `feature_signature.keywords` + `scope_dirs`：从 patch 路径推断
+- `changed_files`：涉改文件列表
 
-**主 Agent 必须在一条消息中同时启动所有分析 Agent**（使用多个 Task tool 调用），而不是逐个串行启动。
+若 L1 脚本失败或产物缺失，Agent 降级为从 patch 文件直接提取。
+
+### L2 语义层（AI Agent，只读不写，按职责分工）
+
+主 Agent 在 L1 完成后，**必须在一条消息中同时启动 2 个 Agent**（使用多个 Task tool 调用），而不是逐个串行启动。
 
 ```
-正确示例（并行）：一条消息中同时发送 3 个 Task tool
-  Task(agent-A, patches 0001-0003, ...)
-  Task(agent-B, patches 0004-0006, ...)
-  Task(agent-C, patches 0007-0009, ...)
+正确示例（并行）：一条消息中同时发送 2 个 Task tool
+  Task(agent_analysis, 全部 patch + analysis_cache.json + $KERNEL_REPO_PATH, ...)
+  Task(agent_revert, duplicate_analysis.json + 场景(upgrade/backport) + analysis_cache.json + $KERNEL_REPO_PATH, ...)
 
 错误示例（串行 — 禁止）：
-  Task(agent-A, ...) → 等 A 完成 → Task(agent-B, ...) → 等 B 完成 → ...
+  Task(agent_analysis, ...) → 等 analysis 完成 → Task(agent_revert, ...)
 ```
 
-每个 Agent 收到以下信息：
-- 负责的 patch 文件列表（绝对路径 `/tmp/patches/000N-*.patch`）
-- 目标仓库路径 `$KERNEL_REPO_PATH` 和目标分支 `$KERNEL_BRANCH`
-- 上游仓库路径 `$UPSTREAM_REPO_PATH`（如不可用，明确告知降级模式）
-- 输出格式：严格按 `references/output-templates.md` 中 "Phase 1 分析 Agent 屏幕输出格式" 输出
+**不再按 patch 数量平分 Agent**，改为 2 个专职 Agent 各司其职。
 
-### 分析 Agent 执行流程
+---
+
+### agent_analysis 执行流程
+
+**职责**：全量语义分析——功能理解、依赖标注、风险评估、build_checkpoint 预判。
+
+**输入**：
+- `/tmp/patches/000N-*.patch`（全部）
+- `analysis_cache.json`（L1 已填充符号骨架）
+- `$KERNEL_REPO_PATH`、`$UPSTREAM_REPO_PATH`（可选）
 
 **步骤 1: 理解 commit message（优先）**
 先深入理解每个 patch 的 commit message：功能是什么、关联哪个子模块、是否标注了前置依赖 commit。
 
-**步骤 2: 分析代码 diff**
-解析每个 patch 的 diff，提取：
-- `introduced_by_patch`：本 patch 新增/修改的函数名、宏名、类型名
-- `referenced_symbols`：本 patch 调用/引用的符号
-- `changed_files`：涉改文件的路径和行号范围
-- `功能分类`：根据文件路径和 diff 内容判定功能分类
+**步骤 2: 完善 analysis_cache.json**
+在 L1 骨架基础上，补充 AI 理解后的语义内容：
+- `功能分类`：结合 commit message 修正 L1 的初步分类
+- `feature_signature.keywords`：AI 理解特性后给出语义关键词（非机械截取大写词）
+- `feature_signature.scope_dirs`：限定搜索范围
+- `depends_on`：标记 patch 内依赖（P_j 依赖 P_i 的符号）
+- `build_checkpoint`：初步判定（基础设施/高依赖/末 patch → true）
+- `risk_level`：低/中/高
+- `review_urgency`：低/中/高
 
-**功能分类判定规则**：
+**步骤 3: 向后搜索 Bugfix**（同原步骤 3，有 upstream 时执行）
 
-| 分类 | 判定规则 | 示例路径 |
-|------|---------|---------|
-| `infra` | `include/linux/*.h`, `include/uapi/*.h`, `arch/*/include/`, diff 中 `#define`/`typedef`/`struct` 定义行占比 > 30% | `include/linux/kvm_host.h` |
-| `core` | `kernel/`, `mm/`, `arch/*/kernel/`, `arch/*/mm/`, `init/` | `kernel/sched/core.c` |
-| `driver` | `drivers/`, `arch/*/mach-*/` | `drivers/gpu/arm/` |
-| `fs` | `fs/`, `include/linux/fs*.h` | `fs/ext4/` |
-| `net` | `net/`, `include/linux/net*.h`, `include/net/` | `net/core/dev.c` |
-| `sound` | `sound/`, `include/sound/` | `sound/soc/` |
-| `doc` | `Documentation/`, commit message 含 "doc"/"comment"/"documentation" | `Documentation/kvm/` |
-| `bugfix` | commit message 含 "fix"/"bug"/"error"/"patch"/"Fixes:" 且独立于特性系列 | 修复补丁 |
+**步骤 4: 向前搜索依赖**（同原步骤 4，有 upstream 时执行）
 
-> 优先级：文件路径 > diff 内容（宏定义集中 > 文件路径）> commit message 关键词
+**步骤 5: 屏幕输出**
 
-**步骤 3: 向后搜索 Bugfix（在 upstream 仓库上执行）**
+按 `references/output-templates.md` 中 "Phase 1 分析 Agent 屏幕输出格式" 输出。
 
-> **前提**：`$UPSTREAM_REPO_PATH` 可用时执行，不可用则跳过，仅从 patch metadata 推断。
+---
 
-```bash
-# 对每个 changed_file，blame 追踪后续改动
-git -C "$UPSTREAM_REPO_PATH" blame -L <start>,<end> <branch> -- <file>
+### agent_revert 执行流程
 
-# 查找 Fixes 标签（更精准）
-git -C "$UPSTREAM_REPO_PATH" log --grep="Fixes:.*<upstream-commit-short>" \
-    --all --format="%h %s"
+**职责**：审核 L1（Phase 0.5）的 revert 候选，根据场景做深度搜索或严格审核。
 
-# 递归追溯 bugfix 的 bugfix
-```
+**输入**：
+- `duplicate_analysis.json`（L1 初筛结果 + PR 聚合 + revert 建议）
+- 场景（upgrade / backport，由 Phase 0.5 用户选择决定）
+- `analysis_cache.json` 的 `feature_signature.keywords` + `scope_dirs`
+- `$KERNEL_REPO_PATH`
 
-**步骤 4: 向前搜索依赖**
+#### upgrade 模式（AI 深度搜索）
 
-> **前提**：`$UPSTREAM_REPO_PATH` 可用时执行，不可用时跳过 `git log -S`，仅用 `grep` 检查目标仓库。
+1. 读取 `duplicate_analysis.json` 中的 revert 候选（`global_revert_order` + `version_upgrade.batches`）
+2. 读取 `analysis_cache.json` 中的 `feature_signature.keywords` 和 `scope_dirs`
+3. **扩展搜索**：用 keywords 在 scope_dirs 下 `git log --grep=<kw>` 搜全部相关 commit（仅当前分支，不限阈值、不限时间范围）
+4. **符号追溯**：用 `git log -S=<sym>` 在 scope_dirs 找所有引入 key symbol 的 commit
+5. **文件追溯**：用 `git log -- <file>` 找出修改过涉改文件的所有 commit
+6. **深入理解**：读取每个候选 commit 的 message + diff，AI 判断：
+   - 是否是旧版本的功能实现？ → confirm
+   - 是否是无关注释/格式/doc/无关 bugfix？ → reject
+   - merge commit 包含检查：若候选中有 merge commit，用 `git log <merge>~1..<merge>` 展开子 commit 列表
+7. **去重合并**：将 L1 结果和步骤 3-5 的搜索结果合并去重，确保最终 revert 列表无重复、无遗漏
+8. 输出：每个 commit 的 `revert_ruling`（confirm/reject）+ `revert_ruling_note` + 按 时间逆序排列
 
-```bash
-# 在目标内核中检查符号是否存在
-grep -rn "<symbol>" "$KERNEL_REPO_PATH/"
+> 核心原则：不靠阈值判定，AI 理解代码语义后做判断。L1 脚本只提供起点线索。
 
-# 若不存在 → 在 upstream 中找引入该符号的 commit
-git -C "$UPSTREAM_REPO_PATH" log --all --reverse -S "<symbol>" \
-    --format="%H %s" | head -1
+#### backport 模式（严格审核）
 
-# 递归检查引入 commit 是否在目标内核中缺失
-git -C "$KERNEL_REPO_PATH" branch --contains <commit>
-# 空输出 → 目标内核缺少该 commit → 标记为依赖
-```
-
-若 `$UPSTREAM_REPO_PATH` 不可用：
-- 跳过 git blame / git log -S
-- 仅从 patch commit message 中提取 Fixes/Depends-on 标签
-- 在 analyse.md 中标注 `未找到 blame 记录` / `未找到依赖`
-
-**步骤 5: 检测目标仓库中的重复/等效 patch + PR 聚合 + revert 决策**
-
-> **核心策略**：要合入的 patch **绝不跳过**。检测到重复/等效时，写入 `pre_revert` 列表，
-> 先 revert 目标仓库的实现，再合入新 patch。禁止使用 `action: skip`。
-
-调用 `detect_duplicate.py` 自动完成搜索、diff 对比、PR 聚合、revert 决策：
-
-```bash
-python3 "$SCRIPTS_DIR/detect_duplicate.py" \
-  --patch-dir /tmp/patches/ \
-  --repo-path "$KERNEL_REPO_PATH" \
-  --output "$KERNEL_REPO_PATH/patch_analysis/duplicate_analysis.json"
-```
-
-**脚本内部流程**：
-
-| 阶段 | 操作 |
-|------|------|
-| **候选搜索** | `git log --grep`（subject 匹配）+ `git log -S`（符号匹配）+ 涉改文件 commit |
-| **diff 对比** | patch add lines vs commit add lines，计算交集比例 |
-| **功能对比** | 函数名/宏名重叠度（符号提取），功能等效但代码不同的 patch 也能识别 |
-| **综合判定** | 取 diff 和 symbol 中较高者（任一 >=80% 即高匹配）；都不高取均值 |
-| **PR 聚合** | 解析 commit message Link 标签，按 PR 聚合候选 commits |
-
-**判定标准**：
-
-| 条件 | 判定 | 处理 |
-|------|------|------|
-| 综合相似度 >= 80%（diff 或 symbol 任一高） | **高匹配**（计入 PR 覆盖率） | → 写入 `pre_revert` |
-| 综合相似度 50-79% | **中匹配**（不计入覆盖率） | → 标记 `可能冲突`，不 revert |
-| 综合相似度 < 50% | **低匹配** | → 忽略 |
-| 无候选 commit | **无重复** | → 正常流程 |
-| symbol >= 80% 但 diff < 50% | **功能等效**（v1→v2 替换） | → 仍为高匹配，revert v1 保留 v2 |
-
-**PR 聚合后 revert 决策**：
-
-| PR 覆盖率 | revert 策略 | urgency |
-|----------|------------|---------|
-| >= 75% | revert 整个 PR | 必须 |
-| 50-74% | revert 匹配的 commits（逐个，逆序） | 建议 |
-| < 50% | 不自动 revert，合入时冲突解决 | 无须 |
-
-**覆盖率计算**：`高匹配 commit 数 / PR 内总 commit 数 * 100`
-
-**Agent 输出格式**：分析 Agent 读取 `duplicate_analysis.json` 结果，按以下格式输出：
-```
-重复检测=高匹配:abc123(PR#123,95%);中匹配:def456(PR#456,65%);无重复
-```
-
-> **步骤 6 已合并入步骤 5**。PR 映射聚合由 `detect_duplicate.py` 统一完成。
-
-**步骤 7: 屏幕输出**
-
-按 `references/output-templates.md` 中的结构化格式输出到屏幕。含 PR 映射结果。
-
-输出中**必须包含 `验证点=待定|false`**：
-
-Agent 根据以下规则做初步判定：
-
-| 条件 | 验证点 值 | 说明 |
-|------|:--:|------|
-| 文件路径匹配 `include/linux/*.h`, `arch/*/include/` 等基础设施模式 | `待定` | 大概率 true，Phase 1.5 最终确认 |
-| risk_level=高 或 conflicts_predicted 非空 | `待定` | 大概率 true，Phase 1.5 最终确认 |
-| 独立 bugfix、文档、skip 的 patch | `false` | 确定不需要 |
-| 上述条件均不满足的普通 patch | `false` | 默认不需要（功能模块最后、被依赖数等由 Phase 1.5 计算） |
-
-> **注意**：即使 agent 判断为 `false`，Phase 1.5 汇总后仍可能被 `calculate_build_checkpoints.py` 覆盖为 `true`（如被 ≥3 个后续 patch 依赖）。Agent 只做初步排除。
+1. 读取 `duplicate_analysis.json`
+2. 对每个候选：
+   - diff ≥90% → 暂停，展示 commit 给用户确认是否 revert
+   - diff <90% → reject
+3. **不启动扩展搜索**（纯新增场景，深度搜索仅限 upgrade 模式）
 
 ---
 
@@ -742,6 +686,7 @@ python3 "$SCRIPTS_DIR/calculate_build_checkpoints.py" \
 |--------|------|:---:|------|
 | 1a | 反向依赖者（前面的 patch 引用后面 patch 的符号） | `false` | **完全排除**，即使满足 infra/高风险等规则也不验证；代码静默写入，等被依赖者定义符号后在 checkpoint 统一验证 |
 | 1b | 反向依赖的被依赖者（定义符号被前面 patch 引用） | `true` | 强制验证确保符号定义正确，验证时依赖者的代码已写入仓库 |
+| 1c | 含 `pre_revert`（需要 revert 旧 commit） | `true` | Revert 操作修改代码，必须编译验证 |
 | 2 | `功能分类` == `infra` | `true` | 基础设施/公共头文件/宏定义，影响面最广 |
 | 3 | `introduced_symbols` 被 ≥3 个后续 patch 的 `referenced_symbols` 引用 | `true` | 高依赖点，出错影响多个 patch |
 | 4 | `risk_level` == `"高"` 或 `conflicts_predicted` 非空 | `true` | 高风险 patch |
