@@ -104,7 +104,6 @@ Phase 3: 汇总 → patch_analysis/summary.md
 
 - `SKILL.md` — 本文件
 - `$SCRIPTS_DIR/download_patches.py` — 统一下载入口（b4/wget/本地）
-- `$SCRIPTS_DIR/extract_patch_symbols.py` — L1 确定性脚本：从 .patch 提取符号/功能分类/feature_signature → analysis_cache.json 骨架
 - `$SCRIPTS_DIR/generate_diff_report.py` — diff 对比生成
 - `$SCRIPTS_DIR/generate_analyse_md.py` — 确定性生成 analyse.md
 - `$SCRIPTS_DIR/generate_summary_md.py` — 确定性生成 summary.md
@@ -117,48 +116,12 @@ Phase 3: 汇总 → patch_analysis/summary.md
 - `references/diagnostic-guide.md` — 冲突诊断决策树（Ours/Theirs）
 - `references/output-templates.md` — analyse.md / summary.md 模板 + 屏幕输出格式
 - `references/code-review-expert/SKILL.md` — 捆绑的 review skill（安装时自动部署为独立 skill）
-- `references/agent-design.md` — Agent 职责定义参考文档
 
 ---
 
 ## Phase 0：下载
 
-**步骤 0：环境初始化（必须，在下载前完成）**
-
-```bash
-cd "$KERNEL_REPO_PATH"
-
-# 1. 自动检测 KERNEL_ARCH
-if grep -q "CONFIG_ARM64=y" .config; then
-    KERNEL_ARCH=arm64
-elif grep -q "CONFIG_X86_64=y" .config; then
-    KERNEL_ARCH=x86
-else
-    KERNEL_ARCH=$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x86/')
-fi
-
-# 2. 自动构造 BUILD_CMD
-BUILD_CMD="make ARCH=$KERNEL_ARCH -j$(nproc)"
-
-# 3. 切换目标分支（若指定，未指定则留在当前分支）
-if [ -n "$KERNEL_BRANCH" ]; then
-    git checkout "$KERNEL_BRANCH" 2>/dev/null || git checkout -b "$KERNEL_BRANCH"
-fi
-
-# 4. 确保工作区干净
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "错误: 工作区不干净，请先清理"
-    exit 1
-fi
-
-echo "KERNEL_ARCH=$KERNEL_ARCH"
-echo "BUILD_CMD=$BUILD_CMD"
-echo "KERNEL_BRANCH=$(git branch --show-current)"
-```
-
-**步骤 1：下载**
-
-**执行者**：`$SCRIPTS_DIR/download_patches.py`（确定性脚本）
+**执行者**：`$SCRIPTS_DIR/download_patches.py`（确定性脚本，不是 agent）
 
 ```bash
 python3 "$SCRIPTS_DIR/download_patches.py" \
@@ -210,109 +173,41 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 
 ---
 
-### 场景问询（★v2.1 新增）
-
-Phase 0 下载完成后、正式进入 Phase 1 前，检测目标仓库是否存在旧版本实现，让用户选择合入场景。
-
-**步骤 1：初筛检测（用 version-upgrade 模式检测旧版本）**
-
-```bash
-python3 "$SCRIPTS_DIR/detect_duplicate.py" \
-  --patch-dir /tmp/patches/ \
-  --repo-path "$KERNEL_REPO_PATH" \
-  --output "$KERNEL_REPO_PATH/patch_analysis/duplicate_analysis.json" \
-  --version-upgrade
-```
-
-**步骤 2：根据结果分流**
-
-- 若 `duplicate_analysis.json` 中 `global_revert_order` 为空且无 `old_version_batches` → 无旧版本，直接进入 Phase 1（默认 backport 模式）
-- 若存在旧版本批次 → 展示摘要给用户，询问场景
-
-```
-═══════════════════════════════════════════════
-  场景问询 — 检测到目标仓库中可能存在旧版本实现
-═══════════════════════════════════════════════
-
-检测到以下 commit 可能与要合入的 patch 相关：
-  <commit_hash> <subject_line>
-
-请选择合入场景：
-
-[1] 版本升级（upgrade）
-    要合入的 patchset 是旧版本的新版本。
-    AI 将深度搜索目标仓库中所有相关旧版本 commit，
-    确认后逐个回退，确保清理干净不留残留。
-
-[2] 纯新增（backport）
-    目标仓库无相关实现，上述匹配为误报或极相似代码。
-    仅当 diff ≥90% 时才暂停让用户确认，其余全部跳过。
-    不进行深度搜索，不会自动 revert。
-
-  请选择: [1] 版本升级 / [2] 纯新增
-```
-
-**步骤 3：用户选择后的行为**
-
-| 选择 | 后续 |
-|------|------|
-| [1] 版本升级 | 记录场景为 `upgrade`，进入 Phase 1。agent_revert 在 L2 做 AI 深度搜索 |
-| [2] 纯新增 | 记录场景为 `backport`，进入 Phase 1。agent_revert 只做严格审核（diff ≥90% → 暂停让用户确认） |
-
----
-
 ## Phase 1：并行分析（只读，不写文件）
 
-### L1 脚本初始化（★v2.1：先跑确定性脚本）
+### 分析 Agent 分配策略
 
-在启动 L2 Agent 前，先并行运行两个 L1 确定性脚本：
+| Patch 总数 | 每 Agent 负责 | Agent 数 |
+|-----------|-------------|---------|
+| ≤3 | 全部 | 1（主 Agent 兼任） |
+| 4-8 | 2-3 个 | 2-3 |
+| ≥9 | ≤4 个 | min(N/4 向上取整, **10**) |
+| ≥40 | 自动增加 | **10**（上限） |
 
-```bash
-# L1a: 重复检测（初筛线索）
-python3 "$SCRIPTS_DIR/detect_duplicate.py" \
-  --patch-dir /tmp/patches/ \
-  --repo-path "$KERNEL_REPO_PATH" \
-  --output "$KERNEL_REPO_PATH/patch_analysis/duplicate_analysis.json"
+> **Agent 总数上限为 10**。超过 40 个 patch 时，每 agent 负责的 patch 数自动增加。
+> 例如：60 个 patch → 10 个 agent，每 agent 负责 6 个 patch。
 
-# L1b: 符号提取（生成 analysis_cache.json 骨架）
-python3 "$SCRIPTS_DIR/extract_patch_symbols.py" \
-  --patch-dir /tmp/patches/ \
-  --output "$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json"
-```
+### 并行启动方式
 
-产出：
-- `duplicate_analysis.json` — L2 agent_revert 消费
-- `analysis_cache.json` — L2 agent_analysis 消费（含骨架：introduced_symbols / referenced_symbols / 功能分类 / feature_signature）
-
-> 这两个脚本是完全确定性的，不依赖 AI。并行运行或串行均可。
-
-### L2 Agent 分工（★v2.1：按职责分工）
-
-不再按 patch 数量平分 Agent。改为 **2 个专职 Agent**，一条消息并行启动：
+**主 Agent 必须在一条消息中同时启动所有分析 Agent**（使用多个 Task tool 调用），而不是逐个串行启动。
 
 ```
-主 Agent 在 L1 脚本全部完成后，一条消息同时启动 2 个 Agent：
-  Task(agent_analysis, 全部 patch + analysis_cache.json)
-  Task(agent_revert, duplicate_analysis.json + 场景 + keywords)
+正确示例（并行）：一条消息中同时发送 3 个 Task tool
+  Task(agent-A, patches 0001-0003, ...)
+  Task(agent-B, patches 0004-0006, ...)
+  Task(agent-C, patches 0007-0009, ...)
+
+错误示例（串行 — 禁止）：
+  Task(agent-A, ...) → 等 A 完成 → Task(agent-B, ...) → 等 B 完成 → ...
 ```
 
-**agent_analysis**：全量语义分析
-- 输入：`/tmp/patches/000N-*.patch`（全部），`$KERNEL_REPO_PATH`，`analysis_cache.json`（L1 `extract_patch_symbols.py` 已填充骨架）
-- 输出：屏幕输出结构化分析结果——功能描述、模块关联、风险等级、review 需求、依赖线索
-- 详见 `references/agent-design.md`
+每个 Agent 收到以下信息：
+- 负责的 patch 文件列表（绝对路径 `/tmp/patches/000N-*.patch`）
+- 目标仓库路径 `$KERNEL_REPO_PATH` 和目标分支 `$KERNEL_BRANCH`
+- 上游仓库路径 `$UPSTREAM_REPO_PATH`（如不可用，明确告知降级模式）
+- 输出格式：严格按 `references/output-templates.md` 中 "Phase 1 分析 Agent 屏幕输出格式" 输出
 
-**agent_revert**：revert 审核（★v2.1 新增独立 Agent）
-- 输入：`duplicate_analysis.json`（L1 初筛），场景（upgrade/backport），`$KERNEL_REPO_PATH`，`feature_signature.keywords` + `scope_dirs`
-- 输出：屏幕输出 `revert_ruling`（confirm/reject）+ 理由
-- upgrade 模式：AI 自主深度搜索旧版本全貌（不限阈值），确保清理干净
-- backport 模式：diff ≥90% → 暂停让用户确认；<90% → reject
-- 详见 `references/agent-design.md`
-
-> ★ 两个 Agent 必须在**同一条消息**中并行启动（使用多个 Task tool 调用），禁止串行。
-
-### agent_analysis 执行流程
-
-以下流程由 agent_analysis 执行，agent_revert 的流程见下一节。
+### 分析 Agent 执行流程
 
 **步骤 1: 理解 commit message（优先）**
 先深入理解每个 patch 的 commit message：功能是什么、关联哪个子模块、是否标注了前置依赖 commit。
@@ -338,25 +233,6 @@ python3 "$SCRIPTS_DIR/extract_patch_symbols.py" \
 | `bugfix` | commit message 含 "fix"/"bug"/"error"/"patch"/"Fixes:" 且独立于特性系列 | 修复补丁 |
 
 > 优先级：文件路径 > diff 内容（宏定义集中 > 文件路径）> commit message 关键词
-
-**步骤 2.5: 提取特性签名（feature_signature）**
-
-Agent 根据 commit message 和 diff 内容理解本系列特性，提取用于搜索旧版本的**语义关键词**，填入 `analysis_cache.json`：
-
-```json
-{
-  "feature_signature": {
-    "keywords": ["HDBSS", "Hardware Dirty Bit State Save", "DBM", "Dirty Bit Management", "HDBSSF"],
-    "scope_dirs": ["arch/arm64/kvm/", "arch/arm64/tools/", "arch/arm64/include/"]
-  }
-}
-```
-
-字段说明：
-- `keywords`：最能标识本特性的词（官方缩写 + 全称 + 关联功能名）。Agent 综合 commit message、diff 语境、模块关联推断，不是机械截取大写词
-- `scope_dirs`：特性涉及的目录范围（限定搜索范围）
-
-此字段供 `detect_duplicate.py --analysis-cache` 读取，替代脚本的自动关键词提取。未提供时脚本自动降级为内置提取逻辑。
 
 **步骤 3: 向后搜索 Bugfix（在 upstream 仓库上执行）**
 
@@ -462,39 +338,6 @@ Agent 根据以下规则做初步判定：
 | 上述条件均不满足的普通 patch | `false` | 默认不需要（功能模块最后、被依赖数等由 Phase 1.5 计算） |
 
 > **注意**：即使 agent 判断为 `false`，Phase 1.5 汇总后仍可能被 `calculate_build_checkpoints.py` 覆盖为 `true`（如被 ≥3 个后续 patch 依赖）。Agent 只做初步排除。
-
----
-
-### agent_revert 执行流程（★v2.1 新增）
-
-agent_revert 根据场景（upgrade / backport）走不同流程。
-
-#### upgrade 模式（AI 深度搜索）
-
-1. 读取 `duplicate_analysis.json` 中的 L1 初筛 commit 列表（作为搜索起点）
-2. 读取 `analysis_cache.json` 中的 `feature_signature.keywords` 和 `scope_dirs`
-3. **扩展搜索**：用 keywords 在 scope_dirs 下 `git log --grep=<kw>` 搜全部相关 commit（仅当前分支，不限阈值、不限时间范围）
-4. **符号追溯**：用 `git log -S=<sym>` 在 scope_dirs 找所有引入 key symbol 的 commit
-5. **文件追溯**：用 `git log -- <file>` 找出修改过涉改文件的所有 commit
-6. **深入理解**：读取每个候选 commit 的 message + diff，AI 判断：
-   - 是否是旧版本的功能实现？ → confirm
-   - 是否是无关注释/格式/doc/无关 bugfix？ → reject
-   - **merge commit 包含检查**：如果候选中有 merge commit，用 `git log <merge>~1..<merge>` 展开其子 commit 列表，检查哪些子 commit 已被独立找到（覆盖判定）
-7. **去重合并**：将 L1 初筛结果和步骤 3-5 的搜索结果合并去重
-   - **merge 覆盖**：如果某个 merge commit 的子 commit 覆盖了多个独立找到的 commit → 只保留 merge commit 作为 revert 目标
-   - **遗漏检查**：检查 merge commit 中未被独立找到的子 commit → AI 判断是否也需要纳入 revert
-   - 确保最终 revert 列表无重复、无遗漏
-8. 输出：每个 commit 的 `revert_ruling`（confirm/reject）+ `revert_ruling_note` + 按时间逆序排列
-
-> 核心原则：不靠阈值判定，AI 理解代码语义后做判断。L1 脚本只提供起点线索。排除无关格式化/doc/无关 bugfix。确保找到所有旧版本 commit，一个不多一个不少。
-
-#### backport 模式（严格审核）
-
-1. 读取 L1 的 `duplicate_analysis.json`
-2. 对每个候选：
-   - diff ≥90% → 暂停，展示 commit 给用户确认是否 revert
-   - diff <90% → reject
-3. **不启动扩展搜索**（纯新增场景，深度搜索仅限 upgrade 模式）
 
 ---
 
@@ -757,7 +600,6 @@ python3 "$SCRIPTS_DIR/calculate_build_checkpoints.py" \
 |--------|------|:---:|------|
 | 1a | 反向依赖者（前面的 patch 引用后面 patch 的符号） | `false` | **完全排除**，即使满足 infra/高风险等规则也不验证；代码静默写入，等被依赖者定义符号后在 checkpoint 统一验证 |
 | 1b | 反向依赖的被依赖者（定义符号被前面 patch 引用） | `true` | 强制验证确保符号定义正确，验证时依赖者的代码已写入仓库 |
-| 1c | 最后一个 revert task（revert 序列中 seq 最大） | `true`（强制） | 所有 revert 完成后必定编译一次，确保回退后代码编译通过 |
 | 2 | `功能分类` == `infra` | `true` | 基础设施/公共头文件/宏定义，影响面最广 |
 | 3 | `introduced_symbols` 被 ≥3 个后续 patch 的 `referenced_symbols` 引用 | `true` | 高依赖点，出错影响多个 patch |
 | 4 | `risk_level` == `"高"` 或 `conflicts_predicted` 非空 | `true` | 高风险 patch |

@@ -15,20 +15,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
-
-
-def _get_commit_timestamp(repo_path: str, commit_hash: str) -> int:
-    try:
-        result = subprocess.run(
-            ["git", "-C", repo_path, "log", "--format=%at", "-1", commit_hash],
-            capture_output=True, text=True, timeout=5,
-        )
-        return int(result.stdout.strip()) if result.stdout.strip() else 0
-    except (subprocess.TimeoutExpired, ValueError):
-        return 0
 
 
 STRATEGY_LABELS = {
@@ -75,19 +63,6 @@ def generate_revert_plan(dup_analysis: dict, repo_path: str) -> dict:
             "risk_assessment": entry.get("risk_assessment", {}),
             "related_patches": entry.get("related_patches", []),
         })
-
-    # 按 commit 时间重新排序（最新→最旧，避免子 commit 依赖父 commit 的冲突）
-    def _item_max_time(item):
-        max_ts = 0
-        for c in item.get("revert_order", item.get("revert_targets", [])):
-            ts = _get_commit_timestamp(repo_path, c)
-            if ts:
-                max_ts = max(max_ts, ts)
-        return max_ts
-
-    items.sort(key=_item_max_time, reverse=True)
-    for i, item in enumerate(items):
-        item["seq"] = i + 1
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime(

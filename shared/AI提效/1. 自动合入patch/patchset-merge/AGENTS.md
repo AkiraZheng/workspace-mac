@@ -45,10 +45,6 @@ b4 am <message-id> -o /tmp/patches/
 7. **前期分析阶段（patch 用途/依赖/revert 需求深度分析）是只读操作，可以并行**
 8. **中文输出**：所有思考、解释、分析、输出报告使用中文
 9. **只取改动行**：只应用 patch 中以 `+`/`-` 开头的实际修改行，上下文行不强制合入
-10. **编译必过**：build_checkpoint=true 的 patch 必须执行完整 make + 产物验证，0 error + Image以及相关涉及的ko 存在，任一不满足禁止进入 COMMIT
-11. **每步落盘**：每个 task 的 execution_log 实时追加到 merge_tasks.json，崩溃恢复读盘重来，不丢状态
-12. **门禁脚本不可绕过**：gatekeeper.py --step COMMIT --check 返回非 0 时禁止跳过 COMMIT
-13. **禁止静默跳过**：BUILD/COMMIT/REVIEW 每步完成后必须显式输出 `[BUILD PASS]` / `[COMMIT PASS]` / `[REVIEW DONE]`
 
 ## 输出模板
 
@@ -93,26 +89,12 @@ patch_analysis/
 
 ## 多 Agent 架构
 
-skill 采用 **三层架构**：脚本层（确定性）→ 语义层（AI 并行）→ 主 Agent（裁决）。
+skill 采用多 agent 并行+串行模式：
 
-```
-Layer 1: 脚本层 (并行, 确定性, 不依赖 AI)
-  ├── detect_duplicate.py  →  revert 候选（三层下降：revert trail → author 聚合 → diff 匹配）
-  ├── topo_sort.py         →  符号依赖图
-  └── calculate_build_checkpoints.py → 编译验证点
+1. **并行阶段（只读）**：多个 agent 同时深度分析 patch 用途、依赖链、revert 需求
+2. **串行阶段（写入）**：merge 逐个串行执行，每个 patch 合入→编译验证→review
 
-Layer 2: 语义层 (并行, AI 只读)
-  ├── agent_analysis →  功能理解 + 依赖标注 + 风险等级
-  └── agent_revert   →  审核 L1 revert 候选，裁决 confirm/reject/partial
-
-Layer 3: 主 Agent (串行, 唯一裁决入口)
-  └── 汇总 L1+L2 → 冲突判定 → 用户确认 → merge_tasks.json
-
-Phase 2: 串行 Merge (写入)
-  └── 逐个 patch 合入 → 编译门禁 → COMMIT → agent_review → gatekeeper 落盘
-```
-
-**关键原则**：数据收集归脚本，判断裁决归 AI。L1 全是确定性操作——无幻觉风险、可复现。L2 AI 只做脚本做不了的事。L3 只有一个入口跟用户交互。
+依赖分析和 revert 判定属于**高危行为**，需进入专家模式干预和评判（提供必要性等级）。
 
 ## 编码规范
 
@@ -122,7 +104,7 @@ skill 代码需遵循 karpathy-guidelines（路径：`~/.config/opencode/skills/
 - 手术式修改，不碰无关代码
 - 以可验证目标驱动执行
 
-关于这个skill的代码编写，必须同步到 `/mnt/shared/shared/AI提效/1.\ 自动合入patch/patchset-merge/`
+关于这个skill的代码编写，必须同步到 `/mnt/shared/AI提效/1.\ 自动合入patch/patchset-merge/`
 
 ## Skill 部署流程
 

@@ -3,16 +3,15 @@
 Calculate build_checkpoint for each task in merge_tasks.json.
 
 Rules (priority order, short-circuit):
-  1a. 反向依赖者                                        → False（完全排除）
-  1b. 反向依赖的被依赖者                                 → True（强制）
-  1c. 最后一个 revert task（revert 序列中 seq 最大）       → True（强制）
-  1.  功能分类 == 'infra'                                → True
-  2.  introduced_symbols referenced by >= 3 later patches → True
-  3.  risk_level == '高' or conflicts_predicted non-empty → True
-  4.  Last patch overall (max seq)                        → True (forced)
-  5.  action == 'skip' or 功能分类 == 'doc'               → False
-  6.  Last patch in its (功能分类, path_prefix) group     → True
-  7.  All others                                          → False
+  1a. 反向依赖者（前面的 patch 引用后面 patch 的符号）→ False（完全排除）
+  1b. 反向依赖的被依赖者（定义符号被前面 patch 引用）→ True（强制）
+  1.  功能分类 == 'infra'                                 → True
+  2.  introduced_symbols referenced by >= 3 later patches  → True
+  3.  risk_level == '高' or conflicts_predicted non-empty  → True
+  4.  Last patch overall (max seq)                         → True (forced)
+  5.  action == 'skip' or 功能分类 == 'doc'                → False
+  6.  Last patch in its (功能分类, path_prefix) group      → True
+  7.  All others                                           → False
 """
 
 import argparse
@@ -129,13 +128,6 @@ def calculate_checkpoints(merge_tasks):
     last_patch_overall = max(all_patches, key=lambda p: p.get('seq', 0))
     last_patch_seq = last_patch_overall.get('seq', 0)
 
-    # Rule 1c: last revert task (forced checkpoint)
-    revert_tasks = [p for p in all_patches if p.get('action') == 'revert']
-    last_revert_seq = -1
-    if revert_tasks:
-        last_revert = max(revert_tasks, key=lambda p: p.get('seq', 0))
-        last_revert_seq = last_revert.get('seq', 0)
-
     results = []
     for idx, patch in enumerate(all_patches):
         seq = patch.get('seq', 0)
@@ -173,24 +165,14 @@ def calculate_checkpoints(merge_tasks):
                 "provided_symbols": rp
             }
 
-        # ── Rule 1c: last revert task (FORCED) ──
-        if checkpoint is None and last_revert_seq > 0 and seq == last_revert_seq:
-            checkpoint = True
-            rules_triggered.append("Rule_1c")
-            forced_by.append("last_revert")
-            if seq == last_patch_seq:
-                reason_parts.append('最后一个 revert;末 patch 强制')
-            else:
-                reason_parts.append('最后一个 revert task（强制编译验证）')
-
-        # ── Rule 1: infra → true ──
+        # ── Rule 2: infra → true ──
         if checkpoint is None and func_class == 'infra':
             checkpoint = True
-            rules_triggered.append("Rule_1")
+            rules_triggered.append("Rule_2")
             forced_by.append("infra")
             reason_parts.append('基础设施（公共头文件/宏定义）')
 
-        # ── Rule 2: referenced by >= 3 later patches ──
+        # ── Rule 3: referenced by >= 3 later patches ──
         if checkpoint is None:
             later_patches = all_patches[idx + 1:]
             ref_count = count_references(
@@ -198,7 +180,7 @@ def calculate_checkpoints(merge_tasks):
             )
             if ref_count >= 3:
                 checkpoint = True
-                rules_triggered.append("Rule_2")
+                rules_triggered.append("Rule_3")
                 forced_by.append(">=3_refs")
                 reason_parts.append(f'被 ≥3 个后续 patch 依赖（{ref_count} 个）')
 
@@ -207,14 +189,14 @@ def calculate_checkpoints(merge_tasks):
             if (patch.get('risk_level') == '高' or
                     patch.get('conflicts_predicted')):
                 checkpoint = True
-                rules_triggered.append("Rule_3")
+                rules_triggered.append("Rule_4")
                 forced_by.append("high_risk")
                 reason_parts.append('高风险或有预判冲突')
 
         # ── Rule 5: last patch overall (FORCED) ──
         if seq == last_patch_seq:
             checkpoint = True
-            rules_triggered.append("Rule_4")
+            rules_triggered.append("Rule_5")
             forced_by.append("last_patch")
             if patch.get('action') == 'skip' or func_class == 'doc':
                 reason_parts.append('最后一个 patch（强制，skip/doc 也验证）')
@@ -225,7 +207,7 @@ def calculate_checkpoints(merge_tasks):
         if checkpoint is None:
             if patch.get('action') == 'skip' or func_class == 'doc':
                 checkpoint = False
-                rules_triggered.append("Rule_5")
+                rules_triggered.append("Rule_6")
                 reason_parts.append('跳过或文档类型')
 
         # ── Rule 7: last in group ──
@@ -234,7 +216,7 @@ def calculate_checkpoints(merge_tasks):
             group_patches = groups.get(group_key, [])
             if len(group_patches) > 1 and last_in_group.get(id(patch)):
                 checkpoint = True
-                rules_triggered.append("Rule_6")
+                rules_triggered.append("Rule_7")
                 forced_by.append("group_last")
                 path_prefix = common_path_prefix(patch.get('files_changed', []))
                 reason_parts.append(f'功能模块最后 patch（{func_class}/{path_prefix} 组）')
@@ -242,7 +224,7 @@ def calculate_checkpoints(merge_tasks):
         # ── Rule 8: default → false ──
         if checkpoint is None:
             checkpoint = False
-            rules_triggered.append("Rule_7")
+            rules_triggered.append("Rule_8")
 
         primary_reason = '; '.join(reason_parts) if reason_parts else '默认（无特殊条件触发）'
 

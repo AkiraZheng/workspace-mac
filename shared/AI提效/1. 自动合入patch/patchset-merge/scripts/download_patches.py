@@ -94,123 +94,21 @@ def download_via_url(
     )
 
 
-def mbox_to_patches(mbox_path: str, output_dir: str) -> list[str]:
-    """Convert .mbox file(s) to individual .patch files.
-
-    Supports single .mbox and directory of .mbox files.
-    When a directory contains both combined and individual .mbox files,
-    uses only the combined one.
-    """
-    results = []
-
-    if os.path.isfile(mbox_path):
-        mbox_files = [mbox_path]
-    elif os.path.isdir(mbox_path):
-        all_mbox = sorted([
-            os.path.join(mbox_path, f) for f in os.listdir(mbox_path)
-            if f.endswith(".mbox")
-        ])
-        if not all_mbox:
-            return results
-        # 如果有组合 mbox（size > 50KB），只使用它
-        combined = [f for f in all_mbox if os.path.getsize(f) > 50_000]
-        mbox_files = combined if combined else all_mbox
-    else:
-        return results
-
-    for mbox_file in mbox_files:
-        with open(mbox_file, errors="replace") as f:
-            content = f.read()
-
-        # Split combined mbox by "From " markers
-        parts = re.split(r'^(?=From \S+ )', content, flags=re.MULTILINE)
-        if not parts or not parts[0].strip():
-            parts = parts[1:] if len(parts) > 1 else []
-
-        # If no "From " markers found, treat as single patch
-        if not parts:
-            parts = [content]
-
-        # Only keep parts that look like patches (contain diff markers)
-        valid_parts = [p for p in parts
-                       if "Subject:" in p and ("diff --git" in p or "---" in p)]
-
-        seen_subjects = set()
-        patch_idx = 0
-        for part in valid_parts:
-            subject = ""
-            for line in part.split("\n"):
-                if line.startswith("Subject:"):
-                    subject = line.replace("Subject:", "").strip()
-                    subject = re.sub(r'\[PATCH[^\]]*\]\s*', '', subject)
-                    break
-
-            if not subject:
-                continue
-
-            # 跳过回复（Re:）和重复 subject
-            if subject.startswith("Re:") or subject.startswith("Re："):
-                continue
-
-            key = sanitize_filename(subject)
-            if key in seen_subjects:
-                continue
-            seen_subjects.add(key)
-            patch_idx += 1
-
-            fname = generate_output_name(patch_idx, subject)
-            dest = os.path.join(output_dir, fname)
-            with open(dest, "w") as out:
-                out.write(part)
-            results.append(dest)
-
-    return results
-
-
-def _extract_subject(patch_path: str) -> str:
-    """Extract the Subject line from a .patch file."""
-    try:
-        with open(patch_path, errors="replace") as f:
-            for line in f:
-                if line.startswith("Subject:"):
-                    s = line.replace("Subject:", "").strip()
-                    s = re.sub(r'\[PATCH[^\]]*\]\s*', '', s)
-                    return s.strip()
-    except (FileNotFoundError, IOError):
-        pass
-    return os.path.basename(patch_path).replace(".patch", "")
-
-
 def copy_from_local(source_path: str, output_dir: str) -> list[str]:
-    """Copy .patch/.mbox files from local directory to output directory."""
+    """Copy .patch files from local directory to output directory."""
     os.makedirs(output_dir, exist_ok=True)
     results = []
-
-    # Handle .mbox files first
-    if (os.path.isfile(source_path) and source_path.endswith(".mbox")) or \
-       (os.path.isdir(source_path) and any(
-           f.endswith(".mbox") for f in os.listdir(source_path))):
-        results.extend(mbox_to_patches(source_path, output_dir))
-
-    # Handle .patch files
     if os.path.isfile(source_path) and source_path.endswith(".patch"):
-        subject = _extract_subject(source_path)
-        fname = generate_output_name(1, subject)
-        dest = os.path.join(output_dir, fname)
+        dest = os.path.join(output_dir, os.path.basename(source_path))
         shutil.copy2(source_path, dest)
         results.append(dest)
     elif os.path.isdir(source_path):
-        patch_files = sorted(
-            [f for f in os.listdir(source_path) if f.endswith(".patch")],
-        )
-        for idx, fname in enumerate(patch_files, start=1):
-            src = os.path.join(source_path, fname)
-            subject = _extract_subject(src)
-            new_fname = generate_output_name(idx, subject)
-            dest = os.path.join(output_dir, new_fname)
-            shutil.copy2(src, dest)
-            results.append(dest)
-
+        for fname in sorted(os.listdir(source_path)):
+            if fname.endswith(".patch"):
+                src = os.path.join(source_path, fname)
+                dest = os.path.join(output_dir, fname)
+                shutil.copy2(src, dest)
+                results.append(dest)
     return results
 
 
@@ -289,7 +187,7 @@ def main():
     if not args.target_branch:
         missing.append("--target-branch (or KERNEL_BRANCH)")
     if not args.build_target:
-        args.build_target = "make -j$(nproc)"
+        missing.append("--build-target (or BUILD_CMD)")
     if missing:
         print(f"错误: 缺少必要参数: {', '.join(missing)}")
         print("请通过 CLI 参数或环境变量提供。")
@@ -312,7 +210,7 @@ def main():
         patch_files = copy_from_local(args.source, args.output_dir)
 
     if not patch_files:
-        print("[ERROR] No .patch or .mbox files found.")
+        print("[ERROR] No .patch files found.")
         sys.exit(1)
 
     print(f"[OK] Downloaded {len(patch_files)} patch files.")
