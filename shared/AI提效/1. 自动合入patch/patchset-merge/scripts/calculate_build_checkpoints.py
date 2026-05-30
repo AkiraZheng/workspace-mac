@@ -129,8 +129,8 @@ def calculate_checkpoints(merge_tasks):
     last_patch_overall = max(all_patches, key=lambda p: p.get('seq', 0))
     last_patch_seq = last_patch_overall.get('seq', 0)
 
-    # Rule 1c: last revert task (forced checkpoint)
-    revert_tasks = [p for p in all_patches if p.get('action') == 'revert']
+    # Rule 1c: last revert task (has non-empty pre_revert list, forced checkpoint)
+    revert_tasks = [p for p in all_patches if p.get('pre_revert')]
     last_revert_seq = -1
     if revert_tasks:
         last_revert = max(revert_tasks, key=lambda p: p.get('seq', 0))

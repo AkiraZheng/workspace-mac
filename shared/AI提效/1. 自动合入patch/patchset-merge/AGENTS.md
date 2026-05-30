@@ -49,6 +49,7 @@ b4 am <message-id> -o /tmp/patches/
 11. **每步落盘**：每个 task 的 execution_log 实时追加到 merge_tasks.json，崩溃恢复读盘重来，不丢状态
 12. **门禁脚本不可绕过**：gatekeeper.py --step COMMIT --check 返回非 0 时禁止跳过 COMMIT
 13. **禁止静默跳过**：BUILD/COMMIT/REVIEW 每步完成后必须显式输出 `[BUILD PASS]` / `[COMMIT PASS]` / `[REVIEW DONE]`
+14. 如果patch本身有顺序的话，绝对要按照原来的顺序排序，不允许打乱顺序合入
 
 ## 输出模板
 
