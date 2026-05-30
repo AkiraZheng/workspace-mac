@@ -52,14 +52,14 @@ upstream 是 ~/code/linux/linux
 2. **仅在出现问题时与用户交互**：正常合入→编译通过→commit→review 全过程自动流转；仅当冲突无法自动解决（10 轮上限）、循环依赖、或重复 patch 判定时暂停等用户决策
 3. **每 commit 后调用 code-review-expert skill**（skill 框架按名称加载；若未安装则跳过并标注）
 4. **revert 逐个 commit**：逆序（最新→最旧），每 revert 一个就 commit 一个
-5. **每 patch 必须编译验证**：执行 `$BUILD_CMD`，0 error + 产物存在
+5. **BUILD_CHECKPOINT 的 patch 必须编译验证**：执行 `$BUILD_CMD`，0 error + 产物存在
 6. **merge 串行，分析并行**：merge 步骤不可并行，前期分析只读可并行
 7. **中文输出**：所有思考、解释、分析、输出报告使用中文
 8. **只取改动行**：只应用 `+`/`-` 行，上下文行不强制合入
 9. **修改严格归所属 patch**：不混入无关改动到其他 patch 的 commit
 10. **编译通过 + 功能正常是第一指标**，两者同等优先级
-11. **操作在独立分支**，不在主干分支
-12. **禁止打乱原始 patch 顺序**：严格按 0001→0002→...→000N 顺序合入，不可跳过、不可重排
+11. **操作在独立分支**，不在主干分支（如master，OLK-6.6）
+12. **对于原本就有序的patch，禁止打乱原始 patch 顺序**：严格按 0001→0002→...→000N 顺序合入，不可跳过、不可重排
 13. **禁止局部编译**：不允许 `make file.h` 或 `make file.o`，必须完整 `make ARCH=$ARCH -j$(nproc)`
 14. **禁止单项编译**：不允许 `make Image`（只编译镜像）或 `make modules`（只编译模块），必须全编
 15. **必须验证产物**：编译后必须检查 `arch/$ARCH/boot/Image` 存在且非空
@@ -97,6 +97,8 @@ echo "SCRIPTS_DIR=$SCRIPTS_DIR"
 ```
 Phase 0: 下载（脚本）→ /tmp/patches/000N-*.patch + metadata.json
          → 创建 $KERNEL_REPO_PATH/patch_analysis/
+Phase 0.5: 场景问询（脚本 detect_duplicate.py --version-upgrade）
+         → 检测旧版本 → 用户选择 upgrade/backport
 Phase 1: 并行分析（只读，不写文件）→ 屏幕输出分析结果
     ⚠️ 所有 Agent 必须用 Task tool 一次性并行启动，禁止串行
 Phase 1.5: 主 Agent 汇总 → patch_analysis/merge_tasks.json + analysis_cache.json
@@ -113,7 +115,7 @@ Phase 3: 汇总 → patch_analysis/summary.md
 - `$SCRIPTS_DIR/generate_summary_md.py` — 确定性生成 summary.md
 - `$SCRIPTS_DIR/verify_analyse_format.py` — 格式验证门禁
 - `$SCRIPTS_DIR/merge_order_sort.py` — 全量排序（revert优先+deps插入+稳定顺序）
-- `$SCRIPTS_DIR/detect_duplicate.py` — 重复检测 + PR 聚合 + revert 决策
+- `$SCRIPTS_DIR/detect_duplicate.py` — 重复检测 + PR 聚合 + revert 决策 + 版本升级模式（--version-upgrade）
 - `$SCRIPTS_DIR/generate_revert_plan.py` — 从分析结果生成 revert_plan.json + revert_plan.sh
 - `$SCRIPTS_DIR/execute_revert.py` — 执行 revert 计划（预执行 + 正式执行 + 失败处理 + 回滚）
 - `$SCRIPTS_DIR/validate_phase1_artifacts.py` — Phase 1.5→2 / 2→3 硬性门禁（schema 校验）
@@ -170,10 +172,146 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 3. 若 skill 内容丢失（上下文压缩），从 `workflow_hints` 读取关键规则
 4. 恢复完成后清除标记：
    ```bash
-   python3 "$SCRIPTS_DIR/gatekeeper.py" \
-     --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
-     --restore --clear
-   ```**
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+      --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+      --restore --clear
+    ```**
+
+---
+
+## Phase 0.5：场景问询（版本升级检测）
+
+Phase 0 下载完成后、正式进入 Phase 1 前，检测目标仓库是否存在旧版本实现，让用户选择合入场景。
+
+**步骤 1：初筛检测（用 version-upgrade 模式检测旧版本）**
+
+```bash
+python3 "$SCRIPTS_DIR/detect_duplicate.py" \
+  --patch-dir /tmp/patches/ \
+  --repo-path "$KERNEL_REPO_PATH" \
+  --output "$KERNEL_REPO_PATH/patch_analysis/duplicate_analysis.json" \
+  --version-upgrade
+```
+
+**步骤 2：检测结果表格展示**
+
+脚本完成后，主 Agent 展示检测结果表格：
+
+```
+══════════════════════════════════════════════════════════════════════════════
+  Phase 0.5 检测结果 — 重复/等效 Patch + PR 聚合 + Revert 建议
+══════════════════════════════════════════════════════════════════════════════
+
+[匹配统计] 高匹配阈值: >=30% (版本升级模式)
+           中匹配阈值: >=15%
+
+┌─────┬────────┬──────────────┬────────┬────────┬────────┬────────────┬──────────────┐
+│ Seq │ Patch  │ 匹配 Commit  │ Diff   │ Symbol │ 综合   │ PR 归属    │ 匹配等级     │
+├─────┼────────┼──────────────┼────────┼────────┼────────┼────────────┼──────────────┤
+│  1  │ 0001   │ abc1234      │ 35.2%  │ 82.1%  │ 82.1%  │ PR!15754   │ 高匹配       │
+│     │        │ def5678      │ 12.3%  │ 45.6%  │ 28.9%  │ PR!15754   │ 中匹配       │
+├─────┼────────┼──────────────┼────────┼────────┼────────┼────────────┼──────────────┤
+│  2  │ 0002   │ ghi9012      │ 91.2%  │ 95.3%  │ 95.3%  │ 独立 commit│ 高匹配       │
+├─────┼────────┼──────────────┼────────┼────────┼────────┼────────────┼──────────────┤
+│  3  │ 0003   │ 无匹配       │ —      │ —      │ —      │ —          │ —            │
+└─────┴────────┴──────────────┴────────┴────────┴────────┴────────────┴──────────────┘
+
+[PR 聚合] 按来源 PR 分组的匹配 commit：
+
+┌─────────────┬─────────┬─────────────┬────────────┬──────────────────────────────┐
+│ PR ID       │ Commits │ 高匹配数    │ 覆盖率     │ 关联 Patch                   │
+├─────────────┼─────────┼─────────────┼────────────┼──────────────────────────────┤
+│ PR!15754    │ 5       │ 3           │ 60%        │ 0001, 0004                   │
+│ 独立 commit │ ghi9012 │ 1           │ 100%       │ 0002                         │
+└─────────────┴─────────┴─────────────┴────────────┴──────────────────────────────┘
+
+[Revert 建议] 按覆盖率判定 revert 策略：
+
+┌─────────────┬─────────────┬──────────┬─────────────────────────────────────────┐
+│ PR ID       │ 覆盖率      │ 紧急度   │ Revert 命令                              │
+├─────────────┼─────────────┼──────────┼─────────────────────────────────────────┤
+│ PR!15754    │ 60%         │ 建议     │ git revert abc1234 def5678 jkl3456      │
+│             │             │          │ (逐个 revert，非整 PR)                   │
+├─────────────┼─────────────┼──────────┼─────────────────────────────────────────┤
+│ 独立 commit │ 100%        │ 必须     │ git revert -m 1 ghi9012                 │
+│             │             │          │ (merge commit，用 -m 1)                  │
+└─────────────┴─────────────┴──────────┴─────────────────────────────────────────┘
+
+[旧版本批次] 版本升级模式扩展搜索结果：
+
+┌─────┬─────────────┬─────────┬────────────┬──────────────────────────────────────┐
+│ 批次│ 来源        │ Commits │ 时间范围   │ 关键词                               │
+├─────┼─────────────┼─────────┼────────────┼──────────────────────────────────────┤
+│  1  │ 关键词聚合  │ 8       │ 3天内     │ HDBSS, FEAT_HDBSS, DBM               │
+│  2  │ revert追溯  │ 5       │ —         │ 来自 revert commit abc123            │
+│  3  │ bugfix补充  │ 2       │ —         │ HDBSS 内存泄漏修复                   │
+└─────┴─────────────┴─────────┴────────────┴──────────────────────────────────────┘
+
+[风险分析] Revert 操作风险评估：
+
+┌─────────────┬─────────────┬───────────────────────────────────────────────────────┐
+│ PR ID       │ 风险等级    │ 风险详情                                               │
+├─────────────┼─────────────┼───────────────────────────────────────────────────────┤
+│ PR!15754    │ 中          │ 有 2 个后续 commit 可能依赖此 PR（dep_commits: mno789）│
+│ 独立 commit │ 低          │ 无依赖 commit，涉改文件仅 3 个                          │
+└─────────────┴─────────────┴───────────────────────────────────────────────────────┘
+
+[关键词提取] 自动提取的特征关键词：
+  HDBSS, FEAT_HDBSS, DBM, HDBSSF, HDBSSBR_EL2
+```
+
+**步骤 3：用户问询**
+
+展示检测结果后，询问用户选择合入场景：
+
+```
+═══════════════════════════════════════════════
+  场景问询 — 请选择合入场景
+═══════════════════════════════════════════════
+
+请选择合入场景：
+
+[1] 版本升级（upgrade）
+    要合入的 patchset 是旧版本的新版本。
+    按上述表格执行 revert → 再合入新 patchset。
+    PR 覆盖率 >=75% 的整体 revert，<75% 的逐个 revert。
+
+[2] 纯新增（backport）
+    目标仓库无相关实现，上述匹配为误报或极相似代码。
+    不执行 revert，直接合入 patchset。
+    仅当 diff ≥90% 时才暂停让用户确认。
+
+[3] 查看详细匹配
+    展示某个 patch 的完整匹配信息（diff 内容、符号列表）。
+
+[4] 中止
+    不执行任何操作，导出检测结果。
+
+  请选择: [1] 版本升级 / [2] 纯新增 / [3] 查看详细 / [4] 中止
+```
+
+**步骤 4：用户选择后的行为**
+
+| 选择 | 后续 |
+|------|------|
+| [1] 版本升级 | 记录场景为 `upgrade`，Phase 1 subagent 收到 `duplicate_analysis.json` + `old_version_batches`，执行 revert 后合入 |
+| [2] 纯新增 | 记录场景为 `backport`，直接进入 Phase 1，不执行 revert |
+| [3] 查看详细 | 展示指定 patch 的 `patch_duplicate_map[task_id]` 详细内容 |
+| [4] 中止 | 退出，`duplicate_analysis.json` 已保存，用户可手动审查 |
+
+**步骤 5：脚本结果传递给 subagent**
+
+Phase 0.5 的 `duplicate_analysis.json` 输出包含以下字段，Phase 1 subagent 需读取：
+
+| 字段 | 用途 |
+|------|------|
+| `patch_duplicate_map` | 每个 patch 对应的匹配 commit 列表（含 diff/symbol/pr_info） |
+| `pr_aggregation` | PR 聚合结果（按 PR 分组，含 coverage_rate/revert_targets） |
+| `global_revert_order` | 全局 revert 建议（按 urgency 排序，含 revert_cmd） |
+| `version_upgrade.batches` | 旧版本批次（关键词聚合 + revert追溯 + bugfix补充） |
+| `version_upgrade.keywords` | 提取的特征关键词（HDBSS, FEAT_HDBSS 等） |
+| `thresholds` | 当前使用的阈值（sim_high/sim_medium） |
+| `thresholds` | 当前使用的阈值（sim_high/sim_medium） |
 
 ---
 

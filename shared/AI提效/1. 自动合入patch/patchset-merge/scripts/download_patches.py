@@ -95,18 +95,19 @@ def download_via_url(
 
 
 def copy_from_local(source_path: str, output_dir: str) -> list[str]:
-    """Copy .patch files from local directory to output directory."""
+    """Copy .patch / .mbox files from local directory to output directory."""
     os.makedirs(output_dir, exist_ok=True)
     results = []
-    if os.path.isfile(source_path) and source_path.endswith(".patch"):
-        dest = os.path.join(output_dir, os.path.basename(source_path))
+    if os.path.isfile(source_path) and (source_path.endswith(".patch") or source_path.endswith(".mbox")):
+        basename = os.path.basename(source_path).replace(".mbox", ".patch")
+        dest = os.path.join(output_dir, basename)
         shutil.copy2(source_path, dest)
         results.append(dest)
     elif os.path.isdir(source_path):
         for fname in sorted(os.listdir(source_path)):
-            if fname.endswith(".patch"):
+            if fname.endswith(".patch") or fname.endswith(".mbox"):
                 src = os.path.join(source_path, fname)
-                dest = os.path.join(output_dir, fname)
+                dest = os.path.join(output_dir, fname.replace(".mbox", ".patch"))
                 shutil.copy2(src, dest)
                 results.append(dest)
     return results
@@ -186,8 +187,6 @@ def main():
         missing.append("--target-kernel (or KERNEL_REPO_PATH)")
     if not args.target_branch:
         missing.append("--target-branch (or KERNEL_BRANCH)")
-    if not args.build_target:
-        missing.append("--build-target (or BUILD_CMD)")
     if missing:
         print(f"错误: 缺少必要参数: {', '.join(missing)}")
         print("请通过 CLI 参数或环境变量提供。")

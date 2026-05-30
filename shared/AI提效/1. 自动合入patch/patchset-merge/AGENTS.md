@@ -40,7 +40,7 @@ b4 am <message-id> -o /tmp/patches/
 2. **仅在有问题时交互**：正常合入自动流转；冲突超限/循环依赖/重复 patch 时暂停等用户决策
 3. **每 1 个 commit 完成后调用 code-review-expert skill 做 review**
 4. **revert 也逐个 commit**：逆序 revert（最新→最旧），每 revert 一个就 commit 一个
-5. **每合入一个 patch 必须编译验证**，编译失败需最小量修改直至通过；若涉及非合入 patch 相关的 config 问题，临时修改后编译，通过后 `git restore` 掉
+5. **build_checkpoint的 patch 必须编译验证**，编译失败需最小量修改直至通过；若涉及非合入 patch 相关的 config 问题，临时修改后编译，通过后 `git restore` 掉
 6. **merge 必须串行执行**：merge 步骤不可并行
 7. **前期分析阶段（patch 用途/依赖/revert 需求深度分析）是只读操作，可以并行**
 8. **中文输出**：所有思考、解释、分析、输出报告使用中文
