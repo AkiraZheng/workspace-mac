@@ -59,6 +59,10 @@ upstream 是 ~/code/linux/linux
 9. **修改严格归所属 patch**：不混入无关改动到其他 patch 的 commit
 10. **编译通过 + 功能正常是第一指标**，两者同等优先级
 11. **操作在独立分支**，不在主干分支
+12. **禁止打乱原始 patch 顺序**：严格按 0001→0002→...→000N 顺序合入，不可跳过、不可重排
+13. **禁止局部编译**：不允许 `make file.h` 或 `make file.o`，必须完整 `make ARCH=$ARCH -j$(nproc)`
+14. **禁止单项编译**：不允许 `make Image`（只编译镜像）或 `make modules`（只编译模块），必须全编
+15. **必须验证产物**：编译后必须检查 `arch/$ARCH/boot/Image` 存在且非空
 
 ## Skill 初始化（任务启动时首先执行）
 
@@ -780,10 +784,19 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --step BUILD --result in_progress
 ```
 
+**编译禁止表（必须遵守）**
+
+| 禁止操作 | 原因 | 正确做法 |
+|---------|------|---------|
+| `make file.h` / `make file.o` | 局部编译，无法验证 patch 改动的编译影响 | 完整 `make ARCH=$ARCH -j$(nproc)` |
+| `make Image` | 只编译内核镜像，不编译驱动模块，驱动相关改动无法验证 | 完整编译（默认目标） |
+| `make modules` | 只编译模块，不编译内核镜像 | 完整编译（默认目标） |
+| 跳过产物验证 | 编译成功不等于产物存在，必须验证 `arch/$ARCH/boot/Image` | 检查 Image 存在且非空 |
+
 **步骤 1：确定编译目标**（确定，不依赖外部脚本）
 
 ```bash
-# 基础编译目标
+# 基础编译目标（默认目标 = Image + modules + dtbs）
 BUILD_CMD="make ARCH=$KERNEL_ARCH -j$(nproc)"
 
 # 有 tools/perf 文件 → 追加 perf 编译
