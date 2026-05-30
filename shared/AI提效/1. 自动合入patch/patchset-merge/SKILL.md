@@ -59,10 +59,6 @@ upstream 是 ~/code/linux/linux
 9. **修改严格归所属 patch**：不混入无关改动到其他 patch 的 commit
 10. **编译通过 + 功能正常是第一指标**，两者同等优先级
 11. **操作在独立分支**，不在主干分支
-12. **门禁脚本不可绕过**：`gatekeeper.py --step COMMIT --check` 返回非 0 时禁止跳过 COMMIT
-13. **禁止静默跳过**：BUILD/COMMIT/REVIEW 每步完成后必须显式输出 `[BUILD PASS]` / `[COMMIT PASS]` / `[REVIEW DONE]`
-14. **原始 patch 顺序不可变**：apply 类型 patch 的合入顺序必须严格等于 patch 文件名编号顺序（0001→0002→...→000N），revert/dep 可插在前方但不可打乱 apply 组的相对顺序
-15. **完整编译，禁止局部**：BUILD 必须执行 `$BUILD_CMD` 编译整个内核，禁止 `make path/to/file.o` 等局部编译，禁止 `make path/to/file.h`（不触发编译）
 
 ## Skill 初始化（任务启动时首先执行）
 
@@ -484,13 +480,10 @@ agent_revert 根据场景（upgrade / backport）走不同流程。
    - 是否是旧版本的功能实现？ → confirm
    - 是否是无关注释/格式/doc/无关 bugfix？ → reject
    - **merge commit 包含检查**：如果候选中有 merge commit，用 `git log <merge>~1..<merge>` 展开其子 commit 列表，检查哪些子 commit 已被独立找到（覆盖判定）
-7. **去重 + 完整性验证**：将 L1 初筛结果和步骤 3-5 的搜索结果合并去重
-   - **PR 聚合价值**：PR merge commit 无法直接 revert（需要 `-m`），所以不用于整体 revert。但它的子 commit 列表（`git log M~1..M`）作为**完整性基线**，验证是否遗漏
-   - **覆盖验证**：commit x 属于 PR M ⟺ x 在 `git log M~1..M` 中。如果 L1 找到的 commit 全部被某个 PR 覆盖 → 说明搜索完整
-   - **遗漏检查**：检查 PR M 的子 commit 中未被 L1 找到的 → AI 判断是否也需要纳入 revert
-   - **独立 commit 保留**：不在任何 PR 子 commit 列表中的 commit → 必须保留
-   - **revert 方式**：每个确认的 commit 单独 `git revert`（逆序），不是整体 revert PR
-8. 输出：每个 commit 的 `revert_ruling`（confirm/reject）+ `revert_ruling_note` + 按时间逆序排列 + PR 覆盖验证报告
+7. **去重合并**：将 L1 初筛结果和步骤 3-5 的搜索结果合并去重
+   - **merge 覆盖**：如果某个 merge commit 的子 commit 覆盖了多个独立找到的 commit → 只保留 merge commit 作为 revert 目标
+   - **遗漏检查**：检查 merge commit 中未被独立找到的子 commit → AI 判断是否也需要纳入 revert
+   - 确保最终 revert 列表无重复、无遗漏
 8. 输出：每个 commit 的 `revert_ruling`（confirm/reject）+ `revert_ruling_note` + 按时间逆序排列
 
 > 核心原则：不靠阈值判定，AI 理解代码语义后做判断。L1 脚本只提供起点线索。排除无关格式化/doc/无关 bugfix。确保找到所有旧版本 commit，一个不多一个不少。
@@ -670,8 +663,8 @@ python3 "$SCRIPTS_DIR/generate_revert_plan.py" \
 
 **步骤 5: 校验 + 屏幕预览 → 用户确认 → 保存预览**
 
-1. **保存预览文本**：将完整预览输出写入 `$KERNEL_REPO_PATH/patch_analysis/phase1_preview.md`（中断恢复/审计追溯用）
-2. **展示预览**：按 `references/output-templates.md` 中"Phase 1.5 全局预览模板"的格式展示——**先输出统一执行计划表（含 revert/dep/apply 全部任务 + checkpoint/风险/分析备注）**，再补充对外依赖详情和反向依赖方案
+1. **保存预览文本**：将四部分预览的完整输出写入 `$KERNEL_REPO_PATH/patch_analysis/phase1_preview.md`（中断恢复/审计追溯用）
+2. **展示预览**：按 `references/output-templates.md` 中"Phase 1.5 全局预览模板"的 4 部分格式展示：依赖汇总 → Revert 清单 → 合入计划 → 确认交互
 3. **用户确认**：等待用户选择
 
 **步骤 6: 拉取上游依赖（用户确认"继续"后自动执行）**
@@ -814,25 +807,6 @@ python3 "$SCRIPTS_DIR/validate_phase1_artifacts.py" \
 
 ## Phase 2：串行 Merge
 
-### ★ 执行顺序（硬性约束，不可违反）
-
-1. 读取 `merge_tasks.json` 的 `merge_order` 数组
-2. **严格按 `seq` 升序逐个处理**，不可跳过、不可重排、不可并行
-3. 每个 task 完成全部 PRECHECK→...→DONE 后，才能开始下一个 task
-4. 原始 patch 的相对顺序（0001→0002→0003→...→000N）**在执行顺序中必须保持不变**（revert 和 dep 可插在前方，但 apply 组内部顺序不变）
-
-```
-执行模板:
-  for t in sorted(merge_order, key=lambda x: x['seq']):
-      process_task(t)  # 串行，逐个完成
-  
-  禁止:
-    - 按 task_id 排序（deps 的 task_id 格式不同会打乱顺序）
-    - 按 patch 文件大小排序
-    - "先处理简单的"（什么算简单是主观判断）
-    - 并行处理多个 task
-```
-
 ### 启动
 读取 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json`。
 
@@ -844,8 +818,7 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --step BUILD --result in_progress
 ```
 
-```
-```
+**执行顺序**：遍历 `merge_order`，按 `seq` 升序处理（步骤 7 已将 deps_order 和 revert 全部合并入 merge_order）。
 
 ### 状态机
 
@@ -936,23 +909,6 @@ patch + 行:  150/150 ✅
 ### BUILD
 
 **强制约束：必须编译并验证整个仓库，不可跳过、不可只编译部分文件！**
-
-**★ 禁止的编译方式（绝对不允许，违者不能进入 COMMIT）**：
-
-| 禁止 | 原因 |
-|------|------|
-| `make path/to/file.h` | 头文件不触发任何编译动作，zero-error 假通过 |
-| `make path/to/file.o` | 只编译单个文件，无法发现链接错误和跨文件依赖 |
-| `make drivers/xxx/` | 只编译单个子目录，无法发现全局影响 |
-| `make`（不带 arch）| 可能编译错误架构 |
-| 编译后不验证 Image 产物 | 可能只编译了部分中间文件 |
-
-**★ 唯一允许的编译方式**：
-```bash
-$BUILD_CMD 2>&1 | tee "$BUILD_LOG"
-# 其中 BUILD_CMD="make ARCH=$KERNEL_ARCH -j$(nproc)"
-# 必须验证产物: arch/$KERNEL_ARCH/boot/Image 存在
-```
 
 **编译策略**：不是每个 patch 都编译，只在 `build_checkpoint=true` 的 patch 时编译验证。
 
