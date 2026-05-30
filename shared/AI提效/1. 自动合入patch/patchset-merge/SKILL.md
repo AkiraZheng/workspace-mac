@@ -95,17 +95,17 @@ echo "SCRIPTS_DIR=$SCRIPTS_DIR"
 ## 工作流总览
 
 ```
-Phase 0: 下载（脚本）→ /tmp/patches/000N-*.patch + metadata.json
+Phase 0: 下载 → 提取特征 → 创建分支 patch_merge_<feature>
          → 创建 $KERNEL_REPO_PATH/patch_analysis/
-Phase 0.5: 场景问询（脚本 detect_duplicate.py --version-upgrade）
+Phase 0.5: 场景问询（detect_duplicate.py --version-upgrade）
          → 检测旧版本 → 用户选择 upgrade/backport
 Phase 1: L1 脚本（extract_patch_symbols.py）→ analysis_cache.json 骨架
-         L2 Agent（并行，只读）:
-           agent_analysis — 语义分析/依赖/风险
-           agent_revert  — 审核 revert 候选（upgrade 模式深度搜索）
-Phase 1.5: 主 Agent 汇总 → patch_analysis/merge_tasks.json + analysis_cache.json
-Phase 2: 串行 Merge（写入）→ 每 patch commit 后落盘 patch_analysis/analyse.md
-Phase 3: 汇总 → patch_analysis/summary.md
+         L2 Agent（并行，Write JSON）:
+           agent_analysis — Write 补全 analysis_cache.json
+           agent_revert  — Write revert_audit.json
+Phase 1.5: generate_merge_tasks.py → 确定性组装 merge_tasks.json + 校验
+Phase 2: 串行 Merge → 每 patch commit 后落盘 analyse.md
+Phase 3: 汇总 → summary.md
 ```
 
 ## 文件清单
@@ -153,6 +153,45 @@ mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
 ```
 
 `$KERNEL_REPO_PATH/patch_analysis/` 目录用于存放所有分析阶段的结构化文件（JSON 中间产物 + 分析报告），确保不会因 AI 遗漏输出而丢失数据。
+
+**Phase 0 完成后：创建独立操作分支（强制）**
+
+> ⚠️ 硬性约束：**操作必须在独立分支上进行**，禁止在 master / main / OLK-6.6 等主干分支操作。
+
+```bash
+# 1. 从第一个有效 patch 的 subject 提取特征名（大写缩写词）
+FEATURE=$(python3 -c "
+import re
+from pathlib import Path
+patches = sorted(Path('/tmp/patches').glob('0*.patch'))
+if patches:
+    for line in patches[0].read_text(errors='replace').split('\n')[:30]:
+        m = re.match(r'Subject:\s*(.+)', line)
+        if m:
+            for w in m.group(1).split():
+                clean = w.strip(':,;.()\"')
+                if clean.isupper() and len(clean) >= 3:
+                    print(clean)
+                    exit(0)
+print('patchset')
+" 2>/dev/null)
+
+BRANCH="patch_merge_${FEATURE}"
+
+# 2. 若分支已存在，加 _v2 / _v3 后缀
+SUFFIX=""
+COUNT=1
+while git -C "$KERNEL_REPO_PATH" rev-parse --verify "${BRANCH}${SUFFIX}" >/dev/null 2>&1; do
+    COUNT=$((COUNT + 1))
+    SUFFIX="_v${COUNT}"
+done
+BRANCH="${BRANCH}${SUFFIX}"
+
+# 3. 创建并切换到新分支
+git -C "$KERNEL_REPO_PATH" checkout -b "$BRANCH"
+export KERNEL_BRANCH="$BRANCH"
+echo "操作分支: $KERNEL_BRANCH（从 patch 特征自动创建）"
+```
 
 **Phase 0 完成后：恢复检查（关键步骤）**
 
@@ -371,15 +410,29 @@ python3 "$SCRIPTS_DIR/extract_patch_symbols.py" \
 **步骤 1: 理解 commit message（优先）**
 先深入理解每个 patch 的 commit message：功能是什么、关联哪个子模块、是否标注了前置依赖 commit。
 
-**步骤 2: 完善 analysis_cache.json**
-在 L1 骨架基础上，补充 AI 理解后的语义内容：
-- `功能分类`：结合 commit message 修正 L1 的初步分类
-- `feature_signature.keywords`：AI 理解特性后给出语义关键词（非机械截取大写词）
-- `feature_signature.scope_dirs`：限定搜索范围
-- `depends_on`：标记 patch 内依赖（P_j 依赖 P_i 的符号）
-- `build_checkpoint`：初步判定（基础设施/高依赖/末 patch → true）
-- `risk_level`：低/中/高
-- `review_urgency`：低/中/高
+**步骤 2: 补充语义字段并写回 analysis_cache.json**
+
+读取 L1 的 `analysis_cache.json` 骨架，在 AI 理解后**用 Write tool 写回**补全的文件：
+
+在 L1 骨架基础上，补充以下 AI 语义字段（字段 schema 见 `references/output-templates.md`）：
+
+| 字段 | 说明 | 类型 |
+|------|------|------|
+| `功能分类` | 结合 commit message 修正 L1 初步分类 | string |
+| `feature_signature.keywords` | AI 语义关键词（非机械截取） | list |
+| `feature_signature.scope_dirs` | 限定搜索范围 | list |
+| `depends_on` | patch 内依赖（P_j 依赖 P_i 的 task_id） | list |
+| `risk_level` | 风险等级：高/中/低 | string |
+| `review_required` | Review 紧急性：高/中/低 | string |
+| `blame_hits` | git blame 找到的 bugfix commit 列表 | list |
+| `conflicts_predicted` | 预判冲突点（文件:行号:原因） | list |
+| `special_notes` | 合入注意事项 | string |
+| `action` | apply/skip | string |
+| `skip_reason` | 若 skip，必须填写原因 | string |
+
+**输出方式**：用 Write tool 写入 `$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json`，覆盖 L1 骨架。
+
+> **注意**：不再只屏幕输出然后让主 Agent 手工解析。确保 JSON 结构完整，所有字段填入有效值。
 
 **步骤 3: 向后搜索 Bugfix**（同原步骤 3，有 upstream 时执行）
 
@@ -413,7 +466,10 @@ python3 "$SCRIPTS_DIR/extract_patch_symbols.py" \
    - 是否是无关注释/格式/doc/无关 bugfix？ → reject
    - merge commit 包含检查：若候选中有 merge commit，用 `git log <merge>~1..<merge>` 展开子 commit 列表
 7. **去重合并**：将 L1 结果和步骤 3-5 的搜索结果合并去重，确保最终 revert 列表无重复、无遗漏
-8. 输出：每个 commit 的 `revert_ruling`（confirm/reject）+ `revert_ruling_note` + 按 时间逆序排列
+8. **输出**：用 Write tool 写入 `$KERNEL_REPO_PATH/patch_analysis/revert_audit.json`，格式见 `references/output-templates.md`。核心字段：
+   - `revert_rulings`: 每个 PR/commit 的 `ruling`（confirm/reject）+ `note`（理由）+ `revert_cmd`（AI 决定的 revert 命令）
+   - `patch_pre_revert`: 每个 patch task_id → 需 revert 的 commit hash 列表
+   - `ruling_summary`: 一句话总结（供主 Agent 展示）
 
 > 核心原则：不靠阈值判定，AI 理解代码语义后做判断。L1 脚本只提供起点线索。
 
@@ -519,19 +575,30 @@ python3 "$SCRIPTS_DIR/generate_revert_plan.py" \
 | 单个 commit | `git revert <commit>` |
 | PR 内部分 commit | 按逆序逐个 `git revert`
 
-**步骤 4: 生成 merge_tasks.json 和 analysis_cache.json**
+**步骤 4: 生成 merge_tasks.json（确定性脚本）**
 
-写入 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json` 和 `$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json`。
+> ★ L2 Agent 已用 Write tool 写回 `analysis_cache.json`（补全语义字段）和 `revert_audit.json`。
+> 主 Agent 不再手工解析屏幕文本，改用确定性脚本组装。
 
-**merge_tasks.json 必须严格按照以下 schema 生成，不可自行增减字段：**
+```bash
+python3 "$SCRIPTS_DIR/generate_merge_tasks.py" \
+  --analysis-cache "$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json" \
+  --duplicate-analysis "$KERNEL_REPO_PATH/patch_analysis/duplicate_analysis.json" \
+  --revert-audit "$KERNEL_REPO_PATH/patch_analysis/revert_audit.json" \
+  --patch-dir /tmp/patches/ \
+  --output "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json"
+```
 
-**顶层结构**：
-- `patchset_info` — 来源/目标/架构等基本信息
-- `global_revert_order` — PR 聚合的全局 revert 列表（步骤 3 产物，见上方格式）
-- `deps_order` — 待拉取的上游依赖 patch 列表（初始 `[]`，步骤 6 填充）
-- `merge_order` — 主体合入任务列表
+**脚本行为**：
+1. 读取 L1+L2 的 `analysis_cache.json`（已含 agent_analysis 补全的语义字段）
+2. 读取 Phase 0.5 的 `duplicate_analysis.json`（PR 聚合 + revert 建议）
+3. 读取 `revert_audit.json`（agent_revert 的 AI 审核结果）
+4. 提取 `/tmp/patches/` 中的 patch 元数据（subject, author, patch_file）
+5. 组装完整的 `merge_tasks.json`（所有 20+ 字段按 schema 填充）
+6. **schema 校验**：必填字段为空 → exit 1，输出缺失字段列表
+7. 通过 → 写入 `merge_tasks.json`，输出统计摘要
 
-**每个 task 必须包含**（merge_order 和 deps_order 共用）：
+**merge_tasks.json 每个 task 必须包含**（脚本自动填充，不再手工维护）：
 - `seq` — 执行序号（merge agent 严格按此升序执行）
 - `task_id` — patch 编号（0001~000N 或 dep-001~dep-00N）
 - `status` — `pending`（初始值，Phase 2 动态更新）
@@ -547,48 +614,18 @@ python3 "$SCRIPTS_DIR/generate_revert_plan.py" \
 - `pre_revert` — 需先 revert 的本地 commit hash 列表
 - `depends_on` — 前置 task_id 列表（可跨 deps_order / merge_order）
 - `risk_level` — `高` | `中` | `低`
+- `risk_detail` — 风险具体说明
 - `review_required` — `高` | `中` | `低`
-- `blame_hits` — bugfix commit 列表（step 3 产物）
+- `review_reason` — review 原因
+- `smoke_tests` — 建议验证项列表
+- `status_in_target` — 目标仓库中该功能当前状态描述
+- `blame_hits` — bugfix commit 列表
 - `duplicate_info` — 目标仓库重复检测结果（step 5 产物）
 - `conflicts_predicted` — 预判冲突点列表（文件:行号:原因）
 - `special_notes` — 合入注意事项
 - `build_checkpoint` — `true` / `false`（是否在此 patch 点做编译验证）
-- `pr_mapping` — PR 映射聚合结果（step 6 产物，见下方格式）
+- `pr_mapping` — PR 映射聚合结果（由 `generate_merge_tasks.py` 从 `duplicate_analysis.json` 组装，schema 见 `references/output-templates.md#_generate_merge_tasks-py`）
 - `execution_log` — `[]`（初始空数组，Phase 2 动态追加）
-
-**pr_mapping 字段格式**：
-```json
-{
-  "upstream_deps": [
-    {
-      "pr_id": "PR #123",
-      "pr_url": "https://github.com/torvalds/linux/pull/123",
-      "commits": ["abc123", "def456"],
-      "cover_letter_msgid": "xxx@lore.kernel.org",
-      "download_cmd": "b4 am xxx@lore.kernel.org",
-      "reason": "缺失函数 stage2_try_set_pte"
-    }
-  ],
-  "bugfix_deps": [
-    {
-      "pr_id": "独立 commit",
-      "commits": ["ghi789"],
-      "reason": "修复空指针"
-    }
-  ],
-  "revert_candidates": [
-    {
-      "pr_id": "PR #456",
-      "commits": ["local-abc", "local-def"],
-      "subject": "本地 HDBSS 实现",
-      "revert_cmd": "git revert --ancestry-path local-abc^..local-def",
-      "urgency": "必须"
-    }
-  ]
-}
-```
-
-**analysis_cache.json** 按 `references/output-templates.md` 中定义的字段生成（含 `pr_mapping`）。
 
 **步骤 5: 校验 + 屏幕预览 → 用户确认 → 保存预览**
 
@@ -739,15 +776,7 @@ python3 "$SCRIPTS_DIR/validate_phase1_artifacts.py" \
 ### 启动
 读取 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json`。
 
-**Phase 2 首次进入时更新 current_state**（标记 merge 阶段开始）：
-```bash
-python3 "$SCRIPTS_DIR/gatekeeper.py" \
-  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
-  --task-id "<第一个 task_id>" \
-  --step BUILD --result in_progress
-```
-
-**执行顺序**：遍历 `merge_order`，按 `seq` 升序处理（步骤 7 已将 deps_order 和 revert 全部合并入 merge_order）。
+**执行顺序**：遍历 `merge_order`，按 `seq` 升序处理。
 
 ### 状态机
 
@@ -755,20 +784,57 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 PRECHECK → PRE_REVERT → APPLY → VERIFY_INTENT → BUILD (checkpoint only) → COMMIT → REVIEW → RECORD → DONE
 ```
 
+> **⚠️ 每个 step 开始和结束时必须调用 gatekeeper**（标 ✅ 的行），确保 `state_log` + `execution_log` 被填充。
+
 - `build_checkpoint=true` → 完整执行 BUILD→verify→gatekeeper
 - `build_checkpoint=false` → 跳过 BUILD，直接进入 COMMIT
 
+### 通用模式
+
+每个 step 遵循固定模板：
+
+```bash
+# 开始：标记 in_progress
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step <STEP> --result in_progress
+
+# ... 执行实际操作 ...
+
+# 完成：记录结果
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step <STEP> --result pass [extra_args...]
+```
+
 ### PRECHECK
+```bash
+# ✅ 标记开始
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step PRECHECK --result in_progress
+```
 - 校验 patch 文件存在
 - 校验 `depends_on` 中所有 task_id 状态为 `done`
   - 若前置被 skip → 检查 `skip_dependency_impact`：强→阻塞，中/弱→允许继续
 - 工作区干净：`git diff --quiet && git diff --cached --quiet`
+```bash
+# ✅ 记录结果
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step PRECHECK --result pass
+```
 
 ### PRE_REVERT
 
 读取 `$KERNEL_REPO_PATH/patch_analysis/revert_plan.json` 执行：
 
 ```bash
+# ✅ 标记开始
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step PRE_REVERT --result in_progress
+
 python3 "$SCRIPTS_DIR/execute_revert.py" \
   --plan "$KERNEL_REPO_PATH/patch_analysis/revert_plan.json" \
   --repo-path "$KERNEL_REPO_PATH"
@@ -792,7 +858,20 @@ python3 "$SCRIPTS_DIR/execute_revert.py" \
 
 也可手动执行 `bash $KERNEL_REPO_PATH/patch_analysis/revert_plan.sh <repo_path>`。
 
+```bash
+# ✅ 记录结果
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step PRE_REVERT --result pass
+```
+
 ### APPLY
+```bash
+# ✅ 标记开始
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step APPLY --result in_progress
+```
 降级链（详见 `references/diagnostic-guide.md`）：
 ```
 git am --3way <patch>
@@ -807,11 +886,23 @@ git am --3way <patch>
 - **patch 的 `+` 行（新增代码）→ 必须保留**，不可选 Ours 删除
 - **introduced_symbols 所在行 → 必须保留**，不可丢失
 
+```bash
+# ✅ 记录 APPLY 结果
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step APPLY --result pass
+```
+
 ### VERIFY_INTENT（APPLY 后强制校验）
 
 **每次 APPLY 完成后必须执行，确保 patch 核心意图未被冲突解决破坏：**
 
 ```bash
+# ✅ 标记开始
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step VERIFY_INTENT --result in_progress
+
 python3 "$SCRIPTS_DIR/verify_patch_intent.py" \
   --patch-file "<patch_file>" \
   --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
@@ -953,7 +1044,9 @@ fi
 **步骤 3：执行编译**
 
 ```bash
-BUILD_LOG="/tmp/patch_build_<task_id>.log"
+# 编译日志存入 patch_analysis/build_logs/（持久化，不被 /tmp 清理）
+mkdir -p "$KERNEL_REPO_PATH/patch_analysis/build_logs"
+BUILD_LOG="$KERNEL_REPO_PATH/patch_analysis/build_logs/<task_id>_build.log"
 echo "编译命令: $BUILD_CMD"
 $BUILD_CMD 2>&1 | tee "$BUILD_LOG"
 ```
@@ -1006,6 +1099,7 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
   --error-count <error_count> \
   --product "arch/$KERNEL_ARCH/boot/Image" \
   --build-target "$BUILD_CMD" \
+  --build-log "$BUILD_LOG" \
   --module-dirs "$MODULE_DIRS" \
   --module-count "$MODULE_COUNT"
 ```
@@ -1166,14 +1260,26 @@ python3 "$SCRIPTS_DIR/gatekeeper.py" \
 ```
 
 ### REVIEW
+```bash
+# ✅ 标记开始
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step REVIEW --result in_progress
+```
 调用 **code-review-expert skill**（skill 框架按名称自动加载），对 `HEAD~1..HEAD` 做 review。
 若 reference 不存在则跳过，标注"未做自动 review"。
 - Must Fix 意见 → 标记需 rebase amend
 - Suggest 意见 → 记录不阻塞
+```bash
+# ✅ 记录结果
+python3 "$SCRIPTS_DIR/gatekeeper.py" \
+  --merges-file "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "<task_id>" --step REVIEW --result pass
+```
 
 ### RECORD
 
-**合入过程数据暂存，不写 analyse.md。Phase 3 统一落盘。**
+**合入过程数据暂存，不写 analyse.md。Phase 3 统一落盘。gatekeeper 已自动记录到 execution_log，此处仅补充 AI 经验数据。**
 
 将当前 task 的合入经验追加记录到 `$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json` 的 `execution_log` 中，供 Phase 3 使用：
 

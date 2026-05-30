@@ -432,83 +432,51 @@ python3 gatekeeper.py --merges-file merge_tasks.json --restore --clear
 
 ## analysis_cache.json 固定 Schema
 
-Phase 1.5 主 Agent 汇总所有分析 Agent 的屏幕输出后生成。Phase 3 落盘时读取。
+L1 `extract_patch_symbols.py` 生成骨架 → agent_analysis 读取并补全语义字段 → Write 写回。
 
 ```json
 {
   "0001": {
-    "summary": "功能描述",
-    "modules": "关联模块",
-    "risk": "中",
-    "risk_detail": "具体风险点",
-    "revert_level": "建议",
-    "revert_commits": ["abc123"],
-    "revert_reason": "原因",
-    "high_version_deps": ["缺失符号: commit"],
-    "bugfix_deps": [
-      {"symbol": "xx", "commit": "yy", "desc": "修复了什么"}
-    ],
-    "internal_deps": ["0002"],
-    "duplicate_info": {"level": "无重复", "detail": ""},
-    "review_required": "高",
-    "review_reason": "为什么",
-    "smoke_tests": ["验证点1", "验证点2"],
-    "changed_files": ["file1.c", "file2.h"],
-    "status_in_target": "在目标仓库中的现状描述",
-    "pr_mapping": {
-      "upstream_deps": [
-        {
-          "pr_id": "PR #123",
-          "pr_url": "https://github.com/torvalds/linux/pull/123",
-          "commits": ["abc123", "def456"],
-          "cover_letter_msgid": "xxx@lore.kernel.org",
-          "reason": "缺失函数 stage2_try_set_pte"
-        }
-      ],
-      "bugfix_deps": [
-        {
-          "pr_id": "独立 commit",
-          "commits": ["ghi789"],
-          "reason": "修复空指针"
-        }
-      ],
-      "revert_candidates": [
-        {
-          "pr_id": "PR #456",
-          "commits": ["local-abc", "local-def"],
-          "subject": "本地 HDBSS 实现",
-          "urgency": "必须"
-        }
-      ]
-    }
+    "subject": "arm64/sysreg: Add HDBSS related register information",
+    "introduced_symbols": ["HDBSSBR_EL2", "HDBSS_EL2"],
+    "referenced_symbols": ["sys_reg", "read_sysreg"],
+    "changed_files": ["arch/arm64/include/asm/sysreg.h", "arch/arm64/tools/sysreg"],
+    "功能分类": "infra",
+    "feature_signature": {
+      "keywords": ["HDBSS", "FEAT_HDBSS", "Hardware Dirty Bit"],
+      "scope_dirs": ["arch/arm64/kvm/", "arch/arm64/include/", "arch/arm64/tools/"]
+    },
+    "depends_on": [],
+    "risk_level": "中",
+    "review_required": "中",
+    "blame_hits": [],
+    "conflicts_predicted": [],
+    "special_notes": "",
+    "action": "apply",
+    "skip_reason": ""
   }
 }
 ```
 
 ### 字段说明
 
-| 字段 | 必填 | 说明 |
-|------|:--:|------|
-| `summary` | ✓ | 功能描述 |
-| `modules` | ✓ | 关联模块 |
-| `功能分类` | ✓ | infra/core/driver/fs/net/sound/doc/bugfix（见下方分类规则） |
-| `introduced_symbols` | ✓ | 本 patch 新增/修改的函数名、宏名、类型名列表 |
-| `referenced_symbols` | ✓ | 本 patch 调用/引用的符号列表 |
-| `risk` | ✓ | 风险程度：高/中/低 |
-| `risk_detail` | ✓ | 风险具体说明 |
-| `revert_level` | ✓ | 必须/建议/无须 |
-| `revert_commits` | ✓ | 需 revert 的 commit 列表，无须则为 `[]` |
-| `revert_reason` | ✓ | revert 理由 |
-| `high_version_deps` | ✓ | 上游依赖列表 |
-| `bugfix_deps` | ✓ | bugfix 依赖列表 |
-| `internal_deps` | ✓ | patchset 内部依赖列表 |
-| `duplicate_info` | ✓ | `{"level": "...", "detail": "..."}` |
-| `review_required` | ✓ | 高/中/低 |
-| `review_reason` | ✓ | review 理由 |
-| `smoke_tests` | ✓ | 验证项列表 |
-| `changed_files` | ✓ | 涉改文件列表 |
-| `status_in_target` | ✓ | 目标仓库现状描述 |
-| `pr_mapping` | ✓ | PR 映射聚合（Phase 0 步骤 6 产物，字段见 merge_tasks.json 的 pr_mapping 说明） |
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| `subject` | L1 脚本 | patch 标题 |
+| `introduced_symbols` | L1 脚本 | 本 patch 新增/修改的符号列表 |
+| `referenced_symbols` | L1 脚本 | 本 patch 引用/调用的符号列表 |
+| `changed_files` | L1 脚本 | 涉改文件路径列表 |
+| `功能分类` | L1 → agent_analysis 修正 | infra/core/driver/fs/net/sound/doc/bugfix |
+| `feature_signature.keywords` | agent_analysis | AI 语义关键词（非机械截取） |
+| `feature_signature.scope_dirs` | agent_analysis | 限定搜索范围目录 |
+| `depends_on` | agent_analysis | 前置 task_id 列表（P_j 依赖 P_i 的符号） |
+| `risk_level` | agent_analysis | 高/中/低 |
+| `review_required` | agent_analysis | 高/中/低 |
+| `blame_hits` | agent_analysis | git blame 追溯的 bugfix commit 列表 |
+| `conflicts_predicted` | agent_analysis | 预判冲突点（文件:行号:原因） |
+| `special_notes` | agent_analysis | 合入注意事项 |
+| `action` | agent_analysis | apply/skip |
+| `skip_reason` | agent_analysis | 若 skip，必须填写原因 |
 
 ### 功能分类规则
 
@@ -523,7 +491,55 @@ Phase 1.5 主 Agent 汇总所有分析 Agent 的屏幕输出后生成。Phase 3 
 | `doc` | `Documentation/`, commit message 含 "doc"/"comment"/"documentation" | `Documentation/kvm/` |
 | `bugfix` | commit message 含 "fix"/"bug"/"error"/"patch"/"Fixes:" 且独立于特性系列 | 修复补丁 |
 
-## Phase 1 分析 Agent 屏幕输出格式
+---
+
+## revert_audit.json Schema（★ agent_revert 输出）
+
+agent_revert 审核 L1 的 revert 候选后，用 Write tool 写入此文件。
+
+```json
+{
+  "revert_rulings": {
+    "PR!15754": {
+      "ruling": "confirm",
+      "note": "包含 HDBSS feature 全部 6 个子 commit，覆盖率 85.7%，建议整体 revert",
+      "revert_cmd": "git revert -m 1 fe4fa7481191"
+    },
+    "PR!17748": {
+      "ruling": "confirm",
+      "note": "HDBSS 内存泄漏修复 + NVHE 不支持清理，需 revert 为 v3 让路",
+      "revert_cmd": "git revert -m 1 b1d8169dd540"
+    },
+    "独立abc": {
+      "ruling": "reject",
+      "note": "这是无关的格式化修改，不是旧版本实现"
+    }
+  },
+  "patch_pre_revert": {
+    "0001": ["fe4fa7481191"],
+    "0002": ["fe4fa7481191"],
+    "0003": ["fe4fa7481191"],
+    "0004": ["fe4fa7481191"],
+    "0005": ["fe4fa7481191"]
+  },
+  "ruling_summary": "确认 2 个 PR revert (fe4fa7481191 + b1d8169dd540)，拒绝 1 个无关 commit"
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `revert_rulings.<pr_id>.ruling` | confirm（确认 revert）/ reject（驳回） |
+| `revert_rulings.<pr_id>.note` | AI 判断理由（1-2 句话） |
+| `revert_rulings.<pr_id>.revert_cmd` | AI 确定的 revert 命令（GPT 模型判断 merge 用 -m 1） |
+| `patch_pre_revert.<task_id>` | 每个 patch 需要 revert 的 commit hash 列表 |
+| `ruling_summary` | 一句话总结 |
+
+---
+
+## Phase 1 分析 Agent 屏幕输出格式（⚠️ 已废弃）
+
+> **注意**：L2 Agent 现在直接 Write JSON 文件（见上方的 `analysis_cache.json` + `revert_audit.json`），
+> 不再使用此屏幕输出格式。此节保留仅作备份参考。
 
 分析 Agent 不写文件，用以下结构化格式输出到屏幕（供主 Agent 解析）：
 

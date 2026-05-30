@@ -45,12 +45,17 @@ import argparse
 from datetime import datetime, timezone
 
 
-STEP_ORDER = ["BUILD", "COMMIT", "REVIEW", "DONE"]
+STEP_ORDER = ["PRECHECK", "PRE_REVERT", "APPLY", "VERIFY_INTENT", "BUILD", "COMMIT", "REVIEW", "RECORD", "DONE"]
 STEP_PRE_REQUISITES = {
+    "PRE_REVERT": [],
+    "APPLY": [],
+    "VERIFY_INTENT": ["APPLY"],
+    "BUILD": [],
     "COMMIT": ["BUILD"],
     "REVIEW": ["COMMIT"],
+    "RECORD": ["REVIEW"],
     "DONE": ["BUILD", "COMMIT"],
-    "BUILD": [],
+    "PRECHECK": [],
 }
 
 WORKFLOW_HINTS = {
@@ -118,8 +123,11 @@ def check_prerequisites(state_log: list[dict], step: str) -> bool:
     return True
 
 
-def record_step(state_log: list[dict], step: str, result: str,
+def record_step(task: dict, step: str, result: str,
                 extra: dict | None = None) -> None:
+    """记录 step 到 state_log + execution_log（双写）"""
+    # state_log
+    sl = ensure_state_log(task)
     entry = {
         "step": step,
         "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -127,7 +135,16 @@ def record_step(state_log: list[dict], step: str, result: str,
     }
     if extra:
         entry.update(extra)
-    state_log.append(entry)
+    sl.append(entry)
+
+    # execution_log（Phase 3 消费）
+    if "execution_log" not in task:
+        task["execution_log"] = []
+    exec_entry = {"step": step, "result": result,
+                  "time": entry["time"]}
+    if extra:
+        exec_entry.update(extra)
+    task["execution_log"].append(exec_entry)
 
 
 def update_current_state(data: dict, task_id: str, phase: str,
@@ -184,7 +201,6 @@ def do_record(args):
         print(f"[GATEKEEPER] task {args.task_id} 未找到", file=sys.stderr)
         sys.exit(1)
 
-    state_log = ensure_state_log(task)
     extra = {}
     if args.error_count is not None:
         extra["error_count"] = args.error_count
@@ -194,12 +210,14 @@ def do_record(args):
         extra["commit"] = args.commit
     if args.build_target:
         extra["build_target"] = args.build_target
+    if args.build_log:
+        extra["build_log"] = args.build_log
     if args.module_dirs:
         extra["module_dirs"] = args.module_dirs.split(",")
     if args.module_count is not None:
         extra["module_count"] = args.module_count
 
-    record_step(state_log, args.step, args.result, extra or None)
+    record_step(task, args.step, args.result, extra or None)
 
     # 更新 task status
     status_map = {
@@ -277,7 +295,8 @@ def main():
     parser.add_argument("--task-id",
                         help="task_id，如 0001")
     parser.add_argument("--step",
-                        choices=["BUILD", "COMMIT", "REVIEW", "DONE"],
+                        choices=["PRECHECK", "PRE_REVERT", "APPLY", "VERIFY_INTENT",
+                                 "BUILD", "COMMIT", "REVIEW", "RECORD", "DONE"],
                         help="步骤名称")
     parser.add_argument("--check", action="store_true",
                         help="门禁检查模式（检查前置步骤是否通过）")
@@ -287,6 +306,8 @@ def main():
                         help="编译 error 数")
     parser.add_argument("--product",
                         help="编译产物路径")
+    parser.add_argument("--build-log",
+                        help="编译日志路径")
     parser.add_argument("--commit",
                         help="commit hash")
     parser.add_argument("--build-target",
