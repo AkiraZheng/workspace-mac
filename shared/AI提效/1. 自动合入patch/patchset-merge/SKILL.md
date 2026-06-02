@@ -160,7 +160,34 @@ mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
 
 编译验证开始前，需要确定 `.config` 文件的来源。**只执行一次**，后续所有 checkpoint 编译复用此文件。
 
-向用户展示：
+#### 2a. 复用检查
+
+读取 `$KERNEL_REPO_PATH/.patchmerge/config_preference.json`。若存在，展示上次配置并询问是否复用：
+
+```
+═══════════════════════════════════════════════
+  .config 来源配置 — 检测到上次配置
+═══════════════════════════════════════════════
+
+目标仓库: <KERNEL_REPO_PATH>
+架构: <KERNEL_ARCH>
+
+上次配置:
+  选项:       [2] 提供完整 .config 文件
+  来源路径:   /home/user/my-kernel.config
+  时间:       2026-05-30 12:00
+
+是否复用此配置？ [Y/n]
+```
+
+- **Y / 回车** → 直接按 `config_preference.json` 中的 option 和路径执行，跳过交互
+- **n** → 清除偏好，进入 2b 完整交互
+
+> 偏好文件路径：`$KERNEL_REPO_PATH/.patchmerge/config_preference.json`。仓库级别，跨 patchset 复用。
+
+#### 2b. 完整交互
+
+**用户问询**：
 
 ```
 ═══════════════════════════════════════════════
@@ -184,18 +211,36 @@ mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
   请选择: [1] / [2] / [3] (默认 [1])
 ```
 
-**各选项实现**：
+**各选项实现 + 偏好保存**：
 
-| 选项 | 实现 |
-|------|------|
-| [1] | 检查 `$KERNEL_REPO_PATH/.config` 存在 → 继续。不存在 → 报错提示用户 |
-| [2] | 用户输入 `.config` 路径 → `cp <path> $KERNEL_REPO_PATH/.config` → `make ARCH=$KERNEL_ARCH olddefconfig` |
-| [3] | a. 扫描 `$KERNEL_REPO_PATH/arch/$KERNEL_ARCH/configs/*` 让用户选择基础 config<br>b. 用户提供增量 config 文件路径<br>c. `$KERNEL_REPO_PATH/scripts/kconfig/merge_config.sh -O "$KERNEL_REPO_PATH" <base> <incremental>`<br>d. `make ARCH=$KERNEL_ARCH olddefconfig` |
+| 选项 | 执行 | 保存到 config_preference.json |
+|------|------|-----|
+| [1] | 检查 `$KERNEL_REPO_PATH/.config` 存在 → 继续 | `{"option": 1}` |
+| [2] | 用户输入路径 → `cp <path> $KERNEL_REPO_PATH/.config` → `make ARCH=$KERNEL_ARCH olddefconfig` | `{"option": 2, "full_config_path": "<用户输入的路径>"}` |
+| [3] | a. 扫描 `$KERNEL_REPO_PATH/arch/$KERNEL_ARCH/configs/*` 列出让用户选<br>b. 用户提供增量 config 文件路径<br>c. `$KERNEL_REPO_PATH/scripts/kconfig/merge_config.sh -O "$KERNEL_REPO_PATH" <base> <incremental>`<br>d. `make ARCH=$KERNEL_ARCH olddefconfig` | `{"option": 3, "base_config": "<选中的基础config>", "incremental_path": "<用户输入的路径>"}` |
+
+**偏好保存**（选项 2/3 执行成功后）：
+
+```bash
+mkdir -p "$KERNEL_REPO_PATH/.patchmerge"
+python3 -c "
+import json
+with open('$KERNEL_REPO_PATH/.patchmerge/config_preference.json', 'w') as f:
+    json.dump({
+        'option': <opt>,
+        'full_config_path': '<path>',
+        'base_config': '<base>',
+        'incremental_path': '<incr>',
+        'last_used': '$(date -Iseconds)'
+    }, f, indent=2)
+"
+```
 
 **边界处理**：
 - 路径不存在 → 报错，让用户重新输入
 - `olddefconfig` 失败 → 报错退出，提示用户检查 config 文件
 - 用户直接回车 → 默认 [1]
+- 偏好文件不存在 → 直接进入 2b 完整交互
 
 ---
 
