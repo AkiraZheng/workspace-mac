@@ -78,20 +78,22 @@ class TestCheckPrerequisites(unittest.TestCase):
 
 class TestRecordStep(unittest.TestCase):
     def test_records_step(self):
-        log = []
-        gk.record_step(log, "BUILD", "pass", {"error_count": 0})
-        self.assertEqual(len(log), 1)
-        self.assertEqual(log[0]["step"], "BUILD")
-        self.assertEqual(log[0]["result"], "pass")
-        self.assertEqual(log[0]["error_count"], 0)
-        self.assertIn("time", log[0])
+        task = {"state_log": [], "execution_log": []}
+        gk.record_step(task, "BUILD", "pass", {"error_count": 0})
+        self.assertEqual(len(task["state_log"]), 1)
+        self.assertEqual(task["state_log"][0]["step"], "BUILD")
+        self.assertEqual(task["state_log"][0]["result"], "pass")
+        self.assertEqual(task["state_log"][0]["error_count"], 0)
+        self.assertIn("time", task["state_log"][0])
+        self.assertEqual(len(task["execution_log"]), 1)
 
     def test_records_in_progress(self):
-        log = []
-        gk.record_step(log, "BUILD", "in_progress", None)
-        self.assertEqual(len(log), 1)
-        self.assertEqual(log[0]["step"], "BUILD")
-        self.assertEqual(log[0]["result"], "in_progress")
+        task = {"state_log": [], "execution_log": []}
+        gk.record_step(task, "BUILD", "in_progress", None)
+        self.assertEqual(len(task["state_log"]), 1)
+        self.assertEqual(task["state_log"][0]["step"], "BUILD")
+        self.assertEqual(task["state_log"][0]["result"], "in_progress")
+        self.assertEqual(len(task["execution_log"]), 1)
 
 
 class TestCurrentState(unittest.TestCase):
@@ -157,8 +159,7 @@ class TestIntegration(unittest.TestCase):
         data = gk.load_merges_file(self.tmp_path)
         gk.ensure_workflow_hints(data)
         task = gk.find_task(data, task_id)
-        state_log = gk.ensure_state_log(task)
-        gk.record_step(state_log, step, result, extra or None)
+        gk.record_step(task, step, result, extra or None)
 
         if result == "pass":
             status_map = {"BUILD": "built", "COMMIT": "committed",
