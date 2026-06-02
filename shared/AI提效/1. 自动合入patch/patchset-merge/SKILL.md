@@ -95,8 +95,8 @@ echo "SCRIPTS_DIR=$SCRIPTS_DIR"
 ## 工作流总览
 
 ```
-Phase 0: 下载 → 提取特征 → 创建分支 patch_merge_<feature>
-         → 创建 $KERNEL_REPO_PATH/patch_analysis/
+Phase 0: 下载 → .config 来源 (3选1) → 预开驱动 CONFIG=m
+         → 提取特征 → 创建分支 patch_merge_<feature>
 Phase 0.5: 场景问询（detect_duplicate.py --version-upgrade）
          → 检测旧版本 → 用户选择 upgrade/backport
 Phase 1: L1 脚本（extract_patch_symbols.py）→ analysis_cache.json 骨架
@@ -154,7 +154,113 @@ mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
 
 `$KERNEL_REPO_PATH/patch_analysis/` 目录用于存放所有分析阶段的结构化文件（JSON 中间产物 + 分析报告），确保不会因 AI 遗漏输出而丢失数据。
 
-**Phase 0 完成后：创建独立操作分支（强制）**
+---
+
+### Phase 0 步骤 2：.config 来源配置
+
+编译验证开始前，需要确定 `.config` 文件的来源。**只执行一次**，后续所有 checkpoint 编译复用此文件。
+
+向用户展示：
+
+```
+═══════════════════════════════════════════════
+  .config 来源配置
+═══════════════════════════════════════════════
+
+目标仓库: <KERNEL_REPO_PATH>
+架构: <KERNEL_ARCH>
+
+请选择 .config 来源:
+
+[1] 使用目标仓库已有 .config 文件
+    (不做任何修改，直接进入下一步)
+
+[2] 提供完整 .config 文件
+    从指定路径 copy → make olddefconfig
+
+[3] 提供增量 config 片段
+    选基础 config + 增量片段 → merge → olddefconfig
+
+  请选择: [1] / [2] / [3] (默认 [1])
+```
+
+**各选项实现**：
+
+| 选项 | 实现 |
+|------|------|
+| [1] | 检查 `$KERNEL_REPO_PATH/.config` 存在 → 继续。不存在 → 报错提示用户 |
+| [2] | 用户输入 `.config` 路径 → `cp <path> $KERNEL_REPO_PATH/.config` → `make ARCH=$KERNEL_ARCH olddefconfig` |
+| [3] | a. 扫描 `$KERNEL_REPO_PATH/arch/$KERNEL_ARCH/configs/*` 让用户选择基础 config<br>b. 用户提供增量 config 文件路径<br>c. `$KERNEL_REPO_PATH/scripts/kconfig/merge_config.sh -O "$KERNEL_REPO_PATH" <base> <incremental>`<br>d. `make ARCH=$KERNEL_ARCH olddefconfig` |
+
+**边界处理**：
+- 路径不存在 → 报错，让用户重新输入
+- `olddefconfig` 失败 → 报错退出，提示用户检查 config 文件
+- 用户直接回车 → 默认 [1]
+
+---
+
+### Phase 0 步骤 3：一次性预开启驱动 CONFIG=m
+
+`.config` 就绪后，扫描**所有 patch 的涉改文件**，一次性开启所有需要的驱动模块：
+
+```bash
+cd "$KERNEL_REPO_PATH"
+
+DRIVER_FILES=$(python3 -c "
+import re
+from pathlib import Path
+patches = sorted(Path('/tmp/patches').glob('0*.patch'))
+all_files = set()
+for p in patches:
+    for line in p.read_text(errors='replace').split('\n'):
+        m = re.match(r'diff --git a/(\S+) b/', line)
+        if m:
+            all_files.add(m.group(1))
+for f in sorted(all_files):
+    if f.startswith('drivers/') or f.startswith('sound/'):
+        print(f)
+" 2>/dev/null)
+
+if [ -n "$DRIVER_FILES" ]; then
+    echo "[CONFIG] 扫描到 $(echo "$DRIVER_FILES" | wc -l) 个驱动文件，预开启 CONFIG=m"
+
+    all_configs=""
+    for f in $DRIVER_FILES; do
+        dir_path=$(dirname "$f")
+        makefile="$KERNEL_REPO_PATH/$dir_path/Makefile"
+        if [ ! -f "$makefile" ]; then
+            continue
+        fi
+        configs=$(grep -oP 'obj-\$\((\w+)\)' "$makefile" 2>/dev/null \
+            | sed 's/obj-\$(\(.*\))/\1/' | sort -u || true)
+        all_configs="$all_configs $configs"
+    done
+
+    for cfg in $(echo "$all_configs" | tr ' ' '\n' | sort -u); do
+        if grep -q "^${cfg}=[my]$" "$KERNEL_REPO_PATH/.config" 2>/dev/null; then
+            continue
+        fi
+        echo "  + $cfg=m"
+        $KERNEL_REPO_PATH/scripts/config --module "$cfg" 2>/dev/null || true
+        CONFIG_CHANGED=1
+    done
+
+    if [ "${CONFIG_CHANGED:-0}" -eq 1 ]; then
+        make ARCH=$KERNEL_ARCH olddefconfig 2>/dev/null || true
+        echo "[CONFIG] olddefconfig 刷新完成"
+    else
+        echo "[CONFIG] 所有驱动模块已开启，无需修改"
+    fi
+else
+    echo "[CONFIG] 无驱动文件，跳过"
+fi
+```
+
+> `.config` 在 Phase 2 的每个 checkpoint 编译中复用，不再修改、不再恢复。
+
+---
+
+### Phase 0 步骤 4：创建独立操作分支（强制）
 
 > ⚠️ 硬性约束：**操作必须在独立分支上进行**，禁止在 master / main / OLK-6.6 等主干分支操作。
 
@@ -949,6 +1055,9 @@ fi
 
 **编译流程**（仅 build_checkpoint=true 时执行）：
 
+> `.config` 已在 Phase 0 步骤 2-3 中一次性生成 + 预开启所有驱动 CONFIG=m。
+> 此处直接编译，不再修改 `.config`。
+
 **BUILD 开始前先标记 in_progress**：
 
 ```bash
@@ -989,59 +1098,9 @@ if [ -n "$PERF_FILES" ]; then
 fi
 ```
 
-**步骤 2：驱动模块临时开启 CONFIG=m（强制执行，不可跳过）**
+**步骤 2：执行编译**
 
-> **⚠️ 只要涉改文件包含 drivers/* 或 sound/*，就必须执行此步骤。**
-
-```bash
-cd "$KERNEL_REPO_PATH"
-
-# 提取所有涉改的驱动文件
-DRIVER_FILES=$(python3 -c "
-import json
-d = json.load(open('$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json'))
-for s in ['deps_order', 'merge_order']:
-    for t in d.get(s, []):
-        for f in t.get('files_changed', []):
-            if f.startswith('drivers/') or f.startswith('sound/'):
-                print(f)
-" 2>/dev/null)
-
-if [ -n "$DRIVER_FILES" ]; then
-    echo "[DRIVER] 检测到驱动文件，开启对应 CONFIG=m"
-    
-    for f in $DRIVER_FILES; do
-        dir_path=$(dirname "$f")
-        makefile="$KERNEL_REPO_PATH/$dir_path/Makefile"
-        
-        if [ ! -f "$makefile" ]; then
-            continue
-        fi
-        
-        # 解析 Makefile 中的 obj-$(CONFIG_XXX) → 提取 CONFIG 名
-        configs=$(grep -oP 'obj-\$\((\w+)\)' "$makefile" 2>/dev/null \
-            | sed 's/obj-\$(\(.*\))/\1/' | sort -u || true)
-        
-        for cfg in $configs; do
-            # 已是 m 或 y → 跳过
-            if grep -q "^${cfg}=[my]$" "$KERNEL_REPO_PATH/.config" 2>/dev/null; then
-                continue
-            fi
-            # 不是 m → 临时开启
-            echo "  临时开启: $cfg=m"
-            $KERNEL_REPO_PATH/scripts/config --module "$cfg" 2>/dev/null || true
-            CONFIG_CHANGED=1
-        done
-    done
-    
-    if [ "${CONFIG_CHANGED:-0}" -eq 1 ]; then
-        # 刷新 .config（旧 defconfig 可能冲突）
-        make ARCH=$KERNEL_ARCH olddefconfig 2>/dev/null || true
-    fi
-fi
-```
-
-**步骤 3：执行编译**
+> `.config` 已在 Phase 0 步骤 2-3 中一次性生成 + 预开启所有驱动 CONFIG=m。此处直接编译，不再修改 `.config`。
 
 ```bash
 # 编译日志存入 patch_analysis/build_logs/（持久化，不被 /tmp 清理）
@@ -1051,16 +1110,7 @@ echo "编译命令: $BUILD_CMD"
 $BUILD_CMD 2>&1 | tee "$BUILD_LOG"
 ```
 
-**步骤 4：恢复 .config（不污染仓库）**
-
-```bash
-if [ "${CONFIG_CHANGED:-0}" -eq 1 ]; then
-    git checkout .config
-    echo "[RESTORE] .config 已恢复"
-fi
-```
-
-**步骤 5：提取模块信息 + 门禁验证**
+**步骤 3：提取模块信息 + 门禁验证**
 
 ```bash
 MODULE_DIRS=$(python3 -c "
@@ -1208,13 +1258,13 @@ make $BUILD_TARGET -j$(nproc)    # 再次验证
 | 当前 checkpoint 组内某 patch 语法/逻辑错误 | rebase amend 该 patch |
 | 调用不存在的符号 | 标记为缺失依赖，检查是否需要插入新 dep |
 | patch 引入的新功能需要新 CONFIG | 启用 CONFIG + 保留修改，识别为 checkpoint 内正确 patch 后 amend |
-| 非 patch 的环境 CONFIG 缺失 | 临时启用 → make → `git restore .config` |
+| 非 patch 的环境 CONFIG 缺失 | 临时启用 CONFIG → make → 编译后 `git restore <config_file>` |
 
 **CONFIG 操作**：
 ```bash
 ./scripts/config --enable CONFIG_NEW_FEATURE
 make olddefconfig
-# 编译后若为环境 CONFIG → git restore .config
+# .config 已在 Phase 0 生成，不再 restore
 # 若为 patch 需要的 CONFIG → amend 到对应 patch
 ```
 
