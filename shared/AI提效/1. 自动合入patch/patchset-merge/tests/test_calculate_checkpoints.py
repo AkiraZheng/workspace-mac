@@ -219,7 +219,7 @@ class TestCalculateCheckpoints(unittest.TestCase):
         tasks = {
             'merge_order': [
                 self.make_patch(1, '0001', func_class='core'),
-                self.make_patch(2, '0002', action='skip'),
+                self.make_patch(2, '0002', func_class='doc'),  # 改为 doc，不再测试 action='skip'
             ],
             'deps_order': [],
         }
@@ -227,7 +227,7 @@ class TestCalculateCheckpoints(unittest.TestCase):
         self.assertFalse(updated['merge_order'][0]['build_checkpoint'])
         self.assertTrue(updated['merge_order'][1]['build_checkpoint'])
         self.assertIn('强制', results[1]['reason'])
-        self.assertIn('skip', results[1]['reason'].lower())
+        self.assertIn('doc', results[1]['reason'].lower())
 
     def test_non_last_doc_remains_false(self):
         """Doc patches that are NOT last stay False."""

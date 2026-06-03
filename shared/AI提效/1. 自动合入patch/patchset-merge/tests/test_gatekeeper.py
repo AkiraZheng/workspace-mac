@@ -59,21 +59,30 @@ class TestStateLog(unittest.TestCase):
 
 class TestCheckPrerequisites(unittest.TestCase):
     def test_build_has_no_prereq(self):
-        self.assertTrue(gk.check_prerequisites([], "BUILD"))
+        task = {"build_checkpoint": True}
+        self.assertTrue(gk.check_prerequisites(task, [], "BUILD"))
 
     def test_commit_needs_build_pass(self):
+        task = {"build_checkpoint": True}
         log = [{"step": "BUILD", "result": "pass"}]
-        self.assertTrue(gk.check_prerequisites(log, "COMMIT"))
+        self.assertTrue(gk.check_prerequisites(task, log, "COMMIT"))
 
     def test_commit_fails_without_build(self):
-        self.assertFalse(gk.check_prerequisites([], "COMMIT"))
+        task = {"build_checkpoint": True}
+        self.assertFalse(gk.check_prerequisites(task, [], "COMMIT"))
+
+    def test_commit_no_build_needed_when_checkpoint_false(self):
+        """关键修复：build_checkpoint=false 不需要 BUILD 前置"""
+        task = {"build_checkpoint": False}
+        self.assertTrue(gk.check_prerequisites(task, [], "COMMIT"))
 
     def test_done_needs_both(self):
+        task = {"build_checkpoint": True}
         log = [
             {"step": "BUILD", "result": "pass"},
             {"step": "COMMIT", "result": "pass"},
         ]
-        self.assertTrue(gk.check_prerequisites(log, "DONE"))
+        self.assertTrue(gk.check_prerequisites(task, log, "DONE"))
 
 
 class TestRecordStep(unittest.TestCase):
@@ -152,7 +161,7 @@ class TestIntegration(unittest.TestCase):
         if task is None:
             return False
         state_log = gk.ensure_state_log(task)
-        return gk.check_prerequisites(state_log, step)
+        return gk.check_prerequisites(task, state_log, step)
 
     def _run_full_record(self, task_id, step, result, **extra):
         """Full record including current_state + workflow_hints (like main())"""
