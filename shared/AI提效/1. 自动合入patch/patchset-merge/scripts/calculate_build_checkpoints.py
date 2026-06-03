@@ -208,17 +208,17 @@ def calculate_checkpoints(merge_tasks):
             checkpoint = True
             rules_triggered.append("Rule_5")
             forced_by.append("last_patch")
-            if patch.get('action') == 'skip' or func_class == 'doc':
-                reason_parts.append('最后一个 patch（强制，skip/doc 也验证）')
+            if func_class == 'doc':
+                reason_parts.append('最后一个 patch（强制，doc 也验证）')
             else:
                 reason_parts.append('最后一个 patch（强制）')
 
-        # ── Rule 6: skip or doc → false ──
+        # ── Rule 6: doc → false ──
         if checkpoint is None:
-            if patch.get('action') == 'skip' or func_class == 'doc':
+            if func_class == 'doc':
                 checkpoint = False
                 rules_triggered.append("Rule_6")
-                reason_parts.append('跳过或文档类型')
+                reason_parts.append('文档类型')
 
         # ── Rule 7: last in group ──
         if checkpoint is None:

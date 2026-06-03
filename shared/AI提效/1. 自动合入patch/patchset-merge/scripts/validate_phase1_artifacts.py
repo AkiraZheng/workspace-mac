@@ -43,7 +43,7 @@ REQUIRED_PR_MAPPING_FIELDS = ["upstream_deps", "bugfix_deps", "revert_candidates
 
 VALID_STATUSES = {"pending", "in_progress", "done", "blocked", "skipped",
                    "failed", "built", "committed", "reviewed"}
-VALID_ACTIONS = {"apply", "skip"}
+VALID_ACTIONS = {"apply"}  # 只允许 apply（禁止 skip）
 VALID_RISK = {"高", "中", "低"}
 VALID_REVIEW = {"高", "中", "低"}
 

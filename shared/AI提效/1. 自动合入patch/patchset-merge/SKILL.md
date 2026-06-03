@@ -217,7 +217,7 @@ mkdir -p "$KERNEL_REPO_PATH/patch_analysis"
 |------|------|-----|
 | [1] | 检查 `$KERNEL_REPO_PATH/.config` 存在 → 继续 | `{"option": 1}` |
 | [2] | 用户输入路径 → `cp <path> $KERNEL_REPO_PATH/.config` → `make ARCH=$KERNEL_ARCH olddefconfig` | `{"option": 2, "full_config_path": "<用户输入的路径>"}` |
-| [3] | a. 扫描 `$KERNEL_REPO_PATH/arch/$KERNEL_ARCH/configs/*` 列出让用户选<br>b. 用户提供增量 config 文件路径<br>c. `$KERNEL_REPO_PATH/scripts/kconfig/merge_config.sh -O "$KERNEL_REPO_PATH" <base> <incremental>`<br>d. `make ARCH=$KERNEL_ARCH olddefconfig` | `{"option": 3, "base_config": "<选中的基础config>", "incremental_path": "<用户输入的路径>"}` |
+| [3] | a. 扫描 `$KERNEL_REPO_PATH/arch/$KERNEL_ARCH/configs/*` 列出让用户选基础 config<br>b. 再次扫描同目录列出增量 config，末尾加 `[0] 手动输入外部文件路径` 供用户自由输入<br>c. `$KERNEL_REPO_PATH/scripts/kconfig/merge_config.sh -O "$KERNEL_REPO_PATH" <base> <incremental>`<br>d. `make ARCH=$KERNEL_ARCH olddefconfig` | `{"option": 3, "base_config": "<选中的基础config>", "incremental_path": "<选中的增量或用户输入的路径>"}` |
 
 **偏好保存**（选项 2/3 执行成功后）：
 
@@ -939,6 +939,10 @@ PRECHECK → PRE_REVERT → APPLY → VERIFY_INTENT → BUILD (checkpoint only) 
 
 - `build_checkpoint=true` → 完整执行 BUILD→verify→gatekeeper
 - `build_checkpoint=false` → 跳过 BUILD，直接进入 COMMIT
+
+> **⚠️ `build_checkpoint=false` 不是 "skip patch"！patch 本身仍然走完整流程：**
+> `PRECHECK → PRE_REVERT → APPLY → VERIFY_INTENT → [BUILD SKIP] → COMMIT → REVIEW → RECORD`
+> 代码仍然会合入并 commit，只是不在此点编译。后续 checkpoint 编译时会一并验证前面所有已合入的 patch。
 
 ### 通用模式
 

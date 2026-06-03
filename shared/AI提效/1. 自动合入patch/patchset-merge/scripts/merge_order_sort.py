@@ -146,7 +146,7 @@ def build_report(original_merge: list, sorted_merge: list,
         elif is_dep:
             action = "dep"
         else:
-            action = t.get("action", "apply")
+            action = "apply"  # 禁止从 task 读取（硬编码）
         subject = t.get("subject", "")[:40]
         lines.append(f"{seq:<5} {tid:<10} {action:<8} {subject}")
 

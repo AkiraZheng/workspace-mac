@@ -46,17 +46,30 @@ from datetime import datetime, timezone
 
 
 STEP_ORDER = ["PRECHECK", "PRE_REVERT", "APPLY", "VERIFY_INTENT", "BUILD", "COMMIT", "REVIEW", "RECORD", "DONE"]
-STEP_PRE_REQUISITES = {
+STEP_PRE_REQUISITES_STATIC = {
     "PRE_REVERT": [],
     "APPLY": [],
     "VERIFY_INTENT": ["APPLY"],
     "BUILD": [],
-    "COMMIT": ["BUILD"],
     "REVIEW": ["COMMIT"],
     "RECORD": ["REVIEW"],
     "DONE": ["BUILD", "COMMIT"],
     "PRECHECK": [],
 }
+
+
+def get_required_steps(task: dict, step: str) -> list[str]:
+    """动态获取前置步骤（根据 build_checkpoint 调整）
+    
+    核心修复：build_checkpoint=false 的 task 不需要 BUILD 前置
+    """
+    if step == "COMMIT":
+        # build_checkpoint=false 不需要 BUILD 前置
+        if task.get("build_checkpoint") == False:
+            return []
+        else:
+            return ["BUILD"]
+    return STEP_PRE_REQUISITES_STATIC.get(step, [])
 
 WORKFLOW_HINTS = {
     "BUILD_FIX": (
@@ -112,8 +125,9 @@ def has_step_passed(state_log: list[dict], step: str) -> bool:
     return False
 
 
-def check_prerequisites(state_log: list[dict], step: str) -> bool:
-    required = STEP_PRE_REQUISITES.get(step, [])
+def check_prerequisites(task: dict, state_log: list[dict], step: str) -> bool:
+    """检查前置步骤是否完成（动态根据 build_checkpoint 调整）"""
+    required = get_required_steps(task, step)
     missing = [s for s in required if not has_step_passed(state_log, s)]
     if missing:
         print(f"[GATEKEEPER] 门禁未通过: 缺少前置步骤 {', '.join(missing)} 的 pass 记录",
@@ -179,7 +193,7 @@ def do_check(args):
 
     state_log = ensure_state_log(task)
 
-    if check_prerequisites(state_log, args.step):
+    if check_prerequisites(task, state_log, args.step):
         # 检查当前 step 是否也已经 pass（幂等）
         if has_step_passed(state_log, args.step):
             print(f"[GATEKEEPER] ✅ {args.step} 已通过，可继续")

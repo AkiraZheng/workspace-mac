@@ -141,8 +141,8 @@ def build_merge_tasks(analysis: dict, duplicates: dict,
             "功能分类": ac.get("功能分类", "core"),
             "introduced_symbols": ac.get("introduced_symbols", []),
             "referenced_symbols": ac.get("referenced_symbols", []),
-            "action": ac.get("action", "apply"),
-            "skip_reason": ac.get("skip_reason", ""),
+            "action": "apply",  # 硬编码，禁止 skip（所有 patch 必须合入）
+            "skip_reason": "",  # 保留字段，不再使用
             "pre_revert": pre_revert,
             "depends_on": ac.get("depends_on", []),
             "risk_level": ac.get("risk_level", "中"),
