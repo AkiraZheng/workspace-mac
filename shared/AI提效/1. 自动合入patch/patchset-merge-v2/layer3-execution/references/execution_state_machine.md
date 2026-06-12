@@ -1,0 +1,1 @@
+# Execution State Machine\n\n状态机流程：PRECHECK → PRE_REVERT → APPLY → VERIFY_INTENT → BUILD → COMMIT → REVIEW → RECORD → DONE

@@ -1,0 +1,862 @@
+# 输出模板定义
+
+## analyse.md 固定模板
+
+复制以下模板，将 `{占位符}` 替换为实际值。Phase 2 落盘时使用。
+
+```markdown
+# Patch {补丁编号}: {补丁标题}
+
+## 1. 基本信息
+| 项 | 值 |
+|----|-----|
+| 来源 commit | {上游提交} |
+| 作者 | {作者} |
+| 涉改文件数 | {文件数} |
+| 合入状态 | {合入状态} |
+
+## 2. 功能描述与关联模块
+
+{功能描述}
+关联模块：{关联模块}
+
+## 3. 依赖分析
+
+### 3.1 高版本依赖（上游版本差异）
+{高版本依赖}
+<!-- 如无，填写：未找到依赖 -->
+
+### 3.2 Bugfix 依赖（git blame 追溯）
+{bugfix 依赖}
+<!-- 如无，填写：未找到 blame 记录 -->
+
+### 3.3 前置 patch 依赖（本 patchset 内）
+{内部依赖}
+<!-- 如无，填写：无内部依赖 -->
+
+### 3.4 目标仓库重复/等效 patch
+{重复检测}
+<!-- 如无，填写：未找到重复 patch -->
+<!-- 若有：精确重复: <commit_hash> | 高概率等效: <commit_hash>:<原因> | 可能冲突: <原因> -->
+
+## 4. Revert 需求评估
+
+| 必要性等级 | {revert 等级} |
+|-----------|-------------|
+| 要 revert 的 commit | {revert 提交列表} |
+| 理由 | {revert 理由} |
+
+## 5. 风险程度
+
+**{风险等级}**
+{风险详述}
+
+## 6. 人工 Review 需求度
+
+**{review 需求}**
+{review 理由}
+
+## 7. 建议验证冒烟内容
+{验证项}
+
+## 8. 合入实际经验
+（Phase 2 完成后填充，包含冲突解决过程、编译修复记录、重试次数）
+
+- 冲突解决：{冲突详情}
+- 编译修复：{编译修复详情}
+- 重试次数：冲突 {冲突轮数} 次 / 编译 {编译轮数} 次
+
+## 9. 与源 Patch/Commit 的差异对比
+
+**对比对象**：
+- **merge 场景**：原始 `.patch` 文件（下载的 patch 意图）vs 合入后的 commit（`git show <commit>` 的实际落地的代码）
+- **revert 场景**：被 revert 的原 commit（回退目标）vs revert commit（回退操作产生的 commit）
+
+**输出焦点**：只展示偏离部分，不重复完整内容。由 `scripts/generate_diff_report.py` 生成。
+
+**脚本调用**：
+```bash
+# merge 场景
+python3 scripts/generate_diff_report.py \
+  --source "patch:/tmp/patches/0001-xxx.patch" \
+  --target <commit_hash> --repo-path "$KERNEL_REPO_PATH" \
+  --execution-log "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "0001"
+
+# revert 场景（镜像对比）
+python3 scripts/generate_diff_report.py \
+  --source "commit:<被_revert_的_commit>" \
+  --target <revert_commit_hash> --repo-path "$KERNEL_REPO_PATH" \
+  --mode revert \
+  --execution-log "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json" \
+  --task-id "0001"
+```
+
+**偏离类型标注**：
+- 源有目标无：patch/原 commit 有此行，实际 commit 无（因冲突跳过/被删除）
+- 目标有源无：实际 commit 有此行，源 patch/原 commit 无（因适配新增/git am 自动调整）
+- revert 模式：源添加→目标应删除，源删除→目标应恢复（镜像匹配）
+
+**根因分析**：
+偏离标注后会从 execution_log 中提取根因（来自 Phase 2 的合入经验：冲突解决过程/编译修复记录/适配原因）。
+
+```diff
+{差异对比内容，由 generate_diff_report.py 生成}
+```
+
+## 10. 编译验证记录
+
+```
+编译命令结果：
+  错误数: {错误数量}
+  产物: {产物路径及状态}
+  重试: {编译轮数} 次
+```
+
+## 11. Review 建议与改进方向
+（Phase 3 汇总时由主 Agent 填入，基于对 patch 的深度理解）
+
+### 功能改进建议
+{功能改进}
+<!-- 如无，填写：无 -->
+
+### 潜在 Bug 提示
+{潜在 bug}
+<!-- 基于 blame 追溯和依赖分析标记的隐患 -->
+<!-- 如无，填写：无 -->
+
+### 代码质量建议
+{代码质量}
+<!-- 代码结构、命名、错误处理、锁使用等 -->
+<!-- 如无，填写：无 -->
+
+### 适配建议
+{适配建议}
+<!-- 针对目标仓库的适配注意事项，如后续 clean-up、upstream 跟进等 -->
+<!-- 如无，填写：无 -->
+```
+
+## summary.md 固定模板
+
+Phase 3 汇总落盘时使用，由主 Agent 读取所有 analyse.md 后填入。
+
+```markdown
+# Patchset Merge 汇总报告
+
+## 基本信息
+| 项 | 值 |
+|----|-----|
+| 来源 | {来源} |
+| Patch 总数 | {总数} |
+| 合入成功 | {成功数} |
+| 跳过 | {跳过数} |
+| 失败 | {失败数} |
+| 目标分支 | {分支} |
+| 操作时间 | {开始时间} ~ {结束时间} |
+
+## 合入顺序与状态
+| 序号 | Patch | 状态 | 风险 | Review | 备注 |
+|-----|-------|------|------|--------|------|
+{合入状态表格}
+
+## 依赖关系图
+{依赖关系}
+
+## Revert 记录
+| Commit | 原因 | 关联 Patch |
+|--------|------|-----------|
+{revert 记录}
+
+## 编译验证总览
+| Patch | 编译结果 | 错误数 | 修复次数 |
+|-------|---------|-------|---------|
+{编译总览}
+
+## 跨 Patch 修复记录
+{跨 patch 修复}
+
+## 目标仓库重复 patch 汇总
+{重复 patch 汇总}
+
+## 全局改进建议
+（主 Agent 汇总各 patch 第 11 节的建议，去重提炼）
+
+### 高优先级
+{高优建议}
+<!-- 跨 patch 共性问题，建议优先处理 -->
+
+### 中优先级
+{中优建议}
+<!-- 单个 patch 的关键改进 -->
+
+### 低优先级 / 长期
+{低优建议}
+<!-- 代码风格统一、upstream 跟进等 -->
+
+## 全局风险汇总
+- 高风险 patch：{高风险列表}
+- 建议重点人工 review：{review 推荐列表}
+
+## 待处理事项
+{待处理}
+```
+
+## merge_tasks.json 固定 Schema
+
+Phase 1.5 主 Agent 生成，Phase 2 merge agent 消费。**必须严格按此 schema，不可自行增减或重命名字段。**
+
+> **存储路径**：`$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json`
+> **辅助文件**：`$KERNEL_REPO_PATH/patch_analysis/analysis_cache.json`
+
+```json
+{
+  "patchset_info": {
+    "source": "<来源描述>",
+    "download_method": "b4|wget|local",
+    "total_patches": 5,
+    "target_kernel": "$KERNEL_REPO_PATH",
+    "target_branch": "$KERNEL_BRANCH",
+    "build_target": "$BUILD_CMD"
+  },
+  "workflow_hints": {
+    "BUILD_FIX": "只修改 patch 相关文件；config 问题临时修改后 git restore；错误超过 10 个时暂停等待用户决策",
+    "COMMIT_ORDER": "必须按 merge_order 顺序，每个 patch 一个 commit",
+    "REVERT_POLICY": "逆序 revert（最新→最旧），每 revert 一个就 commit 一个",
+    "BUILD_REQUIREMENT": "编译整个仓库 $BUILD_CMD -j$(nproc)，error=0 + 产物存在"
+  },
+  "current_state": null,
+  "global_revert_order": [
+    {
+      "pr_id": "PR #123",
+      "pr_url": "https://github.com/torvalds/linux/pull/123",
+      "subject": "HDBSS 功能系列",
+      "commits": ["abc123", "def456"],
+      "commit_count": 2,
+      "revert_strategy": "整体 revert PR #123",
+      "revert_cmd": "git revert --ancestry-path abc123^..def456",
+      "urgency": "必须",
+      "related_patches": ["0001", "0003"]
+    }
+  ],
+  "deps_order": [
+    {
+      "seq": 1,
+      "task_id": "dep-001",
+      "source_pr": "PR #456",
+      "status": "pending",
+      "patch_file": "/tmp/patches/deps/0001-dep.patch",
+      "subject": "stage2 页表重构",
+      "author": "upstream author",
+      "files_changed": ["file1.c"],
+      "功能分类": "core",
+      "introduced_symbols": ["stage2_set_pte", "stage2_get_level"],
+      "referenced_symbols": ["kvm_pte_to_phys"],
+      "action": "apply",
+      "skip_reason": null,
+      "pre_revert": [],
+      "depends_on": [],
+      "risk_level": "低",
+      "review_required": "低",
+      "blame_hits": [],
+      "duplicate_info": {"level": "无重复", "detail": ""},
+      "conflicts_predicted": [],
+      "special_notes": "上游依赖，Phase 1.5 步骤 6 拉取",
+      "pr_mapping": {},
+      "execution_log": []
+    }
+  ],
+  "merge_order": [
+    {
+      "seq": 1,
+      "task_id": "0001",
+      "status": "pending",
+      "patch_file": "/tmp/patches/0001-xxx.patch",
+      "subject": "patch subject",
+      "author": "patch author",
+      "files_changed": ["file1.c", "file2.h"],
+      "功能分类": "driver",
+      "introduced_symbols": ["kbase_reg_write", "HDBSS_ENABLE_BIT"],
+      "referenced_symbols": ["kvm_stage2_get_level"],
+      "action": "apply",
+      "skip_reason": null,
+      "pre_revert": [],
+      "depends_on": [],
+      "risk_level": "低",
+      "review_required": "低",
+      "blame_hits": [],
+      "duplicate_info": {"level": "无重复", "detail": ""},
+      "conflicts_predicted": [],
+      "special_notes": "",
+      "build_checkpoint": false,
+      "pr_mapping": {
+        "upstream_deps": [
+          {
+            "pr_id": "PR #456",
+            "pr_url": "https://github.com/torvalds/linux/pull/456",
+            "commits": ["dep-abc"],
+            "cover_letter_msgid": "xxx@lore.kernel.org",
+            "download_cmd": "b4 am xxx@lore.kernel.org",
+            "reason": "缺失函数 stage2_try_set_pte"
+          }
+        ],
+        "bugfix_deps": [
+          {
+            "pr_id": "独立 commit",
+            "commits": ["fix-ghi789"],
+            "reason": "修复空指针"
+          }
+        ],
+        "revert_candidates": [
+          {
+            "pr_id": "PR #456",
+            "commits": ["local-abc", "local-def"],
+            "subject": "本地 HDBSS 实现",
+            "revert_cmd": "git revert --ancestry-path local-abc^..local-def",
+            "urgency": "必须"
+          }
+        ]
+      },
+      "execution_log": []
+    }
+  ]
+}
+```
+
+### 字段说明
+
+| 字段 | 必填 | 类型 | 说明 |
+|------|:--:|------|------|
+| `seq` | ✓ | int | 执行序号，merge agent 严格按此升序执行 |
+| `task_id` | ✓ | string | 补零 4 位（如 `"0001"`）或 `dep-001`~`dep-00N`（依赖 patch） |
+| `status` | ✓ | string | `pending` / `in_progress` / `done` / `blocked` / `skipped` / `failed` |
+| `patch_file` | ✓ | string | .patch 文件的绝对路径 |
+| `subject` | ✓ | string | patch 标题 |
+| `author` | ✓ | string | patch 作者 |
+| `files_changed` | ✓ | list | 涉改文件路径列表 |
+| `功能分类` | ✓ | string | Phase 1 分析判定的功能分类（infra/core/driver/fs/net/sound/doc/bugfix） |
+| `introduced_symbols` | ✓ | list | 本 patch 新增/修改的函数名、宏名、类型名，用于跨 patch 依赖统计和 checkpoint 计算 |
+| `referenced_symbols` | ✓ | list | 本 patch 调用/引用的符号，用于依赖统计 |
+| `action` | ✓ | string | `apply`（需要合入）或 `skip`（跳过） |
+| `skip_reason` | - | string/null | 若 action=skip，必须填写具体原因；否则 null |
+| `pre_revert` | ✓ | list | 需先 revert 的本地 commit hash（**必须是单个 commit hash，禁止 merge commit hash**） |
+| `depends_on` | ✓ | list | 前置 task_id 列表（可跨 deps_order / merge_order） |
+| `risk_level` | ✓ | string | `高` / `中` / `低` |
+| `review_required` | ✓ | string | `高` / `中` / `低` |
+| `blame_hits` | ✓ | list | bugfix commit 列表 |
+| `duplicate_info` | ✓ | dict | `{"level": "无重复|高匹配|中匹配", "detail": "...", "similarity_score": 95.0, "matched_commit": "abc123", "pr_id": "PR #123"}` |
+| `conflicts_predicted` | ✓ | list | 预判冲突点 |
+| `special_notes` | ✓ | string | 合入注意事项 |
+| `build_checkpoint` | ✓ | bool | 是否在此 patch 点做编译验证（Phase 1.5 步骤 8 判定） |
+| `checkpoint_reason` | - | dict | Phase 1.5 步骤 8 产物，checkpoint 判定依据：`{rules_triggered, primary_reason, excluded, forced_by, reverse_dep_detail}` |
+| `pr_mapping` | ✓ | dict | PR 映射聚合（见下方 pr_mapping 字段说明） |
+| `execution_log` | ✓ | list | 初始 `[]`，Phase 2 RECORD 步骤手动追加（冲突/编译修复细节） |
+| `state_log` | ✓ | list | gatekeeper 自动追加 `[{step, time, result, error_count, product, build_target, module_dirs, module_count, commit}]`（仅 `build_checkpoint=true` 时有 BUILD 记录） |
+
+> **state_log BUILD 记录语义**：
+> - `build_checkpoint=true` → gatekeeper 记录 BUILD pass/fail（真编译）
+> - `build_checkpoint=false` → **不调用 gatekeeper BUILD**，state_log 无 BUILD 记录
+> - 判断是否真的编译：`state_log` 有 `{"step":"BUILD","result":"pass"}` 记录 ←→ 确实编译过
+>
+> **state_log BUILD 记录格式**：
+> ```json
+> {
+>   "step": "BUILD",
+>   "time": "2025-05-27T15:00:00Z",
+>   "result": "pass",
+>   "error_count": 0,
+>   "product": "arch/arm64/boot/Image",
+>   "build_target": "Image modules",
+>   "module_dirs": ["drivers/gpu/drm"],
+>   "module_count": 5
+> }
+> ```
+> - `build_target`：`"Image"` 或 `"Image modules"`（来自 detect_build_target.sh）
+> - `module_dirs`：编译的模块目录列表（仅 `build_target=Image modules` 时有）
+> - `module_count`：`.ko` 文件总数
+
+### pr_mapping 字段说明
+
+| 字段 | 必填 | 说明 |
+|------|:--:|------|
+| `upstream_deps` | ✓ | 上游依赖 PR/commit 列表，Phase 1.5 步骤 6 用于拉取 |
+| `bugfix_deps` | ✓ | bugfix 依赖 PR/commit 列表 |
+| `revert_candidates` | ✓ | 本地需 revert 的 PR/commit 列表 |
+
+每个条目包含：
+
+| 字段 | 必填 | 说明 |
+|------|:--:|------|
+| `pr_id` | ✓ | PR 编号（如 `"PR #123"`）或 `"独立 commit"` |
+| `pr_url` | - | PR 链接（若有） |
+| `commits` | ✓ | 该 PR/分组包含的 commit hash 列表 |
+| `cover_letter_msgid` | - | lore.kernel.org 的 cover letter message-id |
+| `download_cmd` | - | 推荐的拉取命令（如 `b4 am xxx`） |
+| `revert_cmd` | - | 推荐的 revert 命令（仅 revert_candidates） |
+| `subject` | - | PR/subject 描述 |
+| `reason` | ✓ | 依赖/revert 原因 |
+| `urgency` | ✓ | `必须` / `建议` / `无须`（仅 revert_candidates） |
+
+### 顶层字段说明
+
+| 字段 | 必填 | 说明 |
+|------|:--:|------|
+| `patchset_info` | ✓ | 来源/目标/架构等基本信息 |
+| `workflow_hints` | ✓ | 关键流程提示（压缩后恢复上下文用，初始由 gatekeeper 自动注入） |
+| `current_state` | ✓ | 当前执行状态（null 或 `{"phase","task_id","step","status","last_update"}`；gatekeeper 自动管理） |
+| `global_revert_order` | ✓ | PR 聚合的全局 revert 列表，Phase 2 PRE_REVERT 阶段消费 |
+| `deps_order` | ✓ | 上游依赖 patch 列表（初始 `[]`），Phase 1.5 步骤 6 填充 |
+| `merge_order` | ✓ | 主体合入任务列表，Phase 2 主要消费 |
+
+### current_state 字段说明
+
+| 字段 | 说明 |
+|------|------|
+| `phase` | 当前阶段（如 `PHASE_2_MERGE`） |
+| `task_id` | 当前 task_id（如 `0003`） |
+| `step` | 当前步骤（`BUILD`/`COMMIT`/`REVIEW`/`DONE`） |
+| `status` | `in_progress`/`pass`/`fail` |
+| `last_update` | 最后更新时间（ISO 8601） |
+
+**恢复机制**：
+```
+# Phase 0 或任务启动时检查
+python3 gatekeeper.py --merges-file merge_tasks.json --restore
+# exit 10 → 有未完成工作，需要恢复
+# exit 0  → 无未完成工作
+
+# 恢复后清除标记
+python3 gatekeeper.py --merges-file merge_tasks.json --restore --clear
+```
+
+**Phase 2 执行顺序**：先遍历 `deps_order`（若有），再遍历 `merge_order`，各自按 `seq` 升序。
+
+## analysis_cache.json 固定 Schema
+
+L1 `extract_patch_symbols.py` 生成骨架 → agent_analysis 读取并补全语义字段 → Write 写回。
+
+```json
+{
+  "0001": {
+    "subject": "arm64/sysreg: Add HDBSS related register information",
+    "introduced_symbols": ["HDBSSBR_EL2", "HDBSS_EL2"],
+    "referenced_symbols": ["sys_reg", "read_sysreg"],
+    "changed_files": ["arch/arm64/include/asm/sysreg.h", "arch/arm64/tools/sysreg"],
+    "功能分类": "infra",
+    "feature_signature": {
+      "keywords": ["HDBSS", "FEAT_HDBSS", "Hardware Dirty Bit"],
+      "scope_dirs": ["arch/arm64/kvm/", "arch/arm64/include/", "arch/arm64/tools/"]
+    },
+    "depends_on": [],
+    "risk_level": "中",
+    "review_required": "中",
+    "blame_hits": [],
+    "conflicts_predicted": [],
+    "special_notes": "",
+    "action": "apply",
+    "skip_reason": ""
+  }
+}
+```
+
+### 字段说明
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| `subject` | L1 脚本 | patch 标题 |
+| `introduced_symbols` | L1 脚本 | 本 patch 新增/修改的符号列表 |
+| `referenced_symbols` | L1 脚本 | 本 patch 引用/调用的符号列表 |
+| `changed_files` | L1 脚本 | 涉改文件路径列表 |
+| `功能分类` | L1 → agent_analysis 修正 | infra/core/driver/fs/net/sound/doc/bugfix |
+| `feature_signature.keywords` | agent_analysis | AI 语义关键词（非机械截取） |
+| `feature_signature.scope_dirs` | agent_analysis | 限定搜索范围目录 |
+| `depends_on` | agent_analysis | 前置 task_id 列表（P_j 依赖 P_i 的符号） |
+| `risk_level` | agent_analysis | 高/中/低 |
+| `review_required` | agent_analysis | 高/中/低 |
+| `blame_hits` | agent_analysis | git blame 追溯的 bugfix commit 列表 |
+| `conflicts_predicted` | agent_analysis | 预判冲突点（文件:行号:原因） |
+| `special_notes` | agent_analysis | 合入注意事项 |
+| `action` | agent_analysis | apply/skip |
+| `skip_reason` | agent_analysis | 若 skip，必须填写原因 |
+
+### 功能分类规则
+
+| 分类 | 判定规则 | 示例路径 |
+|------|---------|---------|
+| `infra` | `include/linux/*.h`, `include/uapi/*.h`, `arch/*/include/`, diff 中 `#define`/`typedef`/`struct` 定义行占比 > 30% | `include/linux/kvm_host.h` |
+| `core` | `kernel/`, `mm/`, `arch/*/kernel/`, `arch/*/mm/`, `init/` | `kernel/sched/core.c` |
+| `driver` | `drivers/`, `arch/*/mach-*/` | `drivers/gpu/arm/` |
+| `fs` | `fs/`, `include/linux/fs*.h` | `fs/ext4/` |
+| `net` | `net/`, `include/linux/net*.h`, `include/net/` | `net/core/dev.c` |
+| `sound` | `sound/`, `include/sound/` | `sound/soc/` |
+| `doc` | `Documentation/`, commit message 含 "doc"/"comment"/"documentation" | `Documentation/kvm/` |
+| `bugfix` | commit message 含 "fix"/"bug"/"error"/"patch"/"Fixes:" 且独立于特性系列 | 修复补丁 |
+
+---
+
+## revert_audit.json Schema（★ agent_revert 输出）
+
+agent_revert 审核 L1 的 revert 候选后，用 Write tool 写入此文件。
+
+```json
+{
+  "revert_rulings": {
+    "PR!15754": {
+      "ruling": "confirm",
+      "note": "包含 HDBSS feature 全部 6 个子 commit，覆盖率 85.7%，建议整体 revert",
+      "revert_cmd": "git revert -m 1 fe4fa7481191"
+    },
+    "PR!17748": {
+      "ruling": "confirm",
+      "note": "HDBSS 内存泄漏修复 + NVHE 不支持清理，需 revert 为 v3 让路",
+      "revert_cmd": "git revert -m 1 b1d8169dd540"
+    },
+    "独立abc": {
+      "ruling": "reject",
+      "note": "这是无关的格式化修改，不是旧版本实现"
+    }
+  },
+  "patch_pre_revert": {
+    "0001": ["fe4fa7481191"],
+    "0002": ["fe4fa7481191"],
+    "0003": ["fe4fa7481191"],
+    "0004": ["fe4fa7481191"],
+    "0005": ["fe4fa7481191"]
+  },
+  "ruling_summary": "确认 2 个 PR revert (fe4fa7481191 + b1d8169dd540)，拒绝 1 个无关 commit"
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `revert_rulings.<pr_id>.ruling` | confirm（确认 revert）/ reject（驳回） |
+| `revert_rulings.<pr_id>.note` | AI 判断理由（1-2 句话） |
+| `revert_rulings.<pr_id>.revert_cmd` | AI 确定的 revert 命令（GPT 模型判断 merge 用 -m 1） |
+| `patch_pre_revert.<task_id>` | 每个 patch 需要 revert 的 commit hash 列表 |
+| `ruling_summary` | 一句话总结 |
+
+---
+
+## Phase 1 分析 Agent 屏幕输出格式（⚠️ 已废弃）
+
+> **注意**：L2 Agent 现在直接 Write JSON 文件（见上方的 `analysis_cache.json` + `revert_audit.json`），
+> 不再使用此屏幕输出格式。此节保留仅作备份参考。
+
+分析 Agent 不写文件，用以下结构化格式输出到屏幕（供主 Agent 解析）：
+
+```
+[PATCH-0001]
+描述=功能描述
+模块=关联模块（逗号分隔）
+功能分类=infra|core|driver|fs|net|sound|doc|bugfix
+风险=高|中|低
+风险详述=具体风险点
+revert=必须|建议|无须 | commit_hash1,commit_hash2
+revert理由=原因
+依赖=缺失符号1:commit_hash1;缺失符号2:commit_hash2
+blame记录=commit_hash1 (类型):描述;commit_hash2 (类型):描述
+重复检测=无重复|高匹配:hash(PR_id,相似度%);中匹配:hash(PR_id,相似度%)
+review需求=高|中|低
+review理由=原因
+验证项=验证点1;验证点2
+验证点=待定|false
+```
+
+### 字段说明
+
+| 字段 | 格式 | 示例 |
+|------|------|------|
+| 描述 | 一句话中文描述 | KVM arm64 引入 5 级页表 stub |
+| 模块 | 逗号分隔 | KVM,mmu,stage-2 |
+| 功能分类 | infra/core/driver/fs/net/sound/doc/bugfix | core |
+| 风险 | 高/中/低 | 中 |
+| 风险详述 | 1-2 句话 | 涉及页表遍历核心路径 |
+| revert | 等级 \| hash列表 | 建议 \| abc123,def456 |
+| revert理由 | 一句话 | 本地已实现该功能 |
+| 依赖 | 符号:commit;符号:commit | kvm_stage2_get_level:abc123; |
+| blame记录 | hash (类型):描述; | def789 (bugfix):修复空指针 |
+| 重复检测 | 等级:详情 | 精确重复:abc123 |
+| review需求 | 高/中/低 | 高 |
+| review理由 | 一句话 | 页表级别变更需人工确认 |
+| 验证项 | 分号分隔 | 启动 qemu 验证 KVM;检查 stage-2 页表 |
+| 验证点 | 待定/false | 待定（基础设施 patch，等 Phase 1.5 统计依赖数后最终确定） |
+
+## Phase 1.5 全局预览模板（展示给用户确认）
+
+Phase 1 分析和 Phase 1.5 汇总完成后，主 Agent 将以下 4 个部分结构化输出到屏幕，供用户确认后再进入 Phase 2。
+
+---
+
+### 第 1 部分：依赖 Patch 汇总
+
+列出 patchset 所有依赖项（外部依赖 + 内部依赖 + bugfix 依赖），**优先按 PR 聚合展示**：
+
+```
+═══════════════════════════════════════════════
+  依赖 Patch 汇总（PR 聚合）
+═══════════════════════════════════════════════
+
+[外部依赖] 需要从上游合入的前置 patch（按 PR 聚合）：
+
+┌──────────────┬──────────────────────────────────────────────────────┐
+│ PR #123      │ stage2 页表重构系列（含 3 个 commit）               │
+│ github.com/..│ 原因: 缺失函数 stage2_try_set_pte 等                │
+├──────────────┼──────────────────────────────────────────────────────┤
+│ 包含 commit: │ - abc123: "arm64: mmu: refactor stage2 page table"   │
+│              │ - def456: "arm64: add stage2_try_set_pte helper"    │
+│              │ - ghi789: "arm64: use stage2_try_set_pte in KVM"    │
+│ 推荐拉取:    │ b4 am 2024xxx@lore.kernel.org                       │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+┌──────────────┬──────────────────────────────────────────────────────┐
+│ [独立 commit]│ commit-jkl012                                        │
+│              │ 原因: 缺失宏 VTCR_EL2_HDBSS                          │
+│ 推荐拉取:    │ cherry-pick jkl012                                   │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+[内部依赖] patchset 内部依赖链：
+
+┌──────────┬──────────┬──────────────────────────────┐
+│ Patch    │ 依赖     │ 原因                         │
+├──────────┼──────────┼──────────────────────────────┤
+│ 0003     │ 0001     │ 引用 0001 引入的 sysreg 宏   │
+│ 0004     │ 0001,    │ 调用 0003 的函数 +          │
+│          │ 0003     │ 依赖 0001 的寄存器定义       │
+└──────────┴──────────┴──────────────────────────────┘
+
+[Bugfix 依赖] 目标仓库已存在但需回溯的 bugfix（按 PR 聚合）：
+
+┌──────────────┬──────────────────────────────────────────────────────┐
+│ PR #456      │ KVM 内存泄漏修复系列（含 2 个 commit）               │
+├──────────────┼──────────────────────────────────────────────────────┤
+│ 包含 commit: │ - mno345: "KVM: fix memory leak in stage2"          │
+│              │ - pqr678: "KVM: add cleanup helper"                 │
+│ 推荐拉取:    │ cherry-pick mno345..pqr678                          │
+└──────────────┴──────────────────────────────────────────────────────┘
+
+📋 拉取策略推荐：
+   [优先] 含 PR 的 → b4 am <cover-letter-msgid> 或 cherry-pick <range>
+   [备选] 独立 commit → 逐个 cherry-pick
+
+   确认"继续"后将自动执行拉取，结果写入 deps_order。
+```
+
+---
+
+### 第 2 部分：Revert 清单（PR 聚合 + 逆序）
+
+列出所有需回退的本地 commit，**优先按 PR 聚合，组内按 commit 时间逆序**：
+
+```
+═══════════════════════════════════════════════
+  Revert 清单（PR 聚合）
+═══════════════════════════════════════════════
+
+  执行顺序（从上到下，PR 内部逆序）：
+
+┌──────┬──────────────┬──────────────────────────────────┬──────────────┬──────────┐
+│ 序号 │ PR / Commit  │ Subject                          │ 关联 Patch   │ 紧急度   │
+├──────┼──────────────┼──────────────────────────────────┼──────────────┼──────────┤
+│  1   │ PR #123      │ HDBSS 功能系列（3 commits）      │ 0001-0005    │ 必须     │
+│      │   └ abc123   │   └ HDBSS 初始实现 v2           │              │          │
+│      │   └ def456   │   └ 添加 HDBSS sysreg           │              │          │
+│      │   └ ghi789   │   └ KVM 集成 HDBSS              │              │          │
+│      │ revert_cmd:  │ git revert --ancestry-path       │              │          │
+│      │              │   abc123^..ghi789                │              │          │
+├──────┼──────────────┼──────────────────────────────────┼──────────────┼──────────┤
+│  2   │ [独立]       │ 修复 HDBSS 内存泄漏              │ 0004         │ 建议     │
+│      │   jkl012     │                                  │              │          │
+│      │ revert_cmd:  │ git revert jkl012                │              │          │
+└──────┴──────────────┴──────────────────────────────────┴──────────────┴──────────┘
+
+  Revert 策略说明：
+  - PR #123: 整个 PR 一次性 revert
+    → git revert --ancestry-path abc123^..ghi789
+  - [独立] jkl012: 单独 revert
+    → git revert jkl012
+```
+
+---
+
+### 第 3 部分：合入计划预览
+
+展示完整的合入计划（merge_order 的可视化）：
+
+```
+═══════════════════════════════════════════════
+  合入计划
+═══════════════════════════════════════════════
+
+┌─────┬────────┬──────────┬────────┬────────┬────────┬────────────┬──────────────────────────────┐
+│ Seq │ Patch  │ Subject  │ Action │ 风险   │ Review │ 编译验证点 │ 备注                         │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  1  │ 0001   │ HDBSS    │ apply  │ 低     │ 低     │ ✅         │ 预判冲突: sysreg 新增条目     │
+│     │        │ 寄存器   │        │        │        │            │                              │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  2  │ 0002   │ DBM 属性 │ skip   │ —      │ —      │ —          │ 原因: 目标仓库已完全实现      │
+│     │        │ 支持     │        │        │        │            │                              │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  3  │ 0003   │ FEAT     │ apply  │ 中     │ 中     │ —          │ 依赖: 0001                   │
+│     │        │ cpufeat  │        │        │        │            │ 预判冲突: cpufeature.c 注册   │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  4  │ 0004   │ HDBSS    │ skip   │ —      │ 高     │ —          │ 原因: 结构性冲突 10+ 维度     │
+│     │        │ 核心实现 │        │        │        │            │                              │
+├─────┼────────┼──────────┼────────┼────────┼────────┼────────────┼──────────────────────────────┤
+│  5  │ 0005   │ ioctl    │ apply  │ 低     │ 低     │ ✅         │ 依赖: 0003                   │
+│     │        │ 文档     │        │        │        │            │                              │
+└─────┴────────┴──────────┴────────┴────────┴────────┴────────────┴──────────────────────────────┘
+
+  统计: apply X | skip Y | 高/中/低风险 Z/W/V
+  编译验证点: ✅=3 个（0001: 基础设施（规则1）; 0004: 功能模块最后（规则6）; 0005: 末 patch 强制（规则4）
+
+⚠️  高关注项：
+  - 0004 跳过但 review 紧急性=高，若后续发现缺失功能，需重新评估
+  - 0003 cpufeature 变更需确认目标内核的 is_kernel_in_hyp_mode() 逻辑
+```
+
+---
+
+### 第 4 部分：反向依赖处理方案选择（仅存在反向依赖时展示）
+
+展示 topo_sort.py 检测到的反向依赖关系，让用户选择处理方案：
+
+```
+═══════════════════════════════════════════════
+  反向依赖处理方案选择
+═══════════════════════════════════════════════
+
+发现反向依赖（前面的 patch 引用后面 patch 的符号）：
+  #1 0001 引用 #3 0003 的符号: func_a
+
+这可能导致 0001 所在 checkpoint 编译失败（符号未定义）。
+默认方案：保持原始顺序，通过 checkpoint 机制解决。
+
+┌──────┬────────┬──────────────────────────────────────────────┐
+│ 方案 │ 执行顺序       │ checkpoint 分布                       │
+├──────┼───────┼──────────────────────────────────────────────┤
+│ [1]  │ 0001 → 0002 → 0003                                    │
+│ (推荐)│ 依赖者 0001: —（反向依赖者，不验证，静默写入）       │
+│     │           0002: ✅（infra 规则）                        │
+│     │    被依赖 0003: ✅（反向依赖 + 末 patch 强制）          │
+│     │ 编译: 2 次（0002 + 0003）                              │
+│     │ 说明: 0001 的 func_a 调用在 0003 定义前不验证，       │
+│     │       0003 定义后编译整个系列，确保正确性             │
+├──────┼───────┼──────────────────────────────────────────────┤
+│ [2]  │ 0003 → 0001 → 0002                                    │
+│     │           0003: ✅（依赖规则）                          │
+│     │           0001: ✅（infra 规则）                        │
+│     │           0002: ✅（末 patch）                          │
+│     │ 编译: 3 次（每个 patch 都有验证点）                   │
+│     │ 说明: 调整顺序使依赖关系匹配代码逻辑，func_a 先定义后调用│
+└──────┴────────┴──────────────────────────────────────────────┘
+
+请选择: [1] 保持原始顺序 / [2] 调整顺序 / [3] 查看详细符号依赖
+```
+
+**处理逻辑**：
+- 选择 [1]：调用 `calculate_build_checkpoints.py`（反向依赖者排除，被依赖者强制）→ 写入 merge_tasks.json
+- 选择 [2]：调用旧版 topo_sort 的调整逻辑 → 重新计算 build_checkpoint → 重写 merge_order → 重新 merge_order_sort
+- 选择 [3]：展开每个任务，展示其 introduced_symbols / referenced_symbols / 功能分类
+
+---
+
+### 第 5 部分：用户确认交互
+
+```
+═══════════════════════════════════════════════
+  请确认
+═══════════════════════════════════════════════
+
+  请选择操作：
+
+  [1] 继续执行 merge 流程
+  [2] 调整合入顺序（提供新的 seq 排列）
+  [3] 跳过特定 patch（提供要跳过的 task_id）
+  [4] 中止，导出分析结果
+  [5] 查看某个 patch 的详细分析（提供 task_id）
+```
+
+### 确认选项说明
+
+| 选项 | 说明 |
+|------|------|
+| `[1] 继续` | 按上表顺序启动 Phase 2 串行 merge |
+| `[2] 调整顺序` | 用户提供新的 task_id 顺序排列，重新生成 merge_order 的 seq 字段 |
+| `[3] 跳过` | 将指定 patch 的 action 改为 skip，更新 skip_count 和 skip_reason |
+| `[4] 中止` | 将已生成的 merge_tasks.json 和 analysis_cache.json 保存为草稿 |
+| `[5] 查看详情` | 输出该 patch 的 Phase 1 分析报告摘要 |
+
+## duplicate_analysis.json Schema
+
+Phase 1 步骤 5 由 `detect_duplicate.py` 生成，Phase 1.5 步骤 3 读取。
+
+```json
+{
+  "patch_duplicate_map": {
+    "0001": [
+      {
+        "commit": "abc123",
+        "similarity": 95.0,
+        "level": "高匹配",
+        "pr_info": {"pr_id": "PR #123", "source": "commit_msg_link"},
+        "matched_patch": "0001",
+        "patch_add_line_count": 120,
+        "common_lines": 114
+      }
+    ]
+  },
+  "pr_aggregation": {
+    "PR #123": {
+      "commits": ["abc123", "def456", "ghi789"],
+      "matched_patches": [
+        {"commit": "abc123", "similarity": 95.0, "level": "高匹配", "matched_patch": "0001"},
+        {"commit": "def456", "similarity": 85.0, "level": "高匹配", "matched_patch": "0002"},
+        {"commit": "ghi789", "similarity": 20.0, "level": "低匹配", "matched_patch": null}
+      ],
+      "decision": {
+        "strategy": "revert 匹配的 commits（逐个）",
+        "urgency": "建议",
+        "coverage_rate": 66.7,
+        "total_commits": 3,
+        "high_match_count": 2,
+        "revert_targets": ["abc123", "def456"]
+      }
+    }
+  },
+  "global_revert_order": [
+    {
+      "pr_id": "PR #123",
+      "pr_info": {"pr_id": "PR #123", "source": "commit_msg_link"},
+      "commits": ["abc123", "def456", "ghi789"],
+      "commit_count": 3,
+      "revert_strategy": "revert 匹配的 commits（逐个）",
+      "revert_cmd": ["git revert def456", "git revert abc123"],
+      "urgency": "建议",
+      "coverage_rate": 66.7,
+      "high_match_count": 2,
+      "related_patches": ["0001", "0002"]
+    }
+  ],
+  "thresholds": {
+    "single_similarity_high": 80,
+    "single_similarity_medium": 50,
+    "pr_coverage_whole": 75
+  }
+}
+```
+
+### 字段说明
+
+| 字段 | 说明 |
+|------|------|
+| `patch_duplicate_map` | 每个 patch 的候选 commit 列表（含相似度） |
+| `pr_aggregation` | 按 PR 聚合后的匹配矩阵 |
+| `global_revert_order` | 建议的 revert 顺序（PR 级别 + 独立 commit） |
+| `thresholds` | 判定阈值 |
+
+### revert 决策规则
+
+| 覆盖率 | revert 策略 | urgency |
+|--------|------------|---------|
+| >= 75% | revert 整个 PR | 必须 |
+| 50-74% | revert 匹配的 commits（逐个） | 建议 |
+| < 50% | 不自动 revert | 无须 |
