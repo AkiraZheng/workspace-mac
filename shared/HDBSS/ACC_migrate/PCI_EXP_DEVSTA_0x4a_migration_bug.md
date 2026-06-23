@@ -25,7 +25,23 @@ bit 0-3 是 **RW1CS** (Read/Write-1-to-Clear Status) — 硬件自主置位，�
 
 错误值 `8` = bit 3 = **URD**。URD 在 AER 中属于**不可纠正 + 非致命** (`pcie_aer_uncor_default_severity`)。
 
-## 3. 校验逻辑 (`hw/pci/pci.c:630-664`)
+## 3. 迁移中配置空间的值来源
+
+### 3.1 Save 侧 (`hw/pci/pci.c:667-676`)
+
+```c
+static int put_pci_config_device(QEMUFile *f, void *pv, size_t size, ...)
+{
+    const uint8_t **v = pv;
+    qemu_put_buffer(f, *v, size);    // 把源端 pdev->config[] 整块序列化进迁移流
+}
+```
+
+源端配置空间整体 (4096 bytes) 打包进迁移流，**0x4a 的值来自源端**。
+
+### 3.2 Load 侧 (`hw/pci/pci.c:630-664`)
+
+三段式操作：读 → 校验 → 覆盖。
 
 ```c
 static int get_pci_config_device(QEMUFile *f, void *pv, size_t size,
@@ -35,24 +51,37 @@ static int get_pci_config_device(QEMUFile *f, void *pv, size_t size,
     uint8_t *config;
 
     config = g_malloc(size);
-    qemu_get_buffer(f, config, size);      // 从迁移流读取 (源端保存的值)
 
+    // ① 从迁移流读取源端保存的全部配置空间
+    qemu_get_buffer(f, config, size);
+
+    // ② 逐字节校验: 源端值 vs 目的端缓存值
     for (i = 0; i < size; ++i) {
-        // 校验公式:
-        // (两端差异位) & (cmask 需检查的位) & (~wmask 排除可写位) & (~w1cmask 排除W1C位)
         if ((config[i] ^ s->config[i]) &
             s->cmask[i] & ~s->wmask[i] & ~s->w1cmask[i]) {
-            error_report("... i=0x%x read: %x device: %x cmask: %x wmask: %x w1cmask:%x",
+            // 校验失败 → 直接返回，不写回
+            error_report("... i=0x%x read: %x device: %x ...",
                          i, config[i], s->config[i], ...);
             return -EINVAL;
         }
     }
-    memcpy(s->config, config, size);       // 校验通过则写回缓存
+
+    // ③ 校验全部通过 → 用源端值整块覆盖目的端 pdev->config[]
+    memcpy(s->config, config, size);
     ...
 }
 ```
 
-### 3.1 打印字段对应
+**两端的值来源不同:**
+
+| 变量 | 来自 | 含义 |
+|------|------|------|
+| `config[i]` (打印 `read`) | **源端** QEMU `pdev->config[]`，经迁移流传来 | 源端硬件 pread 的值 |
+| `s->config[i]` (打印 `device`) | **目的端** 物理 VF 硬件，`vfio_realize()` 中 `pread()` 一次性读入 | 目的端硬件 DEVSTA 快照 |
+
+**当前 bug**: 流程在 ② 因 0x4a 不匹配而 `return -EINVAL`，`memcpy` 没执行到。如果修了 cmask 让校验通过，**源端 DEVSTA=0 会通过 ③ 的 `memcpy` 写进目的端 `s->config[0x4a]`，覆盖掉旧的 8**。即整个配置空间是从源端整体拷贝到目的端的。
+
+### 3.3 打印字段对应
 
 | 打印 | 代码变量 | 实际含义 |
 |------|----------|----------|
@@ -64,7 +93,7 @@ static int get_pci_config_device(QEMUFile *f, void *pv, size_t size,
 
 **关键**: `s->config[i]` 不是实时硬件值，是 PCIDevice 结构体内的缓存数组。
 
-### 3.2 本例代入
+### 3.4 本例代入
 
 ```
 config[0x4a]      = 0x00    ← 源端 DEVSTA 干净
