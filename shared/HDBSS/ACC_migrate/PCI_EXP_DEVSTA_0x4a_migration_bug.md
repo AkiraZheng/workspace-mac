@@ -217,9 +217,37 @@ DEVSTA (`0x4a`) 的 `wmask = 0`，不会被 `pci_default_write_config` 更新。
 
 `vfio_pci_post_reset()` (`:2468`) 只做了 INTx 重使能和 BAR 清零，**没有 `pread()` 刷新缓存**。
 
-### 5.4 URD 为什么是 1
+### 5.4 `pread()` 首次读到 0x08 是否表示硬件有问题
 
-URD 是硬件自主行为 — 设备收到不支持 TLP 时自动置位。最可能在步骤② `pread()` 之前就已经被置位了 (例如 PF-VF 通信、BIOS 枚举、或前次使用未清零)。源端因为有 guest 驱动运行，DEVSTA 的 W1C 位已被驱动清理。
+**不是。** 初始读到 URD=1 不代表硬件缺陷，完全是正常行为。
+
+#### DEVSTA 的读写机制
+
+DEVSTA 是只读状态寄存器，PCIe 规范规定：
+
+| 操作 | 行为者 | 机制 |
+|------|--------|------|
+| **置 1** | **硬件** | PCIe 控制器收到 VF 不支持的 TLP 时自主置位 URD |
+| **清 0** | **软件** | 往该位写 1 (W1C) 或通过 FLR 清零 |
+
+软件**无法**将 URD 置 1。`pdev->config[]` 的写入路径对此也无能为力：
+
+- `pci_set_byte(pdev->config + 0x4a, ...)` — 全量搜索 `hw/vfio/pci.c` 无任何代码对此偏移直接写入
+- `pci_default_write_config()` — wmask[0x4a] = 0，写入被过滤
+- guest 通过 VFIO 写配置 — 同样被 wmask 过滤
+
+唯一的写入是 `pread()` (`:3060`) 从硬件读入的值，之后直到 `get_pci_config_device()` 从未被更新。**`pdev->config[0x4a]` 就是 `pread()` 那一刻硬件 DEVSTA 的快照，之后无任何代码路径修改它。**
+
+#### 为什么 VF 的 URD 初始可能为 1
+
+VF 的 PCIe capability 通常是截断的（部分寄存器不实现）。以下情况都会触发硬件置位 URD：
+
+- **BIOS/固件枚举阶段**: PF 扫描 VF 配置空间时访问了 VF 不支持的寄存器偏移
+- **PF 驱动加载**: PF 对 VF 做初始化时触碰了不支持的偏移
+- **前次使用未清理**: 上一轮 QEMU 或 host 驱动退出前未清 DEVSTA
+- **FLR 行为差异**: 部分硬件在 FLR 过程中自身可能产生短暂的 unsupported request
+
+**源端为什么是 0:** 源端设备上有 guest 驱动正常运行，DEVSTA 的 W1C 位早已被驱动通过 AER 处理或 FLR 清理过。目的端是全新 open，还没人清理。两端值天然不同是正常现象，不表示任何一端硬件有故障。
 
 ## 6. 涉及的关键文件
 
