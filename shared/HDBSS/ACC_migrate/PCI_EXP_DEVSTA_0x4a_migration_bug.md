@@ -106,6 +106,46 @@ s->w1cmask[0x4a]  = 0x00    ← W1C 位未标记
 = 0x08 → 非零 → 报错
 ```
 
+### 3.5 配置空间迁移数据流图
+
+```mermaid
+graph TD
+    subgraph "迁出端 (源端)"
+        A[VF1 硬件配置空间<br/>0x4a = 0x00] -->|pread读取| B[VF1 s->config<br/>0x4a = 0x00]
+        B -->|put_pci_config_device<br/>qemu_put_buffer| C[迁移流<br/>config[0x4a] = 0x00]
+    end
+
+    subgraph "迁入端 (目的端)"
+        D[VF2 硬件配置空间<br/>0x4a = 0x08 URD=1] -->|① vfio_realize时<br/>pread读取| E[VF2 s->config<br/>0x4a = 0x08]
+        E -->|② 阶段二迁移开始| F[get_pci_config_device]
+        C -->|qemu_get_buffer<br/>从迁移流读取| F
+
+        F -->|③ 逐字节校验| G{校验逻辑<br/>(config[i] ^ s->config[i]) &<br/>cmask & ~wmask & ~w1cmask}
+
+        G -->|0x4a偏移处| H[config[0x4a] = 0x00<br/>s->config[0x4a] = 0x08<br/>cmask[0x4a] = 0xFF<br/>wmask[0x4a] = 0x00<br/>w1cmask[0x4a] = 0x00]
+
+        H --> I[校验计算:<br/>(0x00 ^ 0x08) & 0xFF & ~0x00 & ~0x00<br/>= 0x08 ≠ 0]
+        I -->|校验失败| J[返回 -EINVAL<br/>打印错误信息<br/>虚机挂死]
+
+        I -->|如果校验通过<br/>(修复后)| K[memcpy覆盖<br/>s->config = config<br/>0x4a变为0x00]
+    end
+
+    subgraph "关键差异说明"
+        L[寄存器0x4a含义:<br/>PCI_EXP_DEVSTA<br/>bit3=URD位]
+        M[cmask=0xFF原因:<br/>vfio_setup_pcie_cap<br/>pci_add_capability<br/>将PCIe Cap全部设为校验]
+        N[w1cmask=0x00原因:<br/>pcie_cap_deverr_init<br/>仅QEMU模拟设备调用<br/>VFIO透传未设置]
+        O[根本原因:<br/>目的端硬件FLR后<br/>pdev->config缓存未刷新<br/>仍为初始pread旧值]
+    end
+
+    style H fill:#ff9999
+    style I fill:#ff9999
+    style J fill:#ff3333,color:#fff
+    style L fill:#ffff99
+    style M fill:#ffff99
+    style N fill:#ffff99
+    style O fill:#ffff99
+```
+
 ## 4. 根因
 
 ### 4.1 cmask[0x4a] = 0xFF 的来源
