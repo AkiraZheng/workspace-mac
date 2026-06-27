@@ -23,6 +23,8 @@ patchset-merge-v2/
 ├── layer2-search/                    # 搜索层
 ├── layer3-execution/                 # 执行层（核心）
 ├── layer4-output/                    # 输出层
+├── conflict-resolver/               # Git 冲突自动解决模块
+├── linux-kernel-review/             # 内核 patch review 模块
 ├── shared-scripts/                   # 复用脚本（7个）
 ├── AGENTS.md                         # 开发工作区说明
 └── install.sh                        # 一键安装脚本
@@ -50,10 +52,29 @@ Skill tool: patchset-merge-orchestrator
 
 ## 核心约束
 
+> ⚠️ **一个仓库目录下同一时间只能执行一个合入任务。**
+
 ❌ **禁止 git apply** - 会丢失 commit message  
 ❌ **禁止 git reset --hard** - 会删除 commit  
 ✅ **强制 git am** - 保护 commit message  
 ✅ **循环处理 .rej** - 最多 10 轮重试
+
+## 输出目录结构
+
+```
+$KERNEL_REPO/
+  patch_analysis/
+    config.json                       ← 唯一固定入口（AI 访问点）
+  patchmerge/
+    <分支名>_output/                  ← 每次合入独立，分支隔离
+      config.json                     ← 本次运行的配置（归档）
+      state.json                      ← 执行状态（支持中断恢复）
+      merge_tasks.json
+      *-analyse.md                   ← 每个 patch 的分析记录
+      summary.md                      ← 汇总报告
+      output_report.json
+      patches/                        ← git format-patch 导出
+```
 
 ## 设计文档
 

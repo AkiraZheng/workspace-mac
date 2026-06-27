@@ -7,7 +7,7 @@ description: >
   1. 必须在 layer2-search 完成后调用
   2. 必须存在 merge_tasks.json
   
-  输出文件：analyse.md 系列 + execution_log.json
+  输出文件：execution_log.json
   
   完成后状态：Write state.json: {"layer3": "completed"}
 ---
@@ -47,17 +47,21 @@ description: >
 
 ## 执行流程
 
-### 步骤 1: 读取 merge_tasks.json + config.json
+### 步骤 1: 读取 config.json + merge_tasks.json
 
 ```bash
-Read: $KERNEL_REPO/patch_analysis/merge_tasks.json
 Read: $KERNEL_REPO/patch_analysis/config.json
 ```
 
-从 config.json 提取全局变量：
+从 config.json 提取全局变量 + 输出目录：
 - `KERNEL_REPO_PATH` = config.kernel_repo_path
 - `KERNEL_ARCH` = config.kernel_arch
 - `BUILD_CMD` = config.build_cmd
+- `OUTPUT_DIR` = config.output_dir
+
+```bash
+Read: $OUTPUT_DIR/merge_tasks.json
+```
 
 从 merge_tasks.json 提取每个 task 的：
 - `task_id`, `patch_file`, `build_checkpoint`, `pre_revert`, `action`
@@ -147,7 +151,7 @@ cd $KERNEL_REPO_PATH
 # 从 merge_tasks.json 提取所有 pre_revert commit hash
 REVERT_COMMITS=$(python3 -c "
 import json
-with open('patch_analysis/merge_tasks.json') as f:
+with open('$OUTPUT_DIR/merge_tasks.json') as f:
     tasks = json.load(f)
     commits = set()
     for task in tasks['merge_order']:
@@ -267,7 +271,7 @@ cd $KERNEL_REPO_PATH
 
 DEPS_COUNT=$(python3 -c "
 import json
-with open('patch_analysis/merge_tasks.json') as f:
+with open('$OUTPUT_DIR/merge_tasks.json') as f:
     tasks = json.load(f)
     print(len(tasks.get('deps_order', [])))
 ")
@@ -277,7 +281,7 @@ if [ "$DEPS_COUNT" -gt 0 ]; then
   
   for dep in $(python3 -c "
 import json
-with open('patch_analysis/merge_tasks.json') as f:
+with open('$OUTPUT_DIR/merge_tasks.json') as f:
     tasks = json.load(f)
     for d in tasks.get('deps_order', []):
         print(f\"{d['task_id']}|{d['patch_file']}|{d.get('source_pr', '')}\")
@@ -399,78 +403,37 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step PRECHECK --result p
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step PRE_REVERT --result skip --note "Phase 1 completed"
 ```
 
-#### 5.3 APPLY（强制 git am 循环重试）
-
-**上下文缺失的处理原则**：
-
-patch 中以空格开头的上下文行（如 ` #define KVM_PTE_LEAF_ATTR_HI_S2_XN`）是 git 的定位依据，
-不是必须存在的代码。git am --reject 会将不能应用的部分写入 .rej 文件，AI 处理 .rej 即可。
+#### 5.3 APPLY
 
 <HARD-GATE>
 禁止操作：
 ❌ git apply（会丢失 commit message）
 ❌ git am --skip（会跳过 patch）
-❌ 在 git am 执行前分析 patch 上下文是否在目标文件中存在
-❌ 因为上下文行缺失而提前阻塞流程（如提示"缺少基础设施定义"）
-❌ 在 git am --reject 执行前暂停向用户问询
+❌ 自主判断 patch "已存在"而跳过 APPLY 流程
 
 必须遵循：
-✅ 先执行 git am --3way，让 git 工具判断
-✅ 失败后执行 git am --3way --reject
-✅ AI 处理 .rej 文件时智能判断插入位置（参考 references/diagnostic-guide.md）
-✅ 仅在 10 次重试全部失败后才阻塞，向用户问询
+✅ 调用 conflict-resolver skill 执行 git am --3way → --reject → .rej 处理
+✅ 仅在 conflict-resolver 返回失败（重试 10 次仍失败）时才阻塞，向用户问询
 </HARD-GATE>
-
-**说明**：
-- 参考 `references/diagnostic-guide.md` 中的 Ours/Theirs 决策树
-- 参考 `references/diagnostic-guide.md` 中的最小修改原则
 
 ```bash
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step APPLY --result in_progress
 
-RETRY_COUNT=0
+# 调用 conflict-resolver skill 执行 git am 循环
+# 输入：patch_file, repo_path
+# 成功时自动完成 git am + .rej 处理
+# 失败时（exit 1）暂停，等待用户决策
+Skill tool: conflict-resolver
+  输入: patch_file=$patch_file, repo_path=$KERNEL_REPO_PATH
 
-while true; do
-  ### 尝试 1: git am --3way
-  git am --3way "$patch_file"
-  
-  if [ $? -eq 0 ]; then
-    echo "✅ git am 成功"
-    break
-  else
-    ### 尝试 2: git am --3way --reject
-    git am --abort
-    git am --3way --ignore-space-change --keep-cr --reject "$patch_file"
-    
-    ### 循环处理 .rej 文件
-    while [ -n "$(find . -name '*.rej')" ]; do
-      for rej_file in $(find . -name "*.rej"); do
-        Read: "$rej_file"
-        Read: 目标文件
-        AI 判断如何填入
-        Edit: 目标文件
-        rm "$rej_file"
-      done
-    done
-    
-    ### 尝试 3: git add + git am --continue
-    git add -A
-    git am --continue
-    
-    if [ $? -eq 0 ]; then
-      echo "✅ 成功"
-      break
-    else
-      RETRY_COUNT=$((RETRY_COUNT + 1))
-      if [ $RETRY_COUNT -ge 10 ]; then
-        Question: "git am 已重试 10 次仍失败，如何处理？"
-          [1] 放弃当前 patch，跳过（git am --abort）
-          [2] 暂停，保留工作区状态供人工修复
-          [3] 中止整个任务
-      fi
-    fi
-  fi
-done
+# 检查 conflict-resolver 是否成功
+if git diff --quiet && git diff --cached --quiet; then
+  # 无变更，可能未成功
+  Question: "conflict-resolver 未能应用 patch $task_id，如何处理？"
+    [1] 跳过此 patch
+    [2] 暂停，保留工作区供人工修复
+    [3] 中止任务
+fi
 
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step APPLY --result pass
 ```
@@ -482,7 +445,9 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step VERIFY_INTENT --res
 
 python3 $SCRIPTS_DIR/verify_patch_intent.py \
   --patch-file "$patch_file" \
-  --task-id $task_id
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id $task_id \
+  --repo-path "$KERNEL_REPO_PATH"
 
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step VERIFY_INTENT --result pass
 ```
@@ -553,13 +518,19 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step COMMIT --result pas
 #### 5.8 REVIEW
 
 ```bash
-Skill tool: code-review-expert（若已安装）
+python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step REVIEW --result in_progress
+
+# 调用 linux-kernel-review skill 进行内核专项 review
+# 输入：task_id, patch_file, KERNEL_REPO_PATH
+# AI 会读取 verify_patch_intent 步骤的输出 + git show HEAD 进行 review
+Skill tool: linux-kernel-review
+  输入: task_id=$task_id, patch_file=$patch_file, repo_path=$KERNEL_REPO_PATH
+
+python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step REVIEW --result pass
 ```
 
 #### 5.9 RECORD
 
 ```bash
-python3 $SCRIPTS_DIR/generate_analyse_md.py --task-id $task_id
-
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --result done
 ```

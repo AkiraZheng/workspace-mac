@@ -50,6 +50,12 @@ cp -r layer3-execution "$SKILL_DIR/"
 cp -r layer4-output "$SKILL_DIR/"
 echo "  ✅ layer1-4"
 
+# 通用 Skills
+cp -r conflict-resolver "$SKILL_DIR/"
+echo "  ✅ conflict-resolver"
+cp -r linux-kernel-review "$SKILL_DIR/"
+echo "  ✅ linux-kernel-review"
+
 # Shared scripts
 cp -r shared-scripts "$SKILL_DIR/"
 echo "  ✅ shared-scripts"

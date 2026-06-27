@@ -47,10 +47,70 @@ description: >
 
 ## 执行步骤
 
-### 步骤 1: 读取配置
+### 步骤 1: 读取配置 + 反向验证
 
 ```bash
 Read: $KERNEL_REPO/patch_analysis/config.json
+```
+
+**反向验证**：读取 config.json 后，必须校验其内容有效性：
+
+```bash
+cd $KERNEL_REPO
+
+# 1. 必填字段检查
+MISSING=$(python3 -c "
+import json
+with open('patch_analysis/config.json') as f:
+    c = json.load(f)
+required = ['patch_source', 'kernel_repo_path', 'kernel_branch', 'kernel_arch', 'build_cmd']
+missing = [k for k in required if k not in c or not c[k]]
+if missing:
+    print(', '.join(missing))
+" 2>/dev/null)
+
+if [ -n "$MISSING" ]; then
+    echo "❌ config.json 必填字段缺失或为空: $MISSING"
+    echo "请回到 Layer 1 重新生成"
+    exit 10
+fi
+
+# 2. 路径一致性校验
+CONFIG_REPO=$(python3 -c "
+import json
+with open('patch_analysis/config.json') as f:
+    print(json.load(f).get('kernel_repo_path', ''))
+" 2>/dev/null)
+
+if [ "$CONFIG_REPO" != "$KERNEL_REPO" ]; then
+    echo "❌ config.json.kernel_repo_path 与实际不一致: config=$CONFIG_REPO actual=$KERNEL_REPO"
+    exit 11
+fi
+
+# 3. schema_version 校验
+SV=$(python3 -c "
+import json
+with open('patch_analysis/config.json') as f:
+    print(json.load(f).get('schema_version', 'MISSING'))
+" 2>/dev/null)
+
+if [ "$SV" = "MISSING" ]; then
+    echo "⚠️ config.json 缺少 schema_version 字段（可能是旧版 Layer 1 生成）"
+elif [ "$SV" != "1.0" ]; then
+    echo "❌ config.json schema_version=$SV，Layer 2 期望 1.0，接口可能不兼容"
+    exit 12
+fi
+
+echo "✅ config.json 反向验证通过"
+
+# 4. 提取输出目录（所有中间文件写入此处，避免多分支操作覆盖）
+OUTPUT_DIR=$(python3 -c "
+import json
+with open('patch_analysis/config.json') as f:
+    print(json.load(f)['output_dir'])
+" 2>/dev/null)
+mkdir -p "$OUTPUT_DIR"
+echo "输出目录: $OUTPUT_DIR"
 ```
 
 ### 步骤 2: 下载 patch（调用脚本）
@@ -98,7 +158,7 @@ cd $KERNEL_REPO
 python3 $SCRIPTS_DIR/detect_duplicate_sample.py \
   /tmp/patches/ \
   "$KERNEL_REPO" \
-  patch_analysis/samples_summary.json \
+  $OUTPUT_DIR/samples_summary.json \
   > /tmp/grep_commands.txt
 
 # 步骤 2: 并行执行 grep（Bash，<1s）
@@ -141,6 +201,7 @@ echo "✅ 抽样检测完成（执行时间 <2s）"
 
 ```json
 {
+  "schema_version": "1.0",
   "patch_duplicate_map": {
     "0001": [
       {
@@ -355,8 +416,8 @@ Task 2: agent_upstream_deps
 ### 步骤 5: 读取搜索结果
 
 ```bash
-Read: $KERNEL_REPO/patch_analysis/revert_candidates.json
-Read: $KERNEL_REPO/patch_analysis/deps_candidates.json
+Read: $OUTPUT_DIR/revert_candidates.json
+Read: $OUTPUT_DIR/deps_candidates.json
 ```
 
 ### 步骤 6: JSON 格式验证（Skill 内检查）
@@ -373,7 +434,7 @@ Read: $KERNEL_REPO/patch_analysis/deps_candidates.json
 ```bash
 python3 $SCRIPTS_DIR/extract_patch_symbols.py \
   --patch-dir /tmp/patches/ \
-  --output $KERNEL_REPO/patch_analysis/patch_symbols.json
+  --output $OUTPUT_DIR/patch_symbols.json
 ```
 
 执行时间 <3s，不会超时。
@@ -404,8 +465,8 @@ python3 $SCRIPTS_DIR/extract_patch_symbols.py \
 
 ```bash
 python3 $SCRIPTS_DIR/calculate_build_checkpoints.py \
-  --merge-tasks $KERNEL_REPO/patch_analysis/merge_tasks.json \
-  --output $KERNEL_REPO/patch_analysis/merge_tasks_checkpointed.json
+  --merge-tasks $OUTPUT_DIR/merge_tasks.json \
+  --output $OUTPUT_DIR/merge_tasks_checkpointed.json
 ```
 
 执行时间 <2s，不会超时。
@@ -496,7 +557,7 @@ Rule 7: 其他 → false
 #### 8.3 生成最终 merge_tasks.json
 
 ```bash
-cp $KERNEL_REPO/patch_analysis/merge_tasks_checkpointed.json $KERNEL_REPO/patch_analysis/merge_tasks.json
+cp $OUTPUT_DIR/merge_tasks_checkpointed.json $OUTPUT_DIR/merge_tasks.json
 ```
 
 ### 步骤 9: Write merge_tasks.json（必须包含seq字段）
@@ -540,6 +601,7 @@ AI 将汇总结果写入 merge_tasks.json，**必须包含以下必填字段**�
 **示例输出**：
 ```json
 {
+  "schema_version": "1.0",
   "merge_order": [
     {
       "seq": 1,
@@ -589,7 +651,7 @@ AI 将汇总结果写入 merge_tasks.json，**必须包含以下必填字段**�
 - Rule 4（最后一个patch强制编译）需要seq字段判断
 - 如果seq字段缺失，所有patch的seq默认为9999，导致Rule 4无法触发
 
-AI 按 `references/output-templates.md` 中包含的 merge_tasks.json schema 手工检查必填字段。
+AI 按 `references/merge_tasks_schema.md` 中的 schema 手工检查必填字段。
 
 ## 输出文件 Schema
 
@@ -597,6 +659,7 @@ AI 按 `references/output-templates.md` 中包含的 merge_tasks.json schema 手
 
 ```json
 {
+  "schema_version": "1.0",
   "patches": [
     {
       "task_id": "0001",
@@ -653,6 +716,7 @@ AI 按 `references/output-templates.md` 中包含的 merge_tasks.json schema 手
 
 ```json
 {
+  "schema_version": "1.0",
   "candidates": [
     {
       "commit_hash": "abc123",
@@ -672,6 +736,7 @@ AI 按 `references/output-templates.md` 中包含的 merge_tasks.json schema 手
 
 ```json
 {
+  "schema_version": "1.0",
   "dependencies": [
     {
       "commit_hash": "def456",

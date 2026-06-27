@@ -44,14 +44,17 @@ if [ ! -d "$KERNEL_REPO_PATH" ]; then
   exit 1
 fi
 
-# 检查状态文件
-STATE_FILE="$KERNEL_REPO_PATH/.patchmerge/state.json"
-if [ -f "$STATE_FILE" ]; then
-  echo "检测到 state.json，进入恢复模式"
-  # Read state.json
-  # 根据状态决定从哪一层恢复
+# 计算输出目录（从 KERNEL_BRANCH 推导）
+if [ -n "$KERNEL_BRANCH" ]; then
+  OUTPUT_DIR="$KERNEL_REPO_PATH/patchmerge/${KERNEL_BRANCH}_output"
+  if [ -f "$OUTPUT_DIR/state.json" ]; then
+    echo "检测到 state.json，进入恢复模式"
+    # 根据状态决定从哪一层恢复
+  else
+    echo "未检测到 state.json，从 Layer 1 开始执行"
+  fi
 else
-  echo "未检测到 state.json，从 Layer 1 开始执行"
+  echo "未设置 KERNEL_BRANCH，从 Layer 1 开始执行"
 fi
 ```
 
@@ -63,11 +66,12 @@ fi
 # 标记开始时间
 START_TIME=$(date +%s)
 
-# Read state.json（若存在）
-if [ -f "$KERNEL_REPO_PATH/.patchmerge/state.json" ]; then
+# 读 state.json（若存在）
+OUTPUT_DIR="$KERNEL_REPO_PATH/patchmerge/${KERNEL_BRANCH}_output"
+if [ -f "$OUTPUT_DIR/state.json" ]; then
   python3 -c "
 import json
-with open('$KERNEL_REPO_PATH/.patchmerge/state.json') as f:
+with open('$OUTPUT_DIR/state.json') as f:
     state = json.load(f)
     current_layer = state.get('current_layer', 'layer1')
     print(f'Restore from: {current_layer}')
@@ -95,8 +99,16 @@ Skill tool: layer1-interaction
 echo "Layer 1 完成，输出文件："
 ls -la "$KERNEL_REPO_PATH/patch_analysis/config.json"
 
+# 提取输出目录
+OUTPUT_DIR=$(python3 -c "
+import json
+with open('$KERNEL_REPO_PATH/patch_analysis/config.json') as f:
+    print(json.load(f)['output_dir'])
+")
+echo "输出目录: $OUTPUT_DIR"
+
 # 门禁验证（检查 Layer 1 输出）
-bash "$SCRIPTS_DIR/gate_check.sh" layer2 "$KERNEL_REPO_PATH"
+bash "$SCRIPTS_DIR/gate_check.sh" layer2 "$KERNEL_REPO_PATH" "$OUTPUT_DIR"
 if [ $? -ne 0 ]; then
   echo "❌ Layer 1 输出验证失败，中止"
   exit 10
@@ -109,6 +121,7 @@ from datetime import datetime
 state = {
     'session_id': 'patchset-merge-$(date +%s)',
     'kernel_repo': '$KERNEL_REPO_PATH',
+    'output_dir': '$OUTPUT_DIR',
     'current_layer': 'layer1',
     'layer_status': {
         'layer1': {
@@ -120,7 +133,7 @@ state = {
         }
     }
 }
-with open('$KERNEL_REPO_PATH/.patchmerge/state.json', 'w') as f:
+with open('$OUTPUT_DIR/state.json', 'w') as f:
     json.dump(state, f, indent=2)
 "
 
@@ -135,7 +148,7 @@ echo "✅ Layer 1 完成，进入 Layer 2"
 echo "=== Layer 2: 搜索层 ==="
 
 # 门禁验证（检查 Layer 1 输出）
-bash "$SCRIPTS_DIR/gate_check.sh" layer3 "$KERNEL_REPO_PATH"
+bash "$SCRIPTS_DIR/gate_check.sh" layer3 "$KERNEL_REPO_PATH" "$OUTPUT_DIR"
 if [ $? -ne 0 ]; then
   echo "❌ Layer 2 前置验证失败，中止"
   exit 20
@@ -155,15 +168,15 @@ echo "Layer 2 完成，输出文件："
 echo "  Patch 文件："
 ls -la /tmp/patches/0*.patch 2>/dev/null | head -3 || echo "    未找到 patch 文件"
 echo "  分析文件："
-ls -la "$KERNEL_REPO_PATH/patch_analysis/duplicate_analysis.json"
-ls -la "$KERNEL_REPO_PATH/patch_analysis/revert_candidates.json"
-ls -la "$KERNEL_REPO_PATH/patch_analysis/deps_candidates.json"
-ls -la "$KERNEL_REPO_PATH/patch_analysis/merge_tasks.json"
+  ls -la "$OUTPUT_DIR/duplicate_analysis.json"
+  ls -la "$OUTPUT_DIR/revert_candidates.json"
+  ls -la "$OUTPUT_DIR/deps_candidates.json"
+  ls -la "$OUTPUT_DIR/merge_tasks.json"
 
 # Write state.json
 python3 -c "
 import json
-with open('$KERNEL_REPO_PATH/.patchmerge/state.json') as f:
+with open('$OUTPUT_DIR/state.json') as f:
     state = json.load(f)
 state['current_layer'] = 'layer2'
 state['layer_status']['layer2'] = {
@@ -173,7 +186,7 @@ state['layer_status']['layer2'] = {
     'subagents': ['agent_target_revert', 'agent_upstream_deps'],
     'gate_check_exit_code': 0
 }
-with open('$KERNEL_REPO_PATH/.patchmerge/state.json', 'w') as f:
+with open('$OUTPUT_DIR/state.json', 'w') as f:
     json.dump(state, f, indent=2)
 "
 
@@ -188,7 +201,7 @@ echo "✅ Layer 2 完成，进入 Layer 3"
 echo "=== Layer 3: 执行层 ==="
 
 # 门禁验证（检查 Layer 2 输出）
-bash "$SCRIPTS_DIR/gate_check.sh" layer4 "$KERNEL_REPO_PATH"
+bash "$SCRIPTS_DIR/gate_check.sh" layer4 "$KERNEL_REPO_PATH" "$OUTPUT_DIR"
 if [ $? -ne 0 ]; then
   echo "❌ Layer 3 前置验证失败，中止"
   exit 30
@@ -214,19 +227,19 @@ Skill tool: layer3-execution
 
 # 等待 Skill 返回
 echo "Layer 3 完成，输出文件："
-ls -la "$KERNEL_REPO_PATH/patch_analysis/*-analyse.md"
+  ls -la "$OUTPUT_DIR"/*-analyse.md
 
 # Write state.json
 python3 -c "
 import json
-with open('$KERNEL_REPO_PATH/.patchmerge/state.json') as f:
+with open('$OUTPUT_DIR/state.json') as f:
     state = json.load(f)
 state['current_layer'] = 'layer3'
 state['layer_status']['layer3'] = {
     'status': 'completed',
     'skill_invoked': 'layer3-execution'
 }
-with open('$KERNEL_REPO_PATH/.patchmerge/state.json', 'w') as f:
+with open('$OUTPUT_DIR/state.json', 'w') as f:
     json.dump(state, f, indent=2)
 "
 
@@ -246,13 +259,13 @@ Skill tool: layer4-output
 
 # 等待 Skill 返回
 echo "Layer 4 完成，输出文件："
-ls -la "$KERNEL_REPO_PATH/patch_analysis/summary.md"
-ls -la "$KERNEL_REPO_PATH/patch_analysis/output_report.json"
+  ls -la "$OUTPUT_DIR/summary.md"
+  ls -la "$OUTPUT_DIR/output_report.json"
 
 # Write state.json（最终状态）
 python3 -c "
 import json
-with open('$KERNEL_REPO_PATH/.patchmerge/state.json') as f:
+with open('$OUTPUT_DIR/state.json') as f:
     state = json.load(f)
 state['current_layer'] = 'layer4'
 state['layer_status']['layer4'] = {
@@ -260,7 +273,7 @@ state['layer_status']['layer4'] = {
     'skill_invoked': 'layer4-output'
 }
 state['all_layers_completed'] = True
-with open('$KERNEL_REPO_PATH/.patchmerge/state.json', 'w') as f:
+with open('$OUTPUT_DIR/state.json', 'w') as f:
     json.dump(state, f, indent=2)
 "
 
@@ -288,7 +301,7 @@ Layer 状态：
   Layer 4:        ✅ 已完成（summary.md + output_report.json）
 
 输出文件路径：
-  $KERNEL_REPO_PATH/patch_analysis/summary.md
+  $OUTPUT_DIR/summary.md
   
 后续操作建议：
   1. 查看 summary.md 了解整体合入经验
@@ -297,7 +310,7 @@ Layer 状态：
   4. 若需合并到主干，请手工执行 git merge
 
 状态文件：
-  $KERNEL_REPO_PATH/.patchmerge/state.json（可恢复）
+  $OUTPUT_DIR/state.json（可恢复）
 
 ═══════════════════════════════════════════════════════════════
 ```
@@ -307,26 +320,28 @@ Layer 状态：
 若执行中断（Session 超时/用户中止），恢复流程：
 
 ```bash
-# 启动时检查 state.json
+# 计算输出目录，检查 state.json
+OUTPUT_DIR="$KERNEL_REPO_PATH/patchmerge/${KERNEL_BRANCH}_output"
+STATE_FILE="$OUTPUT_DIR/state.json"
+
 if [ -f "$STATE_FILE" ]; then
-  # Read state.json
   CURRENT_LAYER=$(python3 -c "import json; print(json.load(open('$STATE_FILE'))['current_layer'])")
   
   # 根据状态恢复
   case $CURRENT_LAYER in
     "layer1")
       # Layer 1 已完成 → 从 Layer 2 继续
-      bash "$SCRIPTS_DIR/gate_check.sh" layer2 "$KERNEL_REPO_PATH"
+      bash "$SCRIPTS_DIR/gate_check.sh" layer2 "$KERNEL_REPO_PATH" "$OUTPUT_DIR"
       # 调用 Layer 2...
       ;;
     "layer2")
       # Layer 2 已完成 → 从 Layer 3 继续
-      bash "$SCRIPTS_DIR/gate_check.sh" layer3 "$KERNEL_REPO_PATH"
+      bash "$SCRIPTS_DIR/gate_check.sh" layer3 "$KERNEL_REPO_PATH" "$OUTPUT_DIR"
       # 调用 Layer 3...
       ;;
     "layer3")
       # Layer 3 已完成 → 从 Layer 4 继续
-      bash "$SCRIPTS_DIR/gate_check.sh" layer4 "$KERNEL_REPO_PATH"
+      bash "$SCRIPTS_DIR/gate_check.sh" layer4 "$KERNEL_REPO_PATH" "$OUTPUT_DIR"
       # 调用 Layer 4...
       ;;
     "layer4")
