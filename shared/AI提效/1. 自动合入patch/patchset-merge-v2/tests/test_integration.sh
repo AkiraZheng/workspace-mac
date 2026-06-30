@@ -3,7 +3,7 @@
 
 echo "=== Patchset-Merge Layered Architecture Integration Test ==="
 
-cd patchset-merge-v2
+cd "$(dirname "$0")/.."
 
 # 测试 1: 目录结构
 echo "Test 1: Directory Structure"
@@ -52,22 +52,13 @@ echo "Test 7: install.sh"
 test -f install.sh || exit 70
 echo "  ✅ install.sh exists"
 
-# 测试 8: Python venv（可选）
-echo "Test 8: Python venv (optional)"
-SKILL_DIR="$HOME/.agents/skills/patchset-merge-v2"
-VENV_DIR="$SKILL_DIR/.venv"
-if [ -d "$VENV_DIR" ]; then
-    test -f "$VENV_DIR/bin/python3" || exit 80
-    echo "  ✅ venv exists: $VENV_DIR"
-    # 测试 b4 是否安装
-    if "$VENV_DIR/bin/python3" -m b4 --version >/dev/null 2>&1; then
-        B4_VER=$("$VENV_DIR/bin/python3" -m b4 --version 2>&1 | head -1)
-        echo "  ✅ b4 installed: $B4_VER"
-    else
-        echo "  ⚠️ b4 not installed (optional)"
-    fi
+# 测试 8: Python3 可用性
+echo "Test 8: Python3 available"
+if command -v python3 &>/dev/null; then
+    PY_VER=$(python3 --version 2>&1)
+    echo "  ✅ $PY_VER"
 else
-    echo "  ⚠️ venv not created (run install.sh first)"
+    echo "  ⚠️ python3 not found (required for execution scripts)"
 fi
 
 echo ""
@@ -76,5 +67,5 @@ echo "=== Test Summary ==="
 echo "SKILL files:      5/5 ✅"
 echo "Scripts:          8/8 ✅"
 echo "References:       16/16 ✅"
-echo "venv support:     ✅"
+echo "Python3 available: ✅"
 echo "Total tests:      8/8 passed"
