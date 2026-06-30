@@ -619,13 +619,121 @@ python3 $SCRIPTS_DIR/gatekeeper.py \
 
 ```bash
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step REVIEW --result in_progress
+```
 
-# 调用 linux-kernel-review skill 进行内核专项 review
-# 输入：task_id, patch_file, KERNEL_REPO_PATH
-# AI 会读取 verify_patch_intent 步骤的输出 + git show HEAD 进行 review
-Skill tool: linux-kernel-review
-  输入: task_id=$task_id, patch_file=$patch_file, repo_path=$KERNEL_REPO_PATH
+**启动独立 Subagent 做 review（Task tool，隔离上下文）**：
 
+```
+Task tool: subagent_type: general
+输入:
+  task_id=$task_id
+  patch_file=$patch_file
+  commit_hash=$COMMIT_HASH（来自步骤 5.7）
+  KERNEL_REPO_PATH
+
+Subagent prompt（内联全部 review 检查清单）:
+
+---
+
+你是 Linux 内核代码 review 专家。对以下已合入的 commit 做专项 review。
+
+**输入数据（自行 Read）**：
+1. `git -C <KERNEL_REPO_PATH> show <commit_hash>` → 实际 diff + commit message
+2. Read: `<patch_file>` → 原始 .patch 文件（对比意图）
+3. verify_patch_intent 退出码（从 gatekeeper state_log 获取）:
+   - 0=+ 行完整
+   - 1=部分 + 行缺失（可能适配）
+   - 3=introduced_symbols 缺失（P0）
+
+**检查项**：
+
+### 1. Commit message 完整性
+| 检查点 | 规则 | 严重度 |
+|--------|------|--------|
+| Subject | 不能空，应有子系统前缀（arm64:/KVM:/mm:），≤75 字符 | P1 |
+| Signed-off-by | 至少一个 DCO 签名 | P1 |
+| Fixes tag | 原 patch 有则不应丢失 | P2 |
+| 其他 tag | Reviewed-by/Acked-by/Tested-by/Cc | P3 |
+| 空行分隔 | Subject 和 body 之间有空行 | P3 |
+
+### 2. 代码安全性
+| 检查点 | 规则 | 严重度 |
+|--------|------|--------|
+| 内存配对 | kmalloc/kfree, alloc_pages/free_pages 等成对 | P0 |
+| goto cleanup | 错误路径是否正确释放，有无遗漏 | P0 |
+| 锁使用 | spin_lock/spin_unlock 配对，持锁期间不应睡眠 | P0 |
+| RCU | rcu_read_lock/rcu_read_unlock 配对，rcu_dereference 正确 | P1 |
+| 错误返回值 | IS_ERR/PTR_ERR 检查，-ENOMEM 风格一致 | P1 |
+| 数组/缓冲区 | 越界风险，sizeof 正确，snprintf 长度 | P1 |
+| refcount | refcount_t/atomic_t inc/dec 配对 | P1 |
+
+### 3. API 兼容性（backport 专属）
+| 检查点 | 规则 | 严重度 |
+|--------|------|--------|
+| 函数存在性 | 目标内核是否有被调用函数原型 | P0 |
+| 签名匹配 | 参数数量/类型是否一致 | P0 |
+| 宏/CONFIG | 依赖的 CONFIG_xxx 在目标 .config 是否存在 | P0 |
+| 结构体字段 | 访问的结构体成员在目标版本中是否存在 | P1 |
+| 头文件 | include 路径在目标内核中是否存在 | P2 |
+
+### 4. Patch 意图保留
+| 检查点 | 规则 | 严重度 |
+|--------|------|--------|
+| introduced_symbols 缺失 | verify exit 3 → P0 | P0 |
+| + 行缺失 | verify exit 1 → 分析是适配还是丢失 | P1/P2 |
+| + 行完整 | verify exit 0 → 通过 | — |
+
+**输出（Write + 返回）**：
+
+Write `$OUTPUT_DIR/review_<task_id>.md`，格式：
+
+```markdown
+## Code Review — Patch {task_id}: {subject}
+
+### Commit message
+[逐项检查结果]
+
+### 安全性
+[逐项检查结果]
+
+### API 兼容
+[逐项检查结果]
+
+### Patch 意图
+[逐项检查结果]
+
+### 总结
+P0: N, P1: N, P2: N, P3: N
+blocking: true/false
+```
+
+返回给主 Agent 的消息：
+```
+REVIEW_RESULT: task_id=<task_id> P0=<N> P1=<N> P2=<N> blocking=<true|false>
+```
+```
+
+**Subagent 返回后，主 AI 处理**：
+
+```bash
+# 读取 review 结果
+Read: $OUTPUT_DIR/review_$task_id.md
+```
+
+**阻塞判断**：
+- `blocking=true` 或 P0 > 0 → 暂停等用户决策：
+  ```
+  Patch {task_id} review 发现 P0 问题：
+  [列出 P0 项]
+  
+  请选择：
+  [1] 修复 P0 后继续（git commit --amend）
+  [2] 接受风险继续（不推荐）
+  [3] 中止
+  ```
+- `blocking=false` → 继续流程
+
+```bash
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step REVIEW --result pass
 ```
 

@@ -1,15 +1,20 @@
 ---
 name: linux-kernel-review
 description: >
-  内核 patch 合入后的专项代码 review。触发条件：patch 合入完成后、需要检查 commit message 完整性、
-  代码安全性（内存/锁/错误处理）、API 兼容性、patch 意图保留情况。适用于 Linux 内核 arm64 架构。
+  内核 patch 合入后的专项代码 review。由 Layer 3 步骤 5.8 以 Task tool (subagent_type: general)
+  方式调用，在独立上下文中执行。检查 commit message 完整性、代码安全性（内存/锁/错误处理）、
+  API 兼容性、patch 意图保留情况。适用于 Linux 内核 arm64 架构。
 ---
 
 # Code Review Expert — 内核 patch 合入专用
 
+> **调用方式**：本 skill 由 Layer 3 以 `Task tool: subagent_type: general` 调用，
+> 不独立触发。完整 review 检查清单位于 `layer3-execution/SKILL.md` 步骤 5.8 的
+> Subagent prompt 中。本文档为权威参考，两者必须保持同步。
+
 ## 职责
 
-对已合入的每个 patch commit 进行内核专项 review，在 Layer 3 步骤 5.8 被调用。review 基于 `verify_patch_intent.py` 的意图校验结果 + git 实际 diff。
+对已合入的每个 patch commit 进行内核专项 review。由 Layer 3 步骤 5.8 的 Subagent (Task tool: subagent_type: general) 在独立上下文中执行。
 
 ## 输入
 
