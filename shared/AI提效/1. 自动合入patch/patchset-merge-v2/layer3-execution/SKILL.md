@@ -390,6 +390,22 @@ make ARCH=$KERNEL_ARCH olddefconfig 2>/dev/null || true
 
 **执行纪律：每个 task 必须完整走完 5.1→5.9，一步都不能跳。gatekeeper --check 在 COMMIT 时强制校验 VERIFY_INTENT 已完成，在 RECORD 时强制校验 REVIEW 已完成，跳过会硬性阻塞。**
 
+**每步执行完必须显式输出 `[CHECK]` 标记，格式如下（AI 不可省略）**：
+
+```
+[CHECK] 5.1 PRECHECK:    ✅ pass
+[CHECK] 5.2 PRE_REVERT:  ✅ skip (Phase 1 completed)
+[CHECK] 5.3 APPLY:       ✅ pass
+[CHECK] 5.4 VERIFY_INTENT: ✅ pass (exit 0, +行完整)
+[CHECK] 5.5 BUILD:       ✅ pass / ⏭ skip (非 checkpoint)
+[CHECK] 5.6 BUILD_FIX:   ⏭ skip / 🔧 fixed (3 retries)
+[CHECK] 5.7 COMMIT:      ✅ pass (abc123)
+[CHECK] 5.8 REVIEW:      ✅ pass (P0=0, P1=1)
+[CHECK] 5.9 RECORD:      ✅ pass
+```
+
+**缺少任何一行 CHECK → AI 必须在当前步骤停止并补执行。不可预填、不可跳过、不可事后批量补充。**
+
 AI 按 seq 升序处理每个 task。
 
 **在处理每个 task 前，先读取预分析信息**：
@@ -444,6 +460,7 @@ test -f "$patch_file" || exit 10
 git diff --quiet && git diff --cached --quiet || exit 12
 
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step PRECHECK --result pass
+echo "[CHECK] 5.1 PRECHECK: ✅ pass ($task_id)"
 ```
 
 #### 5.2 PRE_REVERT（已跳过，Phase 1 已执行）
@@ -456,6 +473,7 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step PRECHECK --result p
 ```bash
 # 标记 PRE_REVERT 为 skip（Phase 1 已执行）
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step PRE_REVERT --result skip --note "Phase 1 completed"
+echo "[CHECK] 5.2 PRE_REVERT: ✅ skip (Phase 1 completed)"
 ```
 
 #### 5.3 APPLY
@@ -491,9 +509,12 @@ if git diff --quiet && git diff --cached --quiet; then
 fi
 
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step APPLY --result pass
+echo "[CHECK] 5.3 APPLY: ✅ pass"
 ```
 
 #### 5.4 VERIFY_INTENT
+
+**每次 APPLY 完成后必须执行，不可跳过。**
 
 ```bash
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step VERIFY_INTENT --result in_progress
@@ -504,7 +525,14 @@ python3 $SCRIPTS_DIR/verify_patch_intent.py \
   --task-id $task_id \
   --repo-path "$KERNEL_REPO_PATH"
 
+VERIFY_EXIT=$?
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step VERIFY_INTENT --result pass
+```
+
+**必须显式输出**（AI 不可省略）：
+
+```
+[CHECK] 5.4 VERIFY_INTENT: <pass/fail> (exit $VERIFY_EXIT, <+行完整性>, <symbol状态>)
 ```
 
 #### 5.5 BUILD（若 build_checkpoint=true）
@@ -580,6 +608,13 @@ python3 $SCRIPTS_DIR/gatekeeper.py \
   --build-log "$BUILD_LOG"
 
 echo "[BUILD CHECKPOINT] $task_id: ✅ 编译通过（$PRODUCTS）"
+echo "[CHECK] 5.5 BUILD: ✅ pass ($PRODUCTS)"
+```
+
+#### 5.5 SKIP BUILD（build_checkpoint=false）
+
+```bash
+echo "[CHECK] 5.5 BUILD: ⏭ skip (build_checkpoint=false, reason: $checkpoint_reason)"
 ```
 
 #### 5.6 BUILD_FIX（编译失败修复）
@@ -633,16 +668,27 @@ git rebase --continue
    - 方案 C: skip 此 patch（标注后续依赖程度）
 4. **推荐**（标注理由）
 
+**BUILD_FIX 完成后输出**：
+```bash
+echo "[CHECK] 5.6 BUILD_FIX: 🔧 fixed ($N retries)"
+```
+
 #### 5.7 COMMIT
 
 ```bash
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step COMMIT --result in_progress
 
-# 门禁检查：build_checkpoint=true 时 BUILD 必须已通过，否则阻塞
+# 门禁检查：强制前置步骤必须已完成，不通过则 exit 2 阻塞
 python3 $SCRIPTS_DIR/gatekeeper.py \
   --merges-file "$OUTPUT_DIR/merge_tasks.json" \
   --task-id $task_id \
   --step COMMIT --check
+if [ $? -ne 0 ]; then
+  echo "❌ 门禁阻塞：COMMIT 前必须完成 VERIFY_INTENT（+ BUILD if checkpoint=true）"
+  echo "   请检查 5.4 VERIFY_INTENT 和 5.5 BUILD 是否已执行并 pass"
+  exit 2
+fi
+echo "[CHECK] 5.7 COMMIT gatekeeper: VERIFY_INTENT ✅, BUILD $(python3 -c "print('✅' if ${build_checkpoint} else '⏭ skip')")"
 
 SUBJECT=$(grep "^Subject:" "$patch_file" | sed 's/Subject: //')
 AUTHOR=$(grep "^From:" "$patch_file" | sed 's/From: //')
@@ -658,6 +704,7 @@ python3 $SCRIPTS_DIR/gatekeeper.py \
   --task-id $task_id \
   --step COMMIT --result pass \
   --commit "$COMMIT_HASH"
+echo "[CHECK] 5.7 COMMIT: ✅ pass ($COMMIT_HASH)"
 ```
 
 #### 5.8 REVIEW
@@ -780,6 +827,7 @@ Read: $OUTPUT_DIR/review_$task_id.md
 
 ```bash
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step REVIEW --result pass
+echo "[CHECK] 5.8 REVIEW: ✅ pass (P0=$P0_COUNT, P1=$P1_COUNT)"
 ```
 
 #### 5.9 RECORD
@@ -787,14 +835,21 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step REVIEW --result pas
 ```bash
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step RECORD --result in_progress
 
-# 门禁检查：REVIEW 必须已完成
+# 门禁检查：REVIEW 必须已完成，不通过则 exit 2 阻塞
 python3 $SCRIPTS_DIR/gatekeeper.py \
   --merges-file "$OUTPUT_DIR/merge_tasks.json" \
   --task-id $task_id \
   --step RECORD --check
+if [ $? -ne 0 ]; then
+  echo "❌ 门禁阻塞：RECORD 前必须完成 REVIEW（5.8）"
+  echo "   请检查 5.8 REVIEW Subagent 是否已执行并 pass"
+  exit 2
+fi
+echo "[CHECK] 5.9 RECORD gatekeeper: REVIEW ✅"
 
 python3 $SCRIPTS_DIR/gatekeeper.py \
   --merges-file "$OUTPUT_DIR/merge_tasks.json" \
   --task-id $task_id \
   --step DONE --result pass
+echo "[CHECK] 5.9 RECORD: ✅ pass"
 ```

@@ -201,7 +201,7 @@ echo "✅ Layer 2 完成，进入 Layer 3"
 echo "=== Layer 3: 执行层 ==="
 
 # 门禁验证（检查 Layer 2 输出）
-bash "$SCRIPTS_DIR/gate_check.sh" layer4 "$KERNEL_REPO_PATH" "$OUTPUT_DIR"
+bash "$SCRIPTS_DIR/gate_check.sh" layer3 "$KERNEL_REPO_PATH" "$OUTPUT_DIR"
 if [ $? -ne 0 ]; then
   echo "❌ Layer 3 前置验证失败，中止"
   exit 30
@@ -222,8 +222,9 @@ echo "✅ 场景已确认: $SCENE"
 
 # Skill tool 调用
 Skill tool: layer3-execution
-  输入: merge_tasks.json
-  状态机: PRECHECK → APPLY → BUILD → COMMIT → REVIEW
+  输入: merge_tasks.json + patch_analysis.json
+  状态机: PRECHECK → PRE_REVERT → APPLY → VERIFY_INTENT → BUILD → BUILD_FIX → COMMIT → REVIEW → RECORD → DONE
+  每步必须完成 gatekeeper 记录，不可跳过任何一步
 
 # 等待 Skill 返回
 echo "Layer 3 完成，输出文件："
