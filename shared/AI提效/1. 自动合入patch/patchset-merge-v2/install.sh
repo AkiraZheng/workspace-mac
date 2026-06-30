@@ -41,24 +41,11 @@ echo "  ✅ shared-scripts"
 # 步骤 3: 设置脚本权限
 echo "设置脚本权限..."
 
-# 使用 for 循环展开 glob（不能用双引号包裹 glob，否则不展开）
-for f in "$SKILL_DIR"/patchset-merge-orchestrator/scripts/*.sh \
-         "$SKILL_DIR"/patchset-merge-orchestrator/scripts/*.py; do
-    [ -f "$f" ] && chmod +x "$f"
-done
+# 先用 find 确保工作区源文件有 +x（git clone 可能丢失）
+find . -type f \( -name "*.sh" -o -name "*.py" \) ! -path "./.venv/*" -exec chmod +x {} \;
 
-for f in "$SKILL_DIR"/shared-scripts/*.py; do
-    [ -f "$f" ] && chmod +x "$f"
-done
-
-if [ -d "$SKILL_DIR/layer2-search/scripts" ]; then
-    for f in "$SKILL_DIR"/layer2-search/scripts/*.py; do
-        [ -f "$f" ] && chmod +x "$f"
-    done
-fi
-
-chmod +x "$SKILL_DIR"/install.sh 2>/dev/null || true
-chmod +x "$SKILL_DIR"/uninstall.sh 2>/dev/null || true
+# 部署后再用 find 确保目标目录有 +x（不依赖 shell glob 展开）
+find "$SKILL_DIR" -type f \( -name "*.sh" -o -name "*.py" \) -exec chmod +x {} \;
 
 echo "  ✅ 所有脚本可执行权限已设置"
 
