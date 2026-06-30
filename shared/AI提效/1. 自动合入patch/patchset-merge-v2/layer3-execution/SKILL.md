@@ -233,17 +233,38 @@ python3 $SCRIPTS_DIR/gatekeeper.py \
   --step BUILD --result in_progress
 
 BUILD_LOG="$OUTPUT_DIR/build_phase1_revert.log"
+
+# 强制重建
+rm -f arch/arm64/boot/Image
+
 eval "$BUILD_CMD" 2>&1 | tee "$BUILD_LOG"
 BUILD_EXIT=$?
 
 ERROR_COUNT=$(grep -c "^make\[[0-9]*\]: \*\*\*" "$BUILD_LOG" 2>/dev/null || echo 0)
 
+FAILED_REASON=""
+PRODUCTS=""
 if [ "$BUILD_EXIT" -eq 0 ]; then
-  test -f "arch/arm64/boot/Image" -a -s "arch/arm64/boot/Image" || BUILD_EXIT=20
+  if test -f "arch/arm64/boot/Image" -a -s "arch/arm64/boot/Image"; then
+    IMAGE_SIZE=$(du -h arch/arm64/boot/Image | cut -f1)
+    PRODUCTS="Image:${IMAGE_SIZE}"
+  else
+    BUILD_EXIT=20
+    FAILED_REASON="Image 产物缺失或为空"
+  fi
+  if echo "$BUILD_CMD" | grep -qE '(^| )modules($| )'; then
+    KO_COUNT=$(find . -name "*.ko" -newer "$BUILD_LOG" 2>/dev/null | wc -l)
+    if grep -q "MODPOST" "$BUILD_LOG" 2>/dev/null; then
+      PRODUCTS="$PRODUCTS modules:${KO_COUNT}ko"
+    else
+      BUILD_EXIT=21
+      FAILED_REASON="modules 编译无 MODPOST（模块安装未执行）"
+    fi
+  fi
 fi
 
 if [ "$BUILD_EXIT" -ne 0 ]; then
-  Question: "Phase 1 编译失败（error=$ERROR_COUNT），如何处理？"
+  Question: "Phase 1 编译失败（error=$ERROR_COUNT，原因=${FAILED_REASON:-编译错误}），如何处理？"
     [1] 查看编译错误详情
     [2] 手工修复编译问题
     [3] 回退所有 revert，重新规划
@@ -254,9 +275,9 @@ python3 $SCRIPTS_DIR/gatekeeper.py \
   --task-id "phase1_revert" \
   --step BUILD --result pass \
   --error-count "$ERROR_COUNT" \
-  --product "arch/arm64/boot/Image"
+  --product "$PRODUCTS"
 
-echo "✅ Phase 1 编译验证通过：仓库可编译"
+echo "✅ Phase 1 编译验证通过：仓库可编译（$PRODUCTS）"
 ```
 
 **编译失败处理**：
@@ -496,7 +517,8 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step VERIFY_INTENT --res
 | 禁止操作 | 原因 | 正确做法 |
 |---------|------|---------|
 | `make <目标>` 单文件编译 | 无法验证 patch 改动的全局影响 | `$BUILD_CMD` 完整编译 |
-| 跳过产物验证 | 编译成功 ≠ 产物存在 | 检查 arch/arm64/boot/Image 存在且非空 |
+| 跳过产物验证 | 编译成功 ≠ 产物存在 | 动态校验：Image（始终）+ modules/ dtbs（按 BUILD_CMD 目标） |
+| 复用旧产物 | make 可能因 timestamp 跳过实际编译 | 编译前 `rm -f arch/arm64/boot/Image` |
 </HARD-GATE>
 
 ```bash
@@ -509,19 +531,42 @@ python3 $SCRIPTS_DIR/gatekeeper.py \
 BUILD_LOG="$OUTPUT_DIR/build_${task_id}.log"
 echo "编译命令: $BUILD_CMD"
 
+# 强制重建：编译前删除产物，防止 make timestamp 优化跳过实际编译
+rm -f arch/arm64/boot/Image
+
 eval "$BUILD_CMD" 2>&1 | tee "$BUILD_LOG"
 BUILD_EXIT=$?
 
 # 统计 error 数
 ERROR_COUNT=$(grep -c "^make\[[0-9]*\]: \*\*\*" "$BUILD_LOG" 2>/dev/null || echo 0)
 
-# 检查产物
+# 动态产物校验（根据 BUILD_CMD 目标决定检查项）
+PRODUCTS=""
+FAILED_REASON=""
 if [ "$BUILD_EXIT" -eq 0 ]; then
-  test -f "arch/arm64/boot/Image" -a -s "arch/arm64/boot/Image" || BUILD_EXIT=20
+  # Image：所有 arm64 编译都检查
+  if test -f "arch/arm64/boot/Image" -a -s "arch/arm64/boot/Image"; then
+    IMAGE_SIZE=$(du -h arch/arm64/boot/Image | cut -f1)
+    PRODUCTS="Image:${IMAGE_SIZE}"
+  else
+    BUILD_EXIT=20
+    FAILED_REASON="Image 产物缺失或为空"
+  fi
+
+  # Modules：BUILD_CMD 含 modules 目标时检查
+  if echo "$BUILD_CMD" | grep -qE '(^| )modules($| )'; then
+    KO_COUNT=$(find . -name "*.ko" -newer "$BUILD_LOG" 2>/dev/null | wc -l)
+    if grep -q "MODPOST" "$BUILD_LOG" 2>/dev/null; then
+      PRODUCTS="$PRODUCTS modules:${KO_COUNT}ko"
+    else
+      BUILD_EXIT=21
+      FAILED_REASON="modules 编译无 MODPOST（模块安装未执行）"
+    fi
+  fi
 fi
 
 if [ "$BUILD_EXIT" -ne 0 ]; then
-  echo "❌ 编译失败，error 数=$ERROR_COUNT，见 $BUILD_LOG"
+  echo "❌ 编译失败，error 数=$ERROR_COUNT，原因=${FAILED_REASON:-编译错误}，见 $BUILD_LOG"
   exit $BUILD_EXIT
 fi
 
@@ -530,11 +575,11 @@ python3 $SCRIPTS_DIR/gatekeeper.py \
   --task-id $task_id \
   --step BUILD --result pass \
   --error-count "$ERROR_COUNT" \
-  --product "arch/arm64/boot/Image" \
+  --product "$PRODUCTS" \
   --build-target "$BUILD_CMD" \
   --build-log "$BUILD_LOG"
 
-echo "[BUILD CHECKPOINT] $task_id: ✅ 编译通过，Image 产物存在"
+echo "[BUILD CHECKPOINT] $task_id: ✅ 编译通过（$PRODUCTS）"
 ```
 
 #### 5.6 BUILD_FIX（编译失败修复）

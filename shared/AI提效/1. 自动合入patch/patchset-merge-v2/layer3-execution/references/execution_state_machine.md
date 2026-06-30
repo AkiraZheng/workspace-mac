@@ -37,7 +37,7 @@ python3 gatekeeper.py --merges-file merge_tasks.json --task-id 0001 \
 
 # 标记步骤完成
 python3 gatekeeper.py --merges-file merge_tasks.json --task-id 0001 \
-  --step BUILD --result pass --error-count 0 --product arch/arm64/boot/Image
+  --step BUILD --result pass --error-count 0 --product "Image:39M"
 
 # 门禁检查（检查前置步骤是否完成）
 python3 gatekeeper.py --merges-file merge_tasks.json --task-id 0001 \

@@ -6,9 +6,9 @@
   python3 gatekeeper.py --merges-file <path> --task-id 0001 \\
     --step BUILD --result in_progress
 
-  # BUILD 完成后更新状态
+  # BUILD 完成后更新状态（product 为动态产物摘要：Image:39M 或 Image:39M modules:13ko）
   python3 gatekeeper.py --merges-file <path> --task-id 0001 \\
-    --step BUILD --result pass --error-count 0 --product arch/arm64/boot/Image
+    --step BUILD --result pass --error-count 0 --product "Image:39M"
 
   # COMMIT 前门禁检查
   python3 gatekeeper.py --merges-file <path> --task-id 0001 \\
@@ -317,7 +317,7 @@ def main():
     parser.add_argument("--error-count", type=int,
                         help="编译 error 数")
     parser.add_argument("--product",
-                        help="编译产物路径")
+                        help="编译产物摘要（如 Image:39M modules:13ko）")
     parser.add_argument("--build-log",
                         help="编译日志路径")
     parser.add_argument("--commit",

@@ -34,7 +34,8 @@ git rebase -i HEAD~$N
 # 3. 编辑错误文件
 vim <错误文件>
 
-# 4. 编译验证
+# 4. 编译验证（删除旧产物避免 timestamp 跳过）
+rm -f arch/arm64/boot/Image
 make ARCH=$KERNEL_ARCH -j$(nproc)
 
 # 5. 仅 stage 修改的文件
