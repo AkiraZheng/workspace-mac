@@ -12,6 +12,7 @@ description: >
   - /tmp/patches/（下载的 patch 文件）
   - samples_summary.json（抽样检测结果，快速）
   - duplicate_analysis.json（简化版匹配分析）
+  - patch_analysis.json（agent_patch_analysis 产出，语义分析 + 风险 + 依赖）
   - revert_candidates.json
   - deps_candidates.json
   - merge_tasks.json
@@ -404,20 +405,39 @@ Task 1: agent_target_revert
   
   输出要求: Write revert_candidates.json
   
-Task 2: agent_upstream_deps
-  输入: config.json（含 UPSTREAM_REPO_PATH）
+Task 2: agent_patch_analysis
+  输入: 
+    - /tmp/patches/000N-*.patch（全部 patch 原始文件）
+    - samples_summary.json（抽样检测结果）
+    - patch_symbols.json（符号提取结果）
+    - config.json（含 KERNEL_REPO_PATH, UPSTREAM_REPO_PATH）
   工具权限: Bash, Read, Write
   执行模式: 不调 Python 脚本，直接用 Bash git 命令
-  输出要求: Write deps_candidates.json
+  输出要求:
+    - 必产: Write patch_analysis.json
+    - 若有 upstream_repo_path: Write deps_candidates.json
+
+  详细执行流程见 agents/agent_patch_analysis_SKILL.md：
+  
+  1. 读取所有 .patch → 理解功能 → 填 功能分类/功能概述/review_required
+  2. 对比目标仓库（git grep 现有代码 vs patch 改动行）→ 填 conflicts_predicted/risk_level
+  3. 跨 patch 符号交叉（patch_symbols.json）→ 填 depends_on
+  4. 若 config 含 upstream_repo_path → git blame + git log -S 搜索 → 填 blame_hits + 产出 deps_candidates.json
+  5. 提炼 special_notes（API变更/锁冲突/配置项/编码规范）
+  6. 根据 risk_level 和 conflicts_predicted 决定 execution_guide.am_mode（reject / 3way）
+  7. Write: patch_analysis.json
+
+  输出 schema 见 references/patch_analysis_schema.md
 ```
 
 等待两个 Task 返回结果。
 
-### 步骤 5: 读取搜索结果
+### 步骤 5: 读取搜索结果 + patch_analysis.json
 
 ```bash
 Read: $OUTPUT_DIR/revert_candidates.json
 Read: $OUTPUT_DIR/deps_candidates.json
+Read: $OUTPUT_DIR/patch_analysis.json
 ```
 
 ### 步骤 6: JSON 格式验证（Skill 内检查）

@@ -134,8 +134,25 @@ with open('$OUTPUT_DIR/deps_candidates.json') as f:
         exit 23
     fi
 
+    # patch_analysis.json（agent_patch_analysis 产出）
+    check_json_valid "$OUTPUT_DIR/patch_analysis.json" "Layer 3 前置" || exit 24
+    HAS_ANALYSIS=$(python3 -c "
+import json
+with open('$OUTPUT_DIR/patch_analysis.json') as f:
+    d = json.load(f)
+tasks = [k for k in d.keys() if k != 'schema_version']
+if not tasks:
+    print('no_tasks')
+else:
+    print('ok')
+" 2>/dev/null)
+    if [ "$HAS_ANALYSIS" = "no_tasks" ]; then
+        echo "❌ patch_analysis.json 无任务分析记录"
+        exit 25
+    fi
+
     # merge_tasks.json
-    check_json_valid "$OUTPUT_DIR/merge_tasks.json" "Layer 3 前置" || exit 24
+    check_json_valid "$OUTPUT_DIR/merge_tasks.json" "Layer 3 前置" || exit 26
     HAS_MERGE=$(python3 -c "
 import json
 with open('$OUTPUT_DIR/merge_tasks.json') as f:
@@ -156,11 +173,11 @@ with open('$OUTPUT_DIR/merge_tasks.json') as f:
 " 2>/dev/null)
     if [ "$HAS_MERGE" != "ok" ]; then
         echo "❌ merge_tasks.json 内容校验失败: $HAS_MERGE"
-        exit 25
+        exit 27
     fi
 
     # merge_tasks.json schema_version 校验
-    check_schema_version "$OUTPUT_DIR/merge_tasks.json" "1.0" "merge_tasks.json" || exit 26
+    check_schema_version "$OUTPUT_DIR/merge_tasks.json" "1.0" "merge_tasks.json" || exit 28
 
     # scene 不能是 unknown
     SCENE=$(python3 -c "
@@ -171,7 +188,7 @@ with open('$CONFIG_PATH') as f:
     if [ "$SCENE" = "unknown" ]; then
       echo "❌ Layer 3 前置条件不满足: scene 仍为 unknown"
       echo "场景问询未完成，请回到 Layer 2 完成 upgrade/backport 选择"
-      exit 27
+      exit 29
     fi
     ;;
 

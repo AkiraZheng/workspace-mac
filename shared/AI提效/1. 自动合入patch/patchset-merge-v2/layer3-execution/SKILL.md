@@ -3,9 +3,9 @@ name: layer3-execution
 description: >
   Patchset-merge 执行层：串行 merge、编译验证、commit、review。
   
-  强制前置条件：
-  1. 必须在 layer2-search 完成后调用
-  2. 必须存在 merge_tasks.json
+   强制前置条件：
+   1. 必须在 layer2-search 完成后调用
+   2. 必须存在 merge_tasks.json + patch_analysis.json
   
   输出文件：execution_log.json + build_*.log
   
@@ -370,6 +370,36 @@ make ARCH=$KERNEL_ARCH olddefconfig 2>/dev/null || true
 **执行纪律：每个 task 必须完整走完 5.1→5.9，一步都不能跳。gatekeeper --check 在 COMMIT 时强制校验 VERIFY_INTENT 已完成，在 RECORD 时强制校验 REVIEW 已完成，跳过会硬性阻塞。**
 
 AI 按 seq 升序处理每个 task。
+
+**在处理每个 task 前，先读取预分析信息**：
+
+```bash
+# 读取 agent_patch_analysis 产出的预制信息
+python3 -c "
+import json, sys
+with open('$OUTPUT_DIR/patch_analysis.json') as f:
+    pa = json.load(f).get('$task_id', {})
+if not pa:
+    print('WARNING: no pre-analysis for $task_id', file=sys.stderr)
+    sys.exit(0)
+print(f'功能分类: {pa.get(\"功能分类\", \"?\")}')
+print(f'功能概述: {pa.get(\"功能概述\", \"?\")}')
+print(f'风险等级: {pa.get(\"risk_level\", \"?\")} — {pa.get(\"risk_detail\", \"\")}')
+print(f'Review: {pa.get(\"review_required\", \"?\")} — {pa.get(\"review_reason\", \"\")}')
+print(f'内部依赖: {pa.get(\"depends_on\", [])}')
+print(f'冲突预判: {json.dumps(pa.get(\"conflicts_predicted\", []), ensure_ascii=False)}')
+print(f'注意事项: {json.dumps(pa.get(\"special_notes\", []), ensure_ascii=False)}')
+print(f'AM 模式: {pa.get(\"execution_guide\", {}).get(\"am_mode\", \"3way\")}')
+"
+```
+
+**AI 根据预分析调整行为**：
+| 条件 | 行为调整 |
+|------|----------|
+| `risk_level=高` 或 conflicts_predicted 有 high severity | 步骤 5.3 APPLY 使用 `--reject` 模式（手动 .rej 逐行处理） |
+| conflicts_predicted 非空 | 在 git am 前 `read` 目标文件确认现状 |
+| special_notes 非空 | .rej 解决时逐条参考 |
+| execution_guide.am_mode | 覆盖默认 AM 模式（reject 优于 3way） |
 
 **注意**：
 - Phase 1 已批量执行所有 revert commit

@@ -12,6 +12,7 @@
 | `duplicate_analysis.json` | `layer2-search/references/duplicate_analysis_schema.md` | Layer 2 |
 | `revert_candidates.json` | `layer2-search/references/revert_candidates_schema.md` | Layer 2 |
 | `deps_candidates.json` | `layer2-search/references/deps_candidates_schema.md` | Layer 2 |
+| `patch_analysis.json` | `layer2-search/references/patch_analysis_schema.md` | Layer 2 |
 | `patch_symbols.json` | `layer2-search/references/patch_symbols_schema.md` | Layer 2 |
 | `merge_tasks.json` | `layer2-search/references/merge_tasks_schema.md` | Layer 2 |
 | `output_report.json` | `layer4-output/references/output_checklist.md` | Layer 4 |

@@ -56,6 +56,7 @@ skill 启动时会向用户确认这些值，不可硬编码。
 | `config.json` | Layer 1 | Layer 2, 3, 4 | `1.0` |
 | `samples_summary.json` | Layer 2 | Layer 2（内部） | `1.0` |
 | `duplicate_analysis.json` | Layer 2 | Layer 2（内部） | `1.0` |
+| `patch_analysis.json` | Layer 2 | Layer 3 | `1.0` |
 | `revert_candidates.json` | Layer 2 | Layer 3 | `1.0` |
 | `deps_candidates.json` | Layer 2 | Layer 3 | `1.0` |
 | `merge_tasks.json` | Layer 2 | Layer 3, 4 | `1.0` |
@@ -105,6 +106,7 @@ Layer 2 步骤 1 对 Layer 1 的 `config.json` 执行反向验证：
 | `duplicate_analysis.json` | `layer2-search/references/duplicate_analysis_schema.md` | Layer 2 匹配分析产出 |
 | `revert_candidates.json` | `layer2-search/references/revert_candidates_schema.md` | Layer 2 Subagent 产出 |
 | `deps_candidates.json` | `layer2-search/references/deps_candidates_schema.md` | Layer 2 Subagent 产出 |
+| `patch_analysis.json` | `layer2-search/references/patch_analysis_schema.md` | Layer 2 agent_patch_analysis 产出 |
 | `patch_symbols.json` | `layer2-search/references/patch_symbols_schema.md` | Layer 2 脚本产出 |
 | `merge_tasks.json` | `layer2-search/references/merge_tasks_schema.md` | Layer 2 最终产出（核心 schema） |
 | `analyse.md` 模板 | `layer4-output/references/analyse_template.md` | Layer 4 每 patch 落盘模板 |
@@ -120,6 +122,7 @@ Layer 2 步骤 1 对 Layer 1 的 `config.json` 执行反向验证：
 | Schema 索引 | `orchestrator/references/output-templates.md` | 所有 schema 的索引导航 |
 | 冲突解决 | `conflict-resolver/SKILL.md` | git am 冲突自动解决 + Ours/Theirs 决策 |
 | Code Review | `linux-kernel-review/SKILL.md` | 内核 patch 合入后的专项 review 操作指南 |
+| Patch 分析 | `layer2-search/agents/agent_patch_analysis_SKILL.md` | 语义分析 + 风险评估 + 依赖标注 Subagent |
 
 查询规则：**改哪个 JSON 的字段 → 先查索引找到对应 reference → 改 reference 文件 → 按传播规则更新消费层**。
 

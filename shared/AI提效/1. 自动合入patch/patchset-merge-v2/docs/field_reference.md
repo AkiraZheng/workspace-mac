@@ -111,7 +111,7 @@
 
 ---
 
-## deps_candidates.json（Layer 2 Subagent 产出，Layer 3 消费）
+## deps_candidates.json（agent_patch_analysis 产出，Layer 3 消费）
 
 | 字段 | 生产者 | 消费者 | 用途 |
 |------|--------|--------|------|
@@ -122,6 +122,32 @@
 | `dependencies[].ruling` | Layer 2 Subagent | **Layer 3 强依赖** | confirm / reject |
 | `dependencies[].pull_cmd` | Layer 2 Subagent | Layer 3 | 推荐拉取命令 |
 | `dependencies[].reason` | Layer 2 Subagent | Layer 2 展示 | 依赖原因 |
+
+---
+
+## patch_analysis.json（agent_patch_analysis 产出，Layer 3 消费）
+
+| 字段 | 生产者 | 消费者 | 用途 |
+|------|--------|--------|------|
+| `schema_version` | agent_patch_analysis | gate_check.sh | 接口版本校验 |
+| `<task_id>.功能分类` | agent_patch_analysis | Layer 3 展示 | infra/driver/core/fs/net/sound/doc/bugfix |
+| `<task_id>.功能概述` | agent_patch_analysis | Layer 3 展示 | 一句话功能描述 |
+| `<task_id>.risk_level` | agent_patch_analysis | **Layer 3 强依赖** | 高/中/低，决定 AM 模式 |
+| `<task_id>.risk_detail` | agent_patch_analysis | Layer 3 展示 | 风险详述 |
+| `<task_id>.review_required` | agent_patch_analysis | Layer 3 展示 | 高/中/低 |
+| `<task_id>.review_reason` | agent_patch_analysis | Layer 3 展示 | review 原因 |
+| `<task_id>.conflicts_predicted` | agent_patch_analysis | **Layer 3 强依赖** | 预判冲突点，git am 前提前准备 |
+| `<task_id>.special_notes` | agent_patch_analysis | **Layer 3 强依赖** | .rej 解决时逐条参考 |
+| `<task_id>.depends_on` | agent_patch_analysis | Layer 3 展示 | 内部依赖 task_id 列表 |
+| `<task_id>.blame_hits` | agent_patch_analysis | Layer 3 展示 | upstream git blame 追溯 |
+| `<task_id>.execution_guide.am_mode` | agent_patch_analysis | **Layer 3 强依赖** | reject/3way，覆盖默认 AM 模式 |
+
+### execution_guide
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `am_mode` | string | reject（手动 .rej） / 3way（自动合并） |
+| `conflict_strategy` | string/null | 冲突解决策略提示 |
 
 ---
 
@@ -193,5 +219,6 @@
 |------|------|
 | config.json | `kernel_repo_path`, `kernel_arch`, `build_cmd`, `scene` |
 | merge_tasks.json | `seq`, `task_id`, `patch_file`, `action`, `pre_revert`, `depends_on`, `build_checkpoint` |
+| patch_analysis.json | `<task_id>.risk_level`, `<task_id>.conflicts_predicted`, `<task_id>.special_notes`, `<task_id>.execution_guide.am_mode` |
 | revert_candidates.json | `candidates[].commit_hash`, `candidates[].ruling` |
 | deps_candidates.json | `dependencies[].commit_hash`, `dependencies[].ruling` |

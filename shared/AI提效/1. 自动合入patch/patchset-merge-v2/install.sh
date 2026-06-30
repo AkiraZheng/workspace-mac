@@ -50,6 +50,11 @@ cp -r layer3-execution "$SKILL_DIR/"
 cp -r layer4-output "$SKILL_DIR/"
 echo "  ✅ layer1-4"
 
+# Layer 2 agents
+mkdir -p "$SKILL_DIR/layer2-search/agents"
+cp -r layer2-search/agents/* "$SKILL_DIR/layer2-search/agents/" 2>/dev/null || true
+echo "  ✅ layer2-search agents"
+
 # 通用 Skills
 cp -r conflict-resolver "$SKILL_DIR/"
 echo "  ✅ conflict-resolver"
