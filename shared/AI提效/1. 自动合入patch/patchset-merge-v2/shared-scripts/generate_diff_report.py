@@ -451,6 +451,10 @@ def main():
         "--task-id",
         help="task_id（如 0001），用于从 merge_tasks.json 查找 execution_log",
     )
+    parser.add_argument(
+        "--output",
+        help="输出文件路径（不指定则输出到 stdout）",
+    )
 
     args = parser.parse_args()
 
@@ -485,7 +489,14 @@ def main():
         annotate_deviation_root_causes(devs, exec_log)
 
     report = generate_report(devs, src_desc, tgt_desc, mode=mode, execution_log=exec_log)
-    print(report)
+
+    if args.output:
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        with open(args.output, "w") as f:
+            f.write(report)
+        print(f"[DIFF] {args.output}")
+    else:
+        print(report)
 
 
 if __name__ == "__main__":

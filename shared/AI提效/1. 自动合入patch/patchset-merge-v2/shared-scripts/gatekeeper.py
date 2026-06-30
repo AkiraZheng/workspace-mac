@@ -59,16 +59,14 @@ STEP_PRE_REQUISITES_STATIC = {
 
 
 def get_required_steps(task: dict, step: str) -> list[str]:
-    """动态获取前置步骤（根据 build_checkpoint 调整）
-    
-    核心修复：build_checkpoint=false 的 task 不需要 BUILD 前置
-    """
+    """动态获取前置步骤（根据 build_checkpoint 调整）"""
     if step == "COMMIT":
-        # build_checkpoint=false 不需要 BUILD 前置
-        if task.get("build_checkpoint") == False:
-            return []
-        else:
-            return ["BUILD"]
+        prereqs = ["VERIFY_INTENT"]
+        if task.get("build_checkpoint") != False:
+            prereqs.append("BUILD")
+        return prereqs
+    if step == "RECORD":
+        return ["REVIEW"]
     return STEP_PRE_REQUISITES_STATIC.get(step, [])
 
 WORKFLOW_HINTS = {

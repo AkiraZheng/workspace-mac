@@ -64,42 +64,38 @@ Layer 3 每个 patch 执行完成后落盘使用。复制以下模板，将 `{�
 - 编译修复：{编译修复详情}
 - 重试次数：冲突 {冲突轮数} 次 / 编译 {编译轮数} 次
 
-## 9. 与源 Patch/Commit 的差异对比
+## 9. 与源 Patch 的差异对比
 
-**对比对象**：
-- **merge 场景**：原始 `.patch` 文件 vs 合入后的 commit（`git show <commit>`）
-- **revert 场景**：被 revert 的原 commit vs revert commit
+**AI 生成要求**：
+1. 读取 `$OUTPUT_DIR/diffs/<task_id>.diff` 获取偏离参考数据
+2. 读取原始 `.patch` 文件理解源变更意图
+3. 按文件分组，逐行对比源 patch 与 `git show <commit_hash>` 的差异
+4. 只展示有差异的地方，完全相同的不列
+5. 每个偏离必须标注说明和根因
 
-**输出焦点**：只展示偏离部分，不重复完整内容。由 `generate_diff_report.py` 生成。
+**格式要求**：
 
-**脚本调用**：
-```bash
-# merge 场景
-python3 shared-scripts/generate_diff_report.py \
-  --source "patch:/tmp/patches/0001-xxx.patch" \
-  --target <commit_hash> --repo-path "$KERNEL_REPO_PATH" \
-  --execution-log "$OUTPUT_DIR/merge_tasks.json" \
-  --task-id "0001"
+```markdown
+### <文件路径>
+源 patch 意图：+X 行, -Y 行 → 实际 commit：+X' 行, -Y' 行
 
-# revert 场景（镜像对比）
-python3 shared-scripts/generate_diff_report.py \
-  --source "commit:<被_revert_的_commit>" \
-  --target <revert_commit_hash> --repo-path "$KERNEL_REPO_PATH" \
-  --mode revert \
-  --execution-log "$OUTPUT_DIR/merge_tasks.json" \
-  --task-id "0001"
+| 源 patch 行 | 实际 commit 行 | 偏离说明 |
+|------------|--------------|----------|
+| `+ original_line` | `+ adapted_line` | 适配原因 |
+| （无） | `+ extra_line` | 新增原因 |
+| `- removed_line` | （无） | 目标保留原因 |
+
+**结论**：X 处偏离。X 处冲突修正（风险评估），X 处目标仓库适配（是否需 review）。
 ```
 
 **偏离类型标注**：
-- 源有目标无：patch/原 commit 有此行，实际 commit 无（因冲突跳过/被删除）
-- 目标有源无：实际 commit 有此行，源 patch/原 commit 无（因适配新增/git am 自动调整）
-- revert 模式：源添加→目标应删除，源删除→目标应恢复（镜像匹配）
+- 源行→实际行不同：patch 意图被修改（冲突修正/API 适配）
+- 源行存在、实际无：patch 中的行被放弃（冲突删除）
+- 源无、实际存在：目标仓库新增的行（适配/补全）
 
-**根因分析**：偏离标注后会从 execution_log 中提取根因。
+**根因分析**：结合 `execution_log.json` 和 `.diff` 文件的根因字段，解释每条偏离的原因。
 
-```diff
-{差异对比内容，由 generate_diff_report.py 生成}
-```
+**数据参考**：`$OUTPUT_DIR/diffs/<task_id>.diff` 文件由 `generate_diff_report.py` 生成，包含逐文件偏离清单和根因标注。
 
 ## 10. 编译验证记录
 

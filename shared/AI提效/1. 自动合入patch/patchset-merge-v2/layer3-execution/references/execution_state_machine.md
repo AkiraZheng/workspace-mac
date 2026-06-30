@@ -17,9 +17,9 @@ PRECHECK → PRE_REVERT → APPLY → VERIFY_INTENT → BUILD → COMMIT → REV
 | APPLY | git am --3way --reject + 处理 .rej | 无 | 始终执行 |
 | VERIFY_INTENT | verify_patch_intent.py 校验 | APPLY | 始终执行 |
 | BUILD | 编译验证 | 无（动态按 build_checkpoint） | checkpoint=true 时执行，false 时跳过 |
-| COMMIT | git commit | BUILD（仅 build_checkpoint=true 时）| 始终执行 |
+| COMMIT | git commit | VERIFY_INTENT + BUILD（仅 build_checkpoint=true 时） | 始终执行 |
 | REVIEW | linux-kernel-review skill | COMMIT | 始终执行 |
-| RECORD | generate_analyse_md.py | REVIEW | 始终执行 |
+| RECORD | gatekeeper --check | REVIEW | 始终执行 |
 | DONE | 标记完成 | BUILD + COMMIT | — |
 
 ## 动态前置依赖

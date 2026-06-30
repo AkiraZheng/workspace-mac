@@ -367,6 +367,8 @@ make ARCH=$KERNEL_ARCH olddefconfig 2>/dev/null || true
 
 **Phase 3：按 seq 升序应用所有新 patch（每个 patch 的 pre_revert 已在 Phase 1 执行）**
 
+**执行纪律：每个 task 必须完整走完 5.1→5.9，一步都不能跳。gatekeeper --check 在 COMMIT 时强制校验 VERIFY_INTENT 已完成，在 RECORD 时强制校验 REVIEW 已完成，跳过会硬性阻塞。**
+
 AI 按 seq 升序处理每个 task。
 
 **注意**：
@@ -600,5 +602,16 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step REVIEW --result pas
 #### 5.9 RECORD
 
 ```bash
-python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --result done
+python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step RECORD --result in_progress
+
+# 门禁检查：REVIEW 必须已完成
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id $task_id \
+  --step RECORD --check
+
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id $task_id \
+  --step DONE --result pass
 ```
