@@ -289,7 +289,19 @@ echo "配置提取完成：
 是否复用此配置？ [Y/n]
 ```
 
-- **Y / 回车** → 直接按 `config_preference.json` 中的 option 和路径执行，跳过交互
+- **Y / 回车** → 直接按 `config_preference.json` 中的 option 和路径执行，跳过交互。
+  **复用后必须更新 last_used 时间戳**：
+  ```bash
+  python3 -c "
+  import json
+  with open('$KERNEL_REPO/.patchmerge/config_preference.json') as f:
+      pref = json.load(f)
+  pref['last_used'] = '$(date -Iseconds)'
+  with open('$KERNEL_REPO/.patchmerge/config_preference.json', 'w') as f:
+      json.dump(pref, f, indent=2)
+  echo '[CHECK] REUSE_PREFERENCE: option=$CONFIG_OPTION last_used updated'
+  "
+  ```
 - **n** → 清除偏好，进入 4b 完整交互
 
 #### 4b. 完整交互
@@ -383,21 +395,36 @@ echo "架构校验完成：
 
 #### 偏好保存
 
-选项执行成功后，保存偏好：
+**选择完成后必须保存偏好**。将以下 shell 变量设为实际值后执行：
 
 ```bash
+# AI 根据用户选择设置这些变量（必须在 python3 -c 调用前 set）：
+# CONFIG_OPTION: 0=已有 .config, 1=defconfig, 2=外部文件, 3=合并模式
+# CONFIG_FULL_PATH: option=2 时为外部文件路径，其他为空字符串
+# CONFIG_BASE: option=3 时为基础 defconfig 路径，其他为空字符串
+# CONFIG_INCREMENTAL: option=3 时为增量片段路径，其他为空字符串
+
+CONFIG_OPTION=0  # ← AI 替换为实际值
+CONFIG_FULL_PATH=""  # ← AI 替换为实际值（仅 option=2）
+CONFIG_BASE=""  # ← AI 替换为实际值（仅 option=3）
+CONFIG_INCREMENTAL=""  # ← AI 替换为实际值（仅 option=3）
+
 mkdir -p "$KERNEL_REPO/.patchmerge"
 python3 -c "
-import json
-with open('$KERNEL_REPO/.patchmerge/config_preference.json', 'w') as f:
+import json, os
+with open(os.environ['KERNEL_REPO'] + '/.patchmerge/config_preference.json', 'w') as f:
     json.dump({
-        'option': <opt>,
-        'full_config_path': '<path, 仅 option 2 有值>',
-        'base_config': '<base, 仅 option 3 有值>',
-        'incremental_path': '<incr, 仅 option 3 有值>',
+        'option': int(os.environ['CONFIG_OPTION']),
+        'full_config_path': os.environ['CONFIG_FULL_PATH'],
+        'base_config': os.environ['CONFIG_BASE'],
+        'incremental_path': os.environ['CONFIG_INCREMENTAL'],
         'last_used': '$(date -Iseconds)'
     }, f, indent=2)
-"
+" KERNEL_REPO="$KERNEL_REPO" CONFIG_OPTION="$CONFIG_OPTION" \
+  CONFIG_FULL_PATH="$CONFIG_FULL_PATH" CONFIG_BASE="$CONFIG_BASE" \
+  CONFIG_INCREMENTAL="$CONFIG_INCREMENTAL"
+
+echo "[CHECK] SAVE_PREFERENCE: option=$CONFIG_OPTION → $KERNEL_REPO/.patchmerge/config_preference.json"
 ```
 
 ### 步骤 5: 场景确认（Question 工具）
