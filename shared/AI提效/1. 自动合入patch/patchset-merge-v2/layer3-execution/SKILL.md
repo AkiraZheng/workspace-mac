@@ -7,7 +7,7 @@ description: >
   1. 必须在 layer2-search 完成后调用
   2. 必须存在 merge_tasks.json
   
-  输出文件：execution_log.json
+  输出文件：execution_log.json + build_*.log
   
   完成后状态：Write state.json: {"layer3": "completed"}
 ---
@@ -50,6 +50,11 @@ description: >
 ### 步骤 1: 读取 config.json + merge_tasks.json
 
 ```bash
+# 检查是否有未完成的恢复任务
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --restore || true
+
 Read: $KERNEL_REPO/patch_analysis/config.json
 ```
 
@@ -222,39 +227,36 @@ cd $KERNEL_REPO_PATH
 
 echo "Phase 1 编译验证：确认 revert 后仓库可编译"
 
-# 执行编译
-eval "$BUILD_CMD"
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id "phase1_revert" \
+  --step BUILD --result in_progress
 
-if [ $? -eq 0 ]; then
-  # 根据架构选择对应的编译产物路径
-  case $KERNEL_ARCH in
-    arm64) test -f "arch/arm64/boot/Image" || BUILD_FAIL=1 ;;
-    x86_64) test -f "arch/x86/boot/bzImage" || BUILD_FAIL=1 ;;
-    *) echo "⚠️ 未知架构 $KERNEL_ARCH，跳过产物检查" ;;
-  esac
-  
-  if [ -z "$BUILD_FAIL" ]; then
-    echo "✅ Phase 1 编译验证通过：仓库可编译"
-    git status
-  else
-    Question: "Phase 1 编译失败：revert 后仓库不可编译。
+BUILD_LOG="$OUTPUT_DIR/build_phase1_revert.log"
+eval "$BUILD_CMD" 2>&1 | tee "$BUILD_LOG"
+BUILD_EXIT=$?
 
-    可能原因：
-    - Revert 破坏了依赖关系（如 revert infra commit）
-    - Revert 顺序不正确
-    - 存在未发现的 revert 冲突
+ERROR_COUNT=$(grep -c "^make\[[0-9]*\]: \*\*\*" "$BUILD_LOG" 2>/dev/null || echo 0)
 
+if [ "$BUILD_EXIT" -eq 0 ]; then
+  test -f "arch/arm64/boot/Image" -a -s "arch/arm64/boot/Image" || BUILD_EXIT=20
+fi
+
+if [ "$BUILD_EXIT" -ne 0 ]; then
+  Question: "Phase 1 编译失败（error=$ERROR_COUNT），如何处理？"
     [1] 查看编译错误详情
     [2] 手工修复编译问题
     [3] 回退所有 revert，重新规划
-    "
-  fi
-else
-  Question: "Phase 1 编译失败，如何处理？"
-    [1] 查看编译错误
-    [2] 手工修复
-    [3] 中止任务
 fi
+
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id "phase1_revert" \
+  --step BUILD --result pass \
+  --error-count "$ERROR_COUNT" \
+  --product "arch/arm64/boot/Image"
+
+echo "✅ Phase 1 编译验证通过：仓库可编译"
 ```
 
 **编译失败处理**：
@@ -454,24 +456,54 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step VERIFY_INTENT --res
 
 #### 5.5 BUILD（若 build_checkpoint=true）
 
+**若 build_checkpoint=false**: 跳过 BUILD，直接进入 COMMIT。
+
+<HARD-GATE>
+强制约束：必须编译整个仓库，不可跳过、不可只编译部分文件！
+
+| 禁止操作 | 原因 | 正确做法 |
+|---------|------|---------|
+| `make <目标>` 单文件编译 | 无法验证 patch 改动的全局影响 | `$BUILD_CMD` 完整编译 |
+| 跳过产物验证 | 编译成功 ≠ 产物存在 | 检查 arch/arm64/boot/Image 存在且非空 |
+</HARD-GATE>
+
 ```bash
-python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step BUILD --result in_progress
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id $task_id \
+  --step BUILD --result in_progress
 
-eval "$BUILD_CMD"
+# 编译日志持久化
+BUILD_LOG="$OUTPUT_DIR/build_${task_id}.log"
+echo "编译命令: $BUILD_CMD"
 
-if [ $? -eq 0 ]; then
-  # 根据架构选择对应的编译产物路径
-  case $KERNEL_ARCH in
-    arm64) test -f "arch/arm64/boot/Image" || exit 20 ;;
-    x86_64) test -f "arch/x86/boot/bzImage" || exit 20 ;;
-    *) echo "⚠️ 未知架构 $KERNEL_ARCH，跳过产物检查" ;;
-  esac
+eval "$BUILD_CMD" 2>&1 | tee "$BUILD_LOG"
+BUILD_EXIT=$?
+
+# 统计 error 数
+ERROR_COUNT=$(grep -c "^make\[[0-9]*\]: \*\*\*" "$BUILD_LOG" 2>/dev/null || echo 0)
+
+# 检查产物
+if [ "$BUILD_EXIT" -eq 0 ]; then
+  test -f "arch/arm64/boot/Image" -a -s "arch/arm64/boot/Image" || BUILD_EXIT=20
 fi
 
-python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step BUILD --result pass
-```
+if [ "$BUILD_EXIT" -ne 0 ]; then
+  echo "❌ 编译失败，error 数=$ERROR_COUNT，见 $BUILD_LOG"
+  exit $BUILD_EXIT
+fi
 
-**若 build_checkpoint=false**: 跳过 BUILD
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id $task_id \
+  --step BUILD --result pass \
+  --error-count "$ERROR_COUNT" \
+  --product "arch/arm64/boot/Image" \
+  --build-target "$BUILD_CMD" \
+  --build-log "$BUILD_LOG"
+
+echo "[BUILD CHECKPOINT] $task_id: ✅ 编译通过，Image 产物存在"
+```
 
 #### 5.6 BUILD_FIX（编译失败修复）
 
@@ -488,22 +520,52 @@ python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step BUILD --result pass
 
 **根因定位**：三重匹配（文件匹配 → 符号匹配 → 功能匹配）
 
+**错误分类修复**：
+
+| 错误类型 | 处理方式 |
+|---------|---------|
+| 当前 checkpoint 组内某 patch 语法/逻辑错误 | rebase amend 该 patch |
+| 调用不存在的符号 | 标记为缺失依赖，检查是否需要插入新 dep |
+| patch 引入的新功能需要新 CONFIG | 启用 CONFIG，amend 到对应 patch |
+| 非 patch 的环境 CONFIG 缺失 | 临时启用 CONFIG → make → 编译后记录在 analyse.md |
+
 **rebase amend 修复流程**：
 ```bash
-N=<出错 patch 到当前 checkpoint 的 patch 数>
+# 假设出错 patch 是 0003，当前在 0005（checkpoint）
+N=3  # 覆盖 0003/0004/0005
 git rebase -i HEAD~$N
+# 将 0003 标记为 "edit"
 
+# 在 0003 上修复
 vim <错误文件>
-make ARCH=$KERNEL_ARCH -j$(nproc)
-git add <只修改的文件>
-git commit --amend --no-edit
+make ARCH=$KERNEL_ARCH -j$(nproc)    # 验证修复
+
+git add <只改过的文件>            # 禁止 -A，禁止 -a
+git commit --amend --no-edit     # 不改 message
 git rebase --continue
 ```
+
+**10 轮失败处理**：
+累计 10 次冲突解决或编译修复未通过 → 暂停等待用户决策，输出：
+
+1. **冲突定位**：精确到 文件:行号:函数名 + 错误原文
+2. **根因分析**：Ours vs Theirs 代码对比 / 编译器错误原文 / 语义矛盾点
+3. **可选方案（2-4 个）**：
+   - 方案 A: 具体步骤 → 影响范围 → 风险 → 所需额外工作
+   - 方案 B: ...
+   - 方案 C: skip 此 patch（标注后续依赖程度）
+4. **推荐**（标注理由）
 
 #### 5.7 COMMIT
 
 ```bash
 python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step COMMIT --result in_progress
+
+# 门禁检查：build_checkpoint=true 时 BUILD 必须已通过，否则阻塞
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id $task_id \
+  --step COMMIT --check
 
 SUBJECT=$(grep "^Subject:" "$patch_file" | sed 's/Subject: //')
 AUTHOR=$(grep "^From:" "$patch_file" | sed 's/From: //')
@@ -512,7 +574,13 @@ git commit --author="$AUTHOR" -F- <<COMMIT_MSG
 $SUBJECT
 COMMIT_MSG
 
-python3 $SCRIPTS_DIR/gatekeeper.py --task-id $task_id --step COMMIT --result pass
+COMMIT_HASH=$(git rev-parse HEAD)
+
+python3 $SCRIPTS_DIR/gatekeeper.py \
+  --merges-file "$OUTPUT_DIR/merge_tasks.json" \
+  --task-id $task_id \
+  --step COMMIT --result pass \
+  --commit "$COMMIT_HASH"
 ```
 
 #### 5.8 REVIEW
