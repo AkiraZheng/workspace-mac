@@ -3,6 +3,16 @@
 
 echo "=== Patchset-Merge 分层架构安装脚本 ==="
 
+ask_yn() {
+    # $1 = prompt, $2 = timeout seconds (default 5)
+    local ans timeout=${2:-5}
+    read -r -t "$timeout" -p "$1 [y/N](${timeout}s 超时自动跳过): " ans
+    case "$ans" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *)                 return 1 ;;
+    esac
+}
+
 # 步骤 1: 检测技能目录
 SKILL_DIR="$HOME/.agents/skills/patchset-merge-v2"
 if [ ! -d "$SKILL_DIR" ]; then
@@ -10,7 +20,7 @@ if [ ! -d "$SKILL_DIR" ]; then
     echo "✅ 创建技能目录: $SKILL_DIR"
 fi
 
-# 步骤 1.5: 创建 Python venv 环境（隔离依赖）
+# 步骤 1.5: 创建 Python venv 环境
 echo "创建 Python virtual environment..."
 VENV_DIR="$SKILL_DIR/.venv"
 
@@ -20,21 +30,27 @@ if [ ! -d "$VENV_DIR" ]; then
         exit 1
     }
     echo "  ✅ venv 创建成功: $VENV_DIR"
-    
-    # 在 venv 中安装依赖
-    echo "安装 Python 依赖到 venv..."
-    "$VENV_DIR/bin/pip" install --upgrade pip || true
-    "$VENV_DIR/bin/pip" install b4 || {
-        echo "⚠️ b4 安装失败，patch 下载功能将受限"
-    }
-    echo "  ✅ Python 依赖安装完成"
+
+    # b4 为可选加速工具（message-id 下载），不安装不影响核心流程
+    echo ""
+    if command -v b4 &>/dev/null; then
+        echo "  ✅ b4 已存在（系统安装），跳过 pip 安装"
+    elif [ -f "$VENV_DIR/bin/b4" ]; then
+        echo "  ✅ b4 已存在（venv），跳过安装"
+    elif ask_yn "  b4 未安装，是否尝试 pip install b4？" 5; then
+        echo "  正在 pip install b4 --timeout 10 --retries 1 ..."
+        if "$VENV_DIR/bin/pip" install b4 --timeout 10 --retries 1 >/dev/null 2>&1; then
+            echo "  ✅ b4 安装成功"
+        else
+            echo "  ℹ b4 安装失败（网络不可达），message-id 下载将使用 wget 替代"
+        fi
+    else
+        echo "  ℹ 已跳过 b4，message-id 下载自动降级为 wget"
+        echo "  手动安装: pip install b4"
+    fi
 else
     echo "  ✅ venv 已存在，跳过创建"
 fi
-
-# 设置 VENV_PYTHON 路径（供后续脚本使用）
-VENV_PYTHON="$VENV_DIR/bin/python3"
-export PATCHSET_MERGE_VENV_PYTHON="$VENV_PYTHON"
 
 # 步骤 2: 复制所有 Skill 文件
 echo "复制 Skill 文件..."
@@ -65,21 +81,7 @@ echo "  ✅ linux-kernel-review"
 cp -r shared-scripts "$SKILL_DIR/"
 echo "  ✅ shared-scripts"
 
-# 步骤 3: 修改 Python 脚本使用 venv
-echo "配置 Python 脚本使用 venv..."
-for py_script in "$SKILL_DIR"/shared-scripts/*.py "$SKILL_DIR"/patchset-merge-orchestrator/scripts/*.py; do
-    if [ -f "$py_script" ]; then
-        # 修改 shebang 行使用 venv Python
-        if head -1 "$py_script" | grep -q "^#!/usr/bin/env python3"; then
-            sed -i "1s|^#!/usr/bin/env python3|$VENV_PYTHON|" "$py_script" || true
-        elif head -1 "$py_script" | grep -q "^#!/usr/bin/python3"; then
-            sed -i "1s|^#!/usr/bin/python3|$VENV_PYTHON|" "$py_script" || true
-        fi
-    fi
-done
-echo "  ✅ Python 脚本配置完成"
-
-# 步骤 4: 设置脚本权限
+# 步骤 3: 设置脚本权限
 echo "设置脚本权限..."
 
 # 主调度 Skill 脚本
@@ -106,7 +108,7 @@ chmod +x "$SKILL_DIR/uninstall.sh" 2>/dev/null || true
 
 echo "  ✅ 所有脚本可执行权限已设置"
 
-# 步骤 5: 创建 symlink（兼容 Claude Code 和 OpenCode）
+# 步骤 4: 创建 symlink（兼容 Claude Code 和 OpenCode）
 CLAUDE_SKILL_DIR="$HOME/.claude/skills"
 OPENCODE_SKILL_DIR="$HOME/.config/opencode/skills"
 
@@ -117,16 +119,16 @@ ln -sf "$SKILL_DIR" "$CLAUDE_SKILL_DIR/patchset-merge-v2" || true
 ln -sf "$SKILL_DIR" "$OPENCODE_SKILL_DIR/patchset-merge-v2" || true
 echo "  ✅ Symlink 创建成功"
 
-# 步骤 6: 验证 b4 安装
-echo "验证 b4 安装..."
-if "$VENV_PYTHON" -m b4 --version >/dev/null 2>&1; then
-    B4_VERSION=$("$VENV_PYTHON" -m b4 --version 2>&1 | head -1)
-    echo "  ✅ b4 已安装: $B4_VERSION"
+# 步骤 5: b4 状态报告
+if command -v b4 &>/dev/null; then
+    echo "  ✅ b4: $(b4 --version 2>&1 | head -1)"
+elif [ -f "$SKILL_DIR/.venv/bin/b4" ]; then
+    echo "  ✅ b4: $( $SKILL_DIR/.venv/bin/b4 --version 2>&1 | head -1)"
 else
-    echo "  ⚠️ b4 未安装，message-id 下载功能将不可用"
+    echo "  ℹ b4: 未安装（message-id 下载自动降级为 wget）"
 fi
 
-# 步骤 7: 验证安装
+# 步骤 6: 验证安装
 echo "验证安装..."
 if [ -f "$SKILL_DIR/patchset-merge-orchestrator/SKILL.md" ]; then
     echo "  ✅ 主调度 Skill 存在"
@@ -149,7 +151,7 @@ else
     exit 1
 fi
 
-# 步骤 8: 运行集成测试
+# 步骤 7: 运行集成测试
 echo "运行集成测试..."
 bash tests/test_integration.sh || {
     echo "⚠️ 集成测试失败，请检查文件完整性"
@@ -162,20 +164,16 @@ echo "
 ═══════════════════════════════════════════════════════════════
 
 安装路径：$SKILL_DIR
-Python venv: $VENV_DIR
-Python 解释器: $VENV_PYTHON
 
 使用方法：
   Skill tool: patchset-merge-orchestrator
   输入: '合入 <message-id> 到 ~/code/openeuler/kernel 的 patch-xxx 分支'
 
 下载方式支持：
-  ✅ b4（message-id 格式：<xxx@xxx>）
+  ✅ b4（message-id 格式：<xxx@xxx>）— 如未安装，自动降级为 wget
   ✅ wget（URL 格式：https://...）
   ✅ 本地路径（复制 .patch 文件）
 
 设计文档：docs/superpowers/specs/2026-06-10-*.md
 实现计划：docs/superpowers/plans/2026-06-10-*.md
-
-注意：所有 Python 脚本已配置使用 venv 环境，避免系统 Python 依赖冲突
 "
