@@ -1,0 +1,33 @@
+From 2713f5f6219d2959af7cac9b2ce23883375ab53d Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 04:49:29 +0800
+Subject: [09/12] KVM: arm64: Prevent HDBSS enable when dirty ring is active
+
+HDBSS flushes dirty page entries via kvm_vcpu_mark_page_dirty() which
+routes to the dirty bitmap path. Dirty ring mode uses a separate
+buffer that is not populated by HDBSS hardware tracking, making the
+two mechanisms incompatible. Refuse to enable HDBSS when dirty ring
+is configured to prevent silent data loss during live migration.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/dirty_bit.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 9ad027449498..3165a53b2944 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -56,6 +56,9 @@ int kvm_arm_enable_hdbss_internal(struct kvm *kvm, unsigned int order)
+ 	if (order > HDBSS_MAX_SIZE)
+ 		return -EINVAL;
+ 
++	if (kvm->dirty_ring_size)
++		return -EINVAL;
++
+ 	if (kvm->arch.enable_hdbss)
+ 		return 0;
+ 
+-- 
+2.43.0
+

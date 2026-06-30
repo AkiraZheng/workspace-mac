@@ -1,0 +1,47 @@
+From f0242fa72fe25c893b25acd86a6f2b3a04addfa9 Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 05:15:55 +0800
+Subject: [10/12] KVM: arm64: Update HDBSS flush trigger mechanism
+
+Replace direct kvm_flush_hdbss_buffer() call in the HDBSS fault handler
+with kvm_make_request(KVM_REQ_FLUSH_HDBSS, vcpu) to defer flush to the
+next vcpu exit loop iteration instead of flushing inside the exception
+handler. Also add KVM_REQUEST_WAIT to kvm_arch_sync_dirty_log() so the
+sync request is synchronous, matching what the comment describes.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/kvm/arm.c       | 2 +-
+ arch/arm64/kvm/dirty_bit.c | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 0b1c9dfe8f10..4a4b2a866050 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1983,7 +1983,7 @@ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ 	if (!kvm->arch.enable_hdbss)
+ 		return;
+ 
+-	kvm_make_all_cpus_request(kvm, KVM_REQ_FLUSH_HDBSS);
++	kvm_make_all_cpus_request(kvm, KVM_REQ_FLUSH_HDBSS | KVM_REQUEST_WAIT);
+ }
+ 
+ static int kvm_vm_ioctl_set_device_addr(struct kvm *kvm,
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 3165a53b2944..5d7bef74bef6 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -160,7 +160,8 @@ static int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 
+ 	switch (fsc) {
+ 	case HDBSSPROD_EL2_FSC_OK:
+-		kvm_flush_hdbss_buffer(vcpu);
++		/* Buffer full, set request to flush on next vcpu exit */
++		kvm_make_request(KVM_REQ_FLUSH_HDBSS, vcpu);
+ 		return 1;
+ 	case HDBSSPROD_EL2_FSC_ExternalAbort:
+ 	case HDBSSPROD_EL2_FSC_GPF:
+-- 
+2.43.0
+

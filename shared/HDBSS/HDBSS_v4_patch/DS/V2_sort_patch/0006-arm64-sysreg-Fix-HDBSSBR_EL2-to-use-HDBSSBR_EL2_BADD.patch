@@ -1,0 +1,31 @@
+From 907f7967f3120b8e5cd5d0c65fe9b54a1ea8226b Mon Sep 17 00:00:00 2001
+From: Super User <root@localhost.localdomain>
+Date: Sun, 10 May 2026 04:16:07 +0800
+Subject: [06/12] arm64/sysreg: Fix HDBSSBR_EL2 to use HDBSSBR_EL2_BADDR_MASK
+
+Replace GENMASK(55, 12 + sz) with FIELD_PREP(HDBSSBR_EL2_BADDR_MASK, baddr)
+in the HDBSSBR_EL2 macro. The hardware defines BADDR as bits 55:12 and
+using the named field mask is clearer and avoids the confusing sz-based
+shift in the mask.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ arch/arm64/include/asm/sysreg.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 78bb2c210649..b384b3a964b8 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1045,7 +1045,7 @@
+  */
+ #define HDBSS_MAX_SIZE		HDBSSBR_EL2_SZ_2MB
+ 
+-#define HDBSSBR_EL2(baddr, sz)	(((baddr) & GENMASK(55, 12 + sz)) | \
++#define HDBSSBR_EL2(baddr, sz)	(FIELD_PREP(HDBSSBR_EL2_BADDR_MASK, baddr) | \
+ 				 FIELD_PREP(HDBSSBR_EL2_SZ_MASK, sz))
+ 
+ #define HDBSSPROD_IDX(prod)	FIELD_GET(HDBSSPROD_EL2_INDEX_MASK, prod)
+-- 
+2.43.0
+

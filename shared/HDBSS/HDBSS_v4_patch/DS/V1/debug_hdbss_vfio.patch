@@ -1,0 +1,131 @@
+From: HDBSS Debug Patch
+Subject: Add debug logging for HDBSS + VFIO interaction
+Date: 2026-05-15
+
+This patch adds debug logging to track HDBSS behavior with VFIO/MMIO regions,
+helping identify why DBM is incorrectly applied to device memory.
+
+Key debug points:
+1. user_mem_abort: fault details (ipa, pfn, device, writable)
+2. DBM setting: when DBM is being added
+3. HDBSS buffer flush: entries being recorded
+4. HDBSS enable/disable: when feature is toggled
+
+---
+
+ arch/arm64/kvm/arm.c        | 12 ++++++++++++
+ arch/arm64/kvm/handle_exit.c| 18 +++++++++++++++--
+ arch/arm64/kvm/mmu.c        | 24 ++++++++++++++++++++++-
+ 3 files changed, 53 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index xxx..xxx 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -145,6 +145,14 @@
+ #ifdef CONFIG_ARM64_HDBSS
+ static void kvm_clear_hdbss(struct kvm *kvm)
+ {
++	/*
++	 * DEBUG: Track HDBSS disable timing
++	 * Important: Check if this happens during migration
++	 */
++	pr_info("HDBSS_DEBUG: kvm_clear_hdbss called, enable_hdbss=%d, vtcr=0x%lx\n",
++		kvm->enable_hdbss, kvm->arch.vtcr);
++
+ 	unsigned long i;
+ 	struct kvm_vcpu *vcpu;
+ 	struct page *hdbss_pg;
+@@ -154,6 +162,8 @@ static void kvm_clear_hdbss(struct kvm *kvm)
+ 
+ 	kvm_for_each_vcpu(i, vcpu, kvm) {
+ 		/* Kick vcpus to flush hdbss buffer. */
++		pr_info("HDBSS_DEBUG: Clearing vcpu %lu hdbss buffer, br_el2=0x%llx\n",
++			i, vcpu->arch.hdbss.br_el2);
+ 		kvm_vcpu_kick(vcpu);
+ 
+ 		hdbss_pg = phys_to_page(HDBSSBR_BADDR(vcpu->arch.hdbss.br_el2));
+@@ -192,6 +202,8 @@ static int kvm_cap_arm_enable_hdbss(struct kvm *kvm,
+ 	}
+ 
+ 	/* Enable the HDBSS feature if size > 0, otherwise disable it. */
++	pr_info("HDBSS_DEBUG: kvm_cap_arm_enable_hdbss size=%d, current enable_hdbss=%d\n",
++		size, kvm->enable_hdbss);
+ 	if (size) {
+ 		kvm->enable_hdbss = true;
+ 		kvm->arch.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS;
+diff --git a/arch/arm64/kvm/handle_exit.c b/arch/arm64/kvm/handle_exit.c
+index xxx..xxx 100644
+--- a/arch/arm64/kvm/handle_exit.c
++++ b/arch/arm64/kvm/handle_exit.c
+@@ -295,6 +295,7 @@
+ #ifdef CONFIG_ARM64_HDBSS
+ #define HDBSS_ENTRY_VALID_SHIFT 0
+ #define HDBSS_ENTRY_VALID_MASK (1UL << HDBSS_ENTRY_VALID_SHIFT)
+@@ -301,6 +302,12 @@ static void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ {
+ 	int idx, curr_idx;
+ 	u64 *hdbss_buf;
++	
++	/* DEBUG: Track HDBSS buffer flush */
++	pr_info_ratelimited("HDBSS_DEBUG: kvm_flush_hdbss_buffer vcpu=%d enable_hdbss=%d br_el2=0x%llx\n",
++		vcpu->vcpu_idx, vcpu->kvm->enable_hdbss, vcpu->arch.hdbss.br_el2);
+ 
+ 	if (!vcpu->kvm->enable_hdbss)
+ 		return;
+@@ -323,6 +330,10 @@ static void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ 		if (!(gpa & HDBSS_ENTRY_VALID_MASK))
+ 			continue;
+ 
++		/* DEBUG: Log each dirty GPA being recorded */
++		pr_info_ratelimited("HDBSS_DEBUG: Marking page dirty gpa=0x%llx (entry %d/%d)\n",
++			gpa & HDBSS_ENTRY_IPA_MASK, idx, curr_idx);
++
+ 		gpa = gpa & HDBSS_ENTRY_IPA_MASK;
+ 		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
+ 	}
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index xxx..xxx 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1609,6 +1609,20 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (kvm_is_device_pfn(pfn)) {
+ 		/*
++		 * DEBUG: Critical point for VFIO/MMIO detection
++		 * This is where device memory should be identified
++		 * If device=true but DBM still gets added, we have a bug
++		 */
++		pr_info_ratelimited("HDBSS_DEBUG: Device MMIO fault detected! "
++			"fault_ipa=0x%llx pfn=0x%lx memslot=%d gfn=0x%lx writable=%d\n",
++			fault_ipa, pfn, memslot->id, gfn, writable);
++
+ 		 * If the page was identified as device early by looking at
+ 		 * the VMA flags, vma_pagesize is already representing the
+ 		 * largest quantity we can map.  If instead it was mapped
+@@ -1678,6 +1692,16 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 	if (writable)
+ 		prot |= KVM_PGTABLE_PROT_W;
+ 
++	/*
++	 * DEBUG: Critical DBM decision point
++	 * Log the conditions that determine DBM setting
++	 */
++	pr_info_ratelimited("HDBSS_DEBUG: DBM decision: fault_ipa=0x%llx device=%d "
++		"enable_hdbss=%d logging_active=%d writable=%d pfn=0x%lx\n",
++		fault_ipa, device, kvm->enable_hdbss, logging_active, writable, pfn);
++
+ #ifdef CONFIG_ARM64_HDBSS
+ 	if (!device && kvm->enable_hdbss && logging_active)
+ 		prot |= KVM_PGTABLE_PROT_DBM;
+@@ -1689,6 +1713,10 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
+ 
+ 	if (device)
+ 		prot |= KVM_PGTABLE_PROT_DEVICE;
++	else if (kvm->enable_hdbss && logging_active && (prot & KVM_PGTABLE_PROT_DBM))
++		/* DEBUG: Confirm DBM was added for RAM */
++		pr_info_ratelimited("HDBSS_DEBUG: DBM added for RAM fault_ipa=0x%llx\n",
++			fault_ipa);
+ 	else if (cpus_have_const_cap(ARM64_HAS_CACHE_DIC))
+ 		prot |= KVM_PGTABLE_PROT_X;
+ 
+---
