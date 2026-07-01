@@ -1158,6 +1158,158 @@ static irqreturn_t hacdbsirq_handler(int irq, void *pcpu)
 
 ---
 
+## HACDBS 与 HDBSS 的关系辨析
+
+### 职责划分
+
+HDBSS 和 HACDBS 是两个独立的硬件加速器，职责互补但方向相反：
+
+```
+                    检测脏页 (S2AP[1]: 1→0)            清理脏页 (S2AP[1]: 0→1)
+                    ──────────────────────              ──────────────────────
+                    硬件自动标记 dirty                   VMM 发起，硬件走查页表重置
+                          │                                      │
+                     ┌────┴────┐                           ┌─────┴─────┐
+                     │  HDBSS   │                           │  HACDBS   │
+                     │ (检测)   │                           │  (清理)   │
+                     └────┬────┘                           └─────┬─────┘
+                          │                                      │
+                     HDBSS Buffer                         临时 kmalloc buffer
+                     (per-vCPU 分配，                     (每次清理操作独立分配)
+                      硬件填入脏 GFN)                          │
+                          │                             HACDBSIRQ 中断
+                     HDBSSF 中断                               │
+                          │                            S2AP[1] = 1 (clean)
+                     软件 push 到                              │
+                     bitmap / ring                      成功条目数返回
+```
+
+| | HDBSS | HACDBS |
+|------|-------|--------|
+| **方向** | S2AP[1]: 1→0 (标记脏) | S2AP[1]: 0→1 (清理脏) |
+| **触发方** | 硬件 (写操作自动) | VMM (ioctl 显式调用) |
+| **Buffer 来源** | per-vCPU 预分配，硬件写入 | 每次操作临时 `kmalloc` 构造 |
+| **Buffer 内容** | 硬件自动填入脏 GFN 列表 | 软件从 bitmap/ring 转换为 HDBSS 条目 |
+| **关联寄存器** | `HDBSSBR_EL2` / `HDBSSPROD_EL2` | `HACDBSBR_EL2` / `HACDBSCONS_EL2` |
+| **中断** | HDBSSF (fault) | HACDBSIRQ |
+
+### HACDBS 不依赖 HDBSS Buffer
+
+从代码可以清楚看到 HACDBS 的 buffer 是独立分配的：
+
+```c
+// bitmap 路径 (dirty_bit.c:165)：每次操作临时分配 PAGE_SIZE
+hw_entries = kmalloc_objs(u64, entries_sz, GFP_KERNEL);
+
+// ring 路径 (dirty_bit.c:273)：每次操作分配 ring->size 大小
+hw_entries = kmalloc(max(ring->size * sizeof(u64), PAGE_SIZE), GFP_KERNEL);
+```
+
+软件将 bitmap/ring 的数据**自己转换为 HDBSS 条目格式**后填入这个 buffer，再通过 `hacdbs_start()` 提交给 HACDBS 硬件。整个过程中 HACDBS 完全不触碰 HDBSS 自己的 per-vCPU buffer（`vcpu->arch.hdbss`）。
+
+### DBM 的实际来源
+
+`KVM_PGTABLE_S2_DBM` flag 当前通过 `system_supports_hdbss()` 门控：
+
+```c
+// __kvm_pgtable_stage2_init()
+if (system_supports_hdbss())
+    flags |= KVM_PGTABLE_S2_DBM;
+```
+
+但实际上 DBM 是 `FEAT_HAFDBS` 的子特性（`ID_AA64MMFR1_EL1.HAFDBS >= 0b0010`），不需要达到 HDBSS（`0b0101`）的等级。这里使用 `system_supports_hdbss()` 做门控是一个比较松散的耦合——它能保证 DBM 一定可用，但逻辑上并不严谨。
+
+---
+
+## dirty-ring 加速机制详解
+
+### 核心：S2AP[1] 是硬件操作的位
+
+HACDBS 硬件在 Stage-2 页表上操作的唯一目标位是 **S2AP[1]**（页表描述符 bit 7），即：
+
+```c
+// arch/arm64/include/asm/kvm_pgtable.h
+#define KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W    BIT(7)
+```
+
+在 DBM 使能时的位语义：
+
+```
+S2AP[1]=0, DBM=1  →  writable-dirty    (页已被写脏)
+S2AP[1]=1, DBM=1  →  writable-clean    (页已清洁)
+```
+
+HACDBS 硬件的操作：拿软件提供的 IPA 列表，走查 S2 页表，遇到 `S2AP[1]==0` 的叶子 PTE 将其写回 `S2AP[1]=1`。
+
+### dirty-ring → HDBSS → HACDBS 完整转换链
+
+```
+dirty-ring entry (共享内存)          HDBSS entry (软件构造, 64-bit)
+┌──────────────────────┐            ┌──────────────────────────────────┐
+│ flags (含 RESET 标志) │            │ 63:56 │ 55:12  │ 11:4 │ 3:1  │ 0 │
+│ slot                 │ ─转换──→   │  RSV  │  IPA   │ RSV  │ TTWL │ V │
+│ offset               │            │       │        │      │      │   │
+└──────────────────────┘            └──────────────────────────────────┘
+         │                                     │
+    entry->slot  →  memslot->base_gfn          │
+    entry->offset →  rel_gfn             ┌─────┘
+    gfn = base_gfn + rel_gfn             │
+    gfn → gfn_to_gpa(gfn) → IPA         │
+                                         ▼
+                              HACDBS 硬件走查 S2 页表
+                                         │
+                              ┌──────────┴──────────┐
+                              │ S2AP[1]==0? → 置 1  │
+                              │ S2AP[1]==1? → 跳过  │
+                              │ 出错?      → 回 IRQ │
+                              └─────────────────────┘
+```
+
+代码实现（`dirty_bit.c:287-298`）：
+
+```c
+// 跨 slot 时更新 base_gfn
+if (entry->slot != slot) {
+    memslot = kvm_dirty_ring_get_memslot(kvm, entry->slot);
+    slot = entry->slot;
+    slot_offset = memslot->base_gfn;
+}
+
+gfn = slot_offset + entry->offset;
+
+// GFN → GPA → HDBSS entry
+hw_entries[i] = (gfn_to_gpa(gfn) & HDBSS_ENTRY_IPA) |
+                 ttwl | HDBSS_ENTRY_VALID;
+```
+
+### HACDBS 不写 dirty-ring
+
+HACDBS 硬件只操作页表，不操作 dirty-ring。ring entry 的失效化是**纯软件操作**（`dirty_bit.c:304-311`）：
+
+```c
+ret = dirty_bit_clear(kvm, hw_entries, i);  // 硬件清理完成
+
+// 只标记成功清理的条目为 invalid
+for (int j = 0; j < ret; j++) {
+    entry = &ring->dirty_gfns[(ring->reset_index + j) & (ring->size - 1)];
+    kvm_dirty_gfn_set_invalid(entry);  // smp_store_release(&gfn->flags, 0)
+}
+```
+
+成功条目数 `ret` 由 `dirty_bit_clear()` 返回（等于 `hacdbs_stop()` 的返回值），软件据此决定哪些 ring entry 可以安全清零。
+
+### 与 HDBSS_V4 的对比
+
+| | HDBSS_V4 | HACDBS_V2 |
+|------|----------|-----------|
+| **dirty-ring 支持** | 显式禁用 | 支持 |
+| **禁用方式** | `if (kvm->dirty_ring_size) return -EINVAL` | 不适用 |
+| **原因** | HDBSS flush 走 `kvm_vcpu_mark_page_dirty()` → bitmap 路径，不通 ring | HACDBS 只管清理，ring 条目产生/管理不依赖 HACDBS |
+
+HACDBS_V2 中 dirty-ring 条目的产生仍需依赖完整的 HDBSS 实现（硬件脏页检测 + `mark_page_dirty()` push），或通过传统写保护 fault 路径（第一次写入）。HACDBS 只加速了清理侧。
+
+---
+
 ## 文件修改汇总
 
 ```
@@ -1226,6 +1378,79 @@ HACDBS 硬件加速实际生效需要满足所有以下条件：
 6. **中断注册成功**：`request_percpu_irq()` 成功
 7. **Per-CPU IDLE**：当前 CPU 的 `hacdbs_pcp.status == HACDBS_IDLE`
 8. **S2 DBM**：Stage-2 页表设置了 `KVM_PGTABLE_S2_DBM` flag
+
+---
+
+## 已知问题: Device 页错误携带 DBM 标签
+
+### 问题分析
+
+HACDBS_V2 在 Patch 1 中将 DBM 的设置方式从 HDBSS_V4 的"per-memslot、per-fault 按需设置"改为了"Stage-2 初始化时全局使能"：
+
+```c
+// __kvm_pgtable_stage2_init()
+if (system_supports_hdbss())
+    flags |= KVM_PGTABLE_S2_DBM;
+```
+
+随后在 `stage2_set_prot_attr()` 中，DBM 对**任何可写页**无条件添加：
+
+```c
+if (prot & KVM_PGTABLE_PROT_W) {
+    attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+    if (pgt->flags & KVM_PGTABLE_S2_DBM)       // 全局 flag，无 device 过滤
+        attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+}
+```
+
+但 Device (MMIO) 映射同样可以可写。以 vGIC 为例，`kvm_phys_addr_ioremap()` 构造的 prot 为：
+
+```c
+enum kvm_pgtable_prot prot = KVM_PGTABLE_PROT_DEVICE |
+                             KVM_PGTABLE_PROT_R |
+                             (writable ? KVM_PGTABLE_PROT_W : 0);  // writable=true
+```
+
+调用链：`kvm_phys_addr_ioremap()` → `kvm_pgtable_stage2_map()` → `stage2_set_prot_attr()`，绕过了 `user_mem_abort` 的 fault 路径，直接进入页表属性设置。由于 `stage2_set_prot_attr()` 中没有 `PROT_DEVICE` 过滤，**可写的 device 页会错误地被打上 DBM 标签**。
+
+### 为何 HDBSS_V4 不受影响
+
+HDBSS_V4 中 DBM 通过独立的 `KVM_PGTABLE_PROT_DBM` prot flag 控制，这个 flag **仅在 fault 路径中被设置**：
+
+```c
+// kvm_s2_fault_compute_prot(), 仅 user_mem_abort 调用
+if ((*prot & KVM_PGTABLE_PROT_W) &&
+    kvm->arch.enable_hdbss &&
+    memslot_is_logging(s2fd->memslot))       // 只对 tracked memslot 设 DBM
+    *prot |= KVM_PGTABLE_PROT_DBM;
+```
+
+Device 映射走 `kvm_phys_addr_ioremap()` 直接 `kvm_pgtable_stage2_map()`，从不会进入 `kvm_s2_fault_compute_prot()`，天然安全。
+
+### 架构层面风险
+
+ARM 架构规范中 DBM 的行为仅在 Normal 内存类型下定义。对 Device 内存设置 DBM 属于未定义行为：
+- 多数实现可能静默忽略该位
+- 存在 Hypervisor 实现对非法属性组合触发异常的潜在风险
+- HACDBS 硬件走查时可能因遇到 Device 页表项而触发不可预期的 `IPAF` 错误
+
+### 修复建议
+
+在两处 DBM 设置点增加 device 类型过滤：
+
+```c
+// stage2_set_prot_attr()
+if (prot & KVM_PGTABLE_PROT_W) {
+    attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+    if ((pgt->flags & KVM_PGTABLE_S2_DBM) &&
+        !(prot & KVM_PGTABLE_PROT_DEVICE))     // ← 新增过滤
+        attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+}
+
+// stage2_relax_perms() 同理
+```
+
+共 4 行改动，干净利落。
 
 ---
 
