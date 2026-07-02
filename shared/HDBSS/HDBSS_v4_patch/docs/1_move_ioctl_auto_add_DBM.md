@@ -378,10 +378,12 @@ void kvm_update_hdbss_cap(bool enable, int hdbss_buffer_size)
 
 ## 3. 时序安全验证
 
+### 3.1 本地启动 (非迁移)
+
 ```
 QEMU                         Kernel                            Guest
 ────                         ──────                            ─────
-KVM_CREATE_VM                                                    
+KVM_CREATE_VM
   └→ kvm_init_stage2_mmu()       // pgt->flags |= S2_DBM  ← 此时 system_supports_hdbss() 已知
 KVM_SET_USER_MEMORY_REGION×N
 KVM_CREATE_VCPU (vcpu 0)
@@ -397,11 +399,155 @@ KVM_RUN
                                                   └→ flag S2_DBM + prot W → PTE |= DBM ✓
 ```
 
-**关键断言**:
+### 3.2 迁移迁入端 (Destination)
+
+vCPU **先创建完**, 然后才阻塞等待迁移数据。HDBSS 在 vCPU 创建时就 enable, 但 vCPU 要到 `vm_start()` 之后才真正跑。
+
+```
+QEMU 主线程                       vCPU 线程                       Kernel
+───────────                       ────────                       ──────
+qemu_init()
+  └→ qmp_x_exit_preconfig()
+       ├─ qemu_init_board()
+       │    └→ machvirt_init()
+       │         └→ qdev_realize(cpu0)
+       │              └→ arm_cpu_realizefn()
+       │                   └→ qemu_init_vcpu()
+       │                        └→ 创建 vCPU thread
+       │                                              ┌─────────┘
+       │                                          kvm_vcpu_thread_fn()
+       │                                            └→ kvm_init_vcpu()
+       │                                                 └→ kvm_create_vcpu()
+       │                                                      └→ KVM_CREATE_VCPU ioctl
+       │                                                          → kvm_arch_vcpu_create
+       │                                                            ├─ hdbss_alloc_vcpu_buffer ✓
+       │                                                            └─ hdbss_enable_internal ✓
+       │                                            cpu_thread_signal_created()
+       │                         ← 等 cpu->created ─┘
+       │                         // vCPU 0 创建完成
+       │         … repeat for vCPU 1..N …                    (同上)
+
+       ├─ qemu_machine_creation_done()
+       │    └→ cpu_synchronize_all_post_init()
+       │         └→ kvm_arch_put_registers(KVM_PUT_FULL)
+       │              // 推初始 reset 状态到 KVM vCPU
+       │              // vCPU 仍为 stopped 状态
+
+       └─ qmp_migrate_incoming()    ← 如果 -incoming 参数
+            └→ qemu_start_incoming_migration()
+                 └→ 设置 socket listener (立即返回)
+                     
+main loop 进入等待
+  │
+  │  ┌─── 源端连接到达 ───┐
+  │  ↓
+  │  migration_incoming_process()
+  │    └→ process_incoming_migration_co (coroutine)
+  │         └→ qemu_loadvm_state()      ← 阻塞读取迁移流
+  │              ├─ cpu_synchronize_all_pre_loadvm()
+  │              │    → vcpu_dirty = true 标记
+  │              ├─ qemu_loadvm_state_main
+  │              │    → 读入 CPU 状态 / 内存 / 设备
+  │              └─ cpu_synchronize_all_post_init()
+  │                   → kvm_arch_put_registers(KVM_PUT_FULL)
+  │                   → 迁移的 CPU 状态写入 KVM vCPU
+  │
+  │  ← 迁移流读完, coroutine 返回
+  │
+  └→ process_incoming_migration_bh
+       └→ vm_start()
+            └→ 所有 vCPU 进入 KVM_RUN ────────────→ 首次缺页
+                                                       └→ stage2_set_prot_attr()
+                                                            └→ flag S2_DBM ✓
+```
+
+**关键时序检查**:
+
+| 时刻 | 检查项 | 状态 |
+|------|--------|:---:|
+| `kvm_init_stage2_mmu` (VM 创建) | `pgt->flags |= S2_DBM` | ✅ 最早设置点 |
+| `KVM_CREATE_VCPU` (vCPU 创建) | `hdbss_alloc_vcpu_buffer` + `hdbss_enable_internal` | ✅ buffer 已分配, VTCR 已设 |
+| `qemu_loadvm_state` (迁移阻塞) | HDBSS 已 enable, vCPU 未运行 | ✅ DBM 就绪但无 guest 活动 |
+| `cpu_synchronize_all_post_init` | 迁移 CPU 状态写入 KVM | ✅ 不影响 HDBSS 寄存器 |
+| `vm_start` → `KVM_RUN` | 首次缺页 | ✅ DBM 自动添加到 PTE |
+
+**迁入端无需任何额外处理**。`KVM_CREATE_VCPU` 在 `qemu_loadvm_state()` **之前**完成, HDBSS 在 loadvm 阻塞前已就位。
+
+### 3.3 迁移迁出端 (Source)
+
+```
+QEMU                             Kernel                          Guest
+────                             ──────                          ─────
+// VM 正常运行中
+KVM_RUN                                                          跑 guest
+  HDBSS 记录脏页到 buffer                                        每笔写 DBM page
+  ↓
+// 迁移启动
+migrate QMP / HMP
+  └→ qmp_migrate()
+       └→ migration_thread
+            ├─ ram_init_bitmaps()
+            │    └─ memory_global_dirty_log_start()
+            │         └─ kvm_mmu_wp_memory_region()
+            │              └─ kvm_stage2_wp_range()
+            │                   └─ wrprotect: clr=W, set=0
+            │                       → PTE: R|DBM (DBM 保留)
+            │                   ← 此时不需要 ioctl enable HDBSS
+            │                      HDBSS 从 VM boot 起一直开着
+            │
+            ├─ migration_bitmap_sync_precopy()
+            │    └─ kvm_arch_sync_dirty_log()
+            │         └─ kvm_make_all_cpus_request(KVM_REQ_FLUSH_HDBSS)
+            │              → kvm_flush_hdbss_buffer() → mark_page_dirty
+            │
+            ├─ [迭代] 脏页同步 → flush → 发送
+            │
+            └─ migration_completion_precopy()
+                 └─ migration_stop_vm(RUN_STATE_FINISH_MIGRATE)
+                      └─ vm_stop_force_state() → pause_all_vcpus()
+                           → vCPU 停止运行
+                           → 最后一次 flush + 发送剩余脏页
+                           
+// 迁移完成
+// Source VM 要么:  ① 继续运行 (postcopy 或非停机迁移 — 极少见)
+//                  ② stopped → destroy → kvm_arch_destroy_vm
+//                                       └─ kvm_arm_vcpu_free_hdbss 清理
+```
+
+**迁出端不需要 disable HDBSS**:
+- VM 正常结束时 destroy → buffer 随 VM 释放
+- DBM 位留在 PTEs 中无影响 (ARM spec: VTCR.HD=0 时硬件忽略)
+
+### 3.4 两端的独立使能模型
+
+```
+迁出端 (Source)                              迁入端 (Destination)
+─────────────────                             ─────────────────────
+KVM_CREATE_VCPU                               KVM_CREATE_VCPU
+  → HDBSS auto-enable                           → HDBSS auto-enable
+  (VTCR HD|HDBSS|HA)                            (VTCR HD|HDBSS|HA)
+                                               
+KVM_RUN → 正常运行 + 迁移                     qemu_loadvm_state() [阻塞]
+  → flush + sync dirty pages                   [等源端发完数据]
+                                               
+migration_stop_vm → vCPU stop                  cpu_synchronize_all_post_init
+  (继续跑 or destroy)                           → 迁移状态写入 KVM
+                                               
+VM destroy:                                    vm_start() → KVM_RUN
+  kvm_arch_destroy_vm                            → 首次缺页 → DBM ✓
+    └─ 释放所有 buffer
+```
+
+两端**各自独立**在 vCPU 创建时 enable HDBSS, 互相不依赖, 不与迁移时机耦合。
+
+### 关键断言
+
 1. `pgt->flags |= S2_DBM` 在 init 时设置, 早于任何映射 ✅
-2. 所有 vCPU buffer 在 `KVM_RUN` 前分配完成 ✅
-3. 热插拔 vCPU 在 `kvm_arch_vcpu_create` 中分配 buffer, flag 已存在 ✅
-4. 热拔 vCPU 在 `kvm_arm_vcpu_destroy` 中释放 buffer, 已有代码 ✅
+2. 所有 vCPU buffer 在 `KVM_RUN` 前分配完成 (含迁入端) ✅
+3. 迁入端 vCPU 创建在 `qemu_loadvm_state` 阻塞之前 ✅
+4. 迁出端 VM destroy 前正常清理 buffer, 无需额外 disable ✅
+5. 热插拔 vCPU 在 `kvm_arch_vcpu_create` 中分配 buffer, flag 已存在 ✅
+6. 热拔 vCPU 在 `kvm_arm_vcpu_destroy` 中释放 buffer, 已有代码 ✅
 
 ---
 
