@@ -1,0 +1,38 @@
+From b8f8a36b612169a7eef30aac174d2a11abfb8c55 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 24 Jul 2026 00:49:48 +0800
+Subject: [PATCH] DEBUG: add debug info for QEMU SEA injection on NISV exit
+
+---
+ target/arm/kvm.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/target/arm/kvm.c b/target/arm/kvm.c
+index 09f01827b8..c0423d3973 100644
+--- a/target/arm/kvm.c
++++ b/target/arm/kvm.c
+@@ -1270,6 +1270,12 @@ static int kvm_arm_handle_dabt_nisv(CPUState *cs, uint64_t esr_iss,
+ {
+     ARMCPU *cpu = ARM_CPU(cs);
+     CPUARMState *env = &cpu->env;
++
++    error_report("DEBUG: kvm_arm_handle_dabt_nisv ISV=0 fault_ipa=0x%lx "
++                 "esr_iss=0x%lx -> likely 128-bit ldp/stp caused "
++                 "stage-2 translation fault, KVM cannot emulate",
++                 fault_ipa, esr_iss);
++
+     /*
+      * Request KVM to inject the external data abort into the guest
+      */
+@@ -1286,6 +1292,8 @@ static int kvm_arm_handle_dabt_nisv(CPUState *cs, uint64_t esr_iss,
+         /* KVM_CAP_ARM_INJECT_EXT_DABT implies KVM_CAP_VCPU_EVENTS */
+         if (!kvm_vcpu_ioctl(cs, KVM_SET_VCPU_EVENTS, &events)) {
+             env->ext_dabt_raised = 1;
++            error_report("DEBUG: kvm_arm_handle_dabt_nisv -> injecting SEA "
++                         "(ext_dabt_pending=1) to guest, guest will panic");
+             return 0;
+         }
+     } else {
+-- 
+2.43.0
+

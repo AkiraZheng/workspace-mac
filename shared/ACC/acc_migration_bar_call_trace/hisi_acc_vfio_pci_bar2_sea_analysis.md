@@ -1016,8 +1016,612 @@ qemu:  DEBUG: kvm_set_phys_mem REGISTER mr->ram=1 mr->ram_device=1 → stage-2 m
 
 - **kernel-DEBUG-add-debug-info-for-hisi_acc_vfio_pci-BAR2-mmap.patch** — Kernel 侧 3 处打桩
 - **qemu-DEBUG-add-debug-info-for-VFIO-BAR-mmap-and-KVM-stage-2-mapping.patch** — QEMU 侧 4 处打桩
+- **kernel-DEBUG-KVM-ISV0-128bit-emulation-failure-path.patch** — Kernel KVM `io_mem_abort()` ISV=0 分支打桩
+- **qemu-DEBUG-SEA-injection-on-NISV-exit.patch** — QEMU `kvm_arm_handle_dabt_nisv()` SEA 注入打桩
+- **qemu-DEBUG-VFIO-region-pread-pwrite-slow-path.patch** — QEMU `vfio_region_read`/`vfio_region_write` pread/pwrite 慢路径打桩，验证 ldr 单寄存器操作在 S2 无映射时是否能走 QEMU 仿真
 
-## 10. 环境信息
+## 11. 三份页表、VHE 模式、Host S1 映射与 MMIO 仿真机制
+
+### 11.1 ARM64 VHE 模式与三套独立 TTBR 寄存器
+
+ARM64 VHE (Virtualization Host Extensions) 模式下，Host Kernel 运行在 EL2，Guest 运行在 EL1。为让 Host Kernel 在 EL2 复用 EL1 的指令编码，ARM 硬件对 TTBR 寄存器做了别名映射：
+
+```
+VHE 模式 (HCR_EL2.E2H=1, TGE=1):
+
+Host 在 EL2 运行时:
+  代码写 TTBR0_EL1 ──→ 硬件自动路由到 TTBR0_EL2  (Host 用户空间映射)
+  代码写 TTBR1_EL1 ──→ 硬件自动路由到 TTBR1_EL2  (Host 内核空间映射)
+  代码写 TCR_EL1   ──→ 硬件自动路由到 TCR_EL2
+
+Guest 在 EL1 运行时:
+  代码写 TTBR0_EL1 ──→ 真正的 TTBR0_EL1          (Guest 用户空间映射)
+  代码写 TTBR1_EL1 ──→ 真正的 TTBR1_EL1          (Guest 内核空间映射)
+```
+
+**Host 和 Guest 不共用任何 TTBR 寄存器。** 物理上存在六套独立寄存器：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 物理寄存器 (各自独立)                                         │
+│                                                              │
+│ Host S1 (EL2, VHE alias):                                    │
+│   TTBR0_EL2 → Host 用户空间页表 (QEMU HVA → HPA)            │
+│   TTBR1_EL2 → Host 内核空间页表 (KVA → HPA)                 │
+│                                                              │
+│ Guest S1 (EL1, 真实 EL1 寄存器):                             │
+│   TTBR0_EL1 → Guest 用户空间页表 (GVA → GPA)                │
+│   TTBR1_EL1 → Guest 内核空间页表 (GVA → GPA)                │
+│                                                              │
+│ Host S2:                                                     │
+│   VTTBR_EL2 → Stage-2 页表 (GPA → HPA)                      │
+│                                                              │
+│ VM entry/exit 时硬件自动切换:                                  │
+│   VM entry: TTBR0_EL2→保存, TTBR0_EL1→恢复Guest值           │
+│   VM exit:  TTBR0_EL1→保存, TTBR0_EL2→恢复Host值            │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 11.1.1 三份页表同时驻留内存
+
+正常 VM 运行时，内存中同时存在三份完整的页表：
+
+| 页表 | 基址寄存器 | 翻译关系 | 管理者 | 覆盖范围 |
+|---|---|---|---|---|
+| Host S1 (用户) | TTBR0_EL2 (VHE alias) | HVA → HPA | Host 内核 (QEMU 进程的 mm_struct) | QEMU 等进程的地址空间 |
+| Host S1 (内核) | TTBR1_EL2 (VHE alias) | KVA → HPA | Host 内核 | 内核虚拟地址空间 |
+| Guest S1 (用户) | TTBR0_EL1 | GVA → GPA | Guest OS | Guest 用户进程地址空间 |
+| Guest S1 (内核) | TTBR1_EL1 | GVA → GPA | Guest OS | Guest 内核地址空间 |
+| Host S2 | VTTBR_EL2 | GPA → HPA | KVM | Guest 物理地址空间 |
+
+```
+三份页表的内容示例 (同一块物理内存):
+
+Host S1:  HVA 0x7fff_0000_0000 ─→ HPA 0x8000_0000  (QEMU malloc 分配)
+Guest S1: GVA 0xffff_8000_0000 ─→ GPA 0x4000_0000  (Guest ioremap)
+Host S2:  GPA 0x4000_0000     ─→ HPA 0x8000_0000  (KVM memslot)
+
+注意: S2 的 GPA 和 Host S1 的 HVA 完全不同，
+      但它们最终指向同一个 HPA
+```
+
+**S2 不是 Host S1 的副本。** S2 是 KVM 独立维护的页表，格式与 S1 不同：
+- S1 是 VA→PA 的多层映射（支持权限、属性等丰富控制）
+- S2 是 IPA→HPA 的单层映射（只做地址翻译+权限控制）
+
+S2 的 HPA 来源是 Host S1 的解析结果：KVM 注册 memslot 时通过 `get_user_pages()` 查 Host S1 得到 HPA，然后填入 S2。
+
+### 11.1.2 Host S1 对 Guest 执行是透明的
+
+Guest 运行时（VM entry 后，HCR_EL2.VM=1），CPU 硬件页表遍历器只查 Guest S1 + Host S2，**不查 Host S1**：
+
+```
+Guest 运行时 CPU 页表遍历 (硬件自动完成):
+
+  GVA
+   ↓ Guest S1: 查 TTBR0_EL1 / TTBR1_EL1 (Guest 真实 EL1 寄存器)
+  GPA
+   ↓ Host S2: 查 VTTBR_EL2
+  HPA
+
+  Host S1 (TTBR0_EL2 / TTBR1_EL2) ── 完全不参与！
+
+Host 运行时 (VM exit 后):
+
+  HVA
+   ↓ Host S1: 查 TTBR0_EL2 / TTBR1_EL2 (EL2 VHE alias)
+  HPA
+
+  Guest S1 和 S2 ── 硬件不使用这些页表
+```
+
+Host S1 存在是因为 QEMU 进程需要操作这些内存（建 S2、设备模拟等），但 Guest 运行时 CPU 硬件根本不查 Host S1。Host S1 是建 S2 的"脚手架"。
+
+### 11.1.3 VFIO BAR 场景中的两个 Host S1 映射
+
+在 VFIO BAR 场景中，Host 上存在两个独立的 Host S1 映射，分别使用不同的 TTBR：
+
+| | 映射1：内核 ioremap | 映射2：QEMU mmap(VFIO_fd) |
+|---|---|---|
+| 使用的 TTBR | **TTBR1_EL2** (VHE alias, Host 内核空间页表) | **TTBR0_EL2** (VHE alias, Host 用户空间页表) |
+| 虚拟地址范围 | KVA `0xffff_8000_xxxx` | QEMU HVA `0x0000_7fff_xxxx` |
+| 建立方式 | `pci_iomap()` / `ioremap()` | `mmap(VFIO_fd, bar_offset)` |
+| 建立时机 | QEMU 首次 pread/pwrite 时延迟创建 | QEMU `vfio_region_mmap()` 时 |
+| 页表创建者 | 内核直接操作内核页表 | 内核在 syscall 上下文中操作 QEMU 用户页表 |
+| 64KB PAGE_SIZE 下 | **成功**（内核内部，不受 PAGE_SIZE 限制） | **失败**（32KB < 64KB） |
+| 用途 | pread/pwrite 慢路径 | ram_device + KVM stage-2 快路径 |
+| 谁使用 | 内核 VFIO 驱动 | QEMU 进程 + KVM |
+
+```
+映射1 (ioremap, TTBR1_EL2 内核空间):    映射2 (mmap, TTBR0_EL2 用户空间):
+  内核虚拟地址 (KVA)                        QEMU 进程虚拟地址 (HVA)
+  ↓ pci_iomap()                             ↓ mmap(VFIO_fd)
+  VF BAR2 HPA                               VF BAR2 HPA
+
+用途:                                      用途:
+  QEMU pread/pwrite 时                     QEMU 创建 ram_device MR 时
+  内核 VFIO 驱动通过这个地址读设备           KVM 需要这个 HVA 来注册 memslot
+  慢路径，每次都陷入内核                    快路径，guest 直接通过 S2 访问
+```
+
+### 11.1.4 mmap 建立用户空间 Host S1 映射的机制
+
+`hisi_acc_vfio_pci_mmap()` 是**内核驱动代码**，但它建立的是 **QEMU 进程的用户空间 S1 映射**。这不矛盾——Linux mmap 的标准机制就是用户进程发起 syscall，内核代替用户进程在其用户页表中建立映射：
+
+```
+QEMU (用户态 EL0)                    内核 (EL2, VHE 模式)
+     │                                  │
+     │  mmap(VFIO_fd, 32KB, ...)        │
+     │ ─────── syscall ─────────────►  │
+     │                                  │ VFS 层: 找到 file->f_op->mmap
+     │                                  │ 调用 hisi_acc_vfio_pci_mmap()
+     │                                  │   → 检查 BAR2 范围 (32KB vs 64KB)
+     │                                  │   → 4KB PAGE_SIZE: 检查通过
+     │                                  │   → 64KB PAGE_SIZE: 返回 -EINVAL
+     │                                  │
+     │                                  │ 检查通过时:
+     │                                  │   → vfio_pci_core_mmap()
+     │                                  │     设置 vma->vm_pgoff = BAR2 HPA 页帧号
+     │                                  │     设置 vma->vm_ops = vfio_pci_mmap_ops
+     │                                  │     设置 VM_PFNMAP | VM_IO 等标志
+     │                                  │     注意: 此时并未建页表！
+     │                                  │
+     │  ◄──── 返回 HVA ──────────────  │
+     │                                  │
+     │  QEMU 访问 HVA                   │
+     │ ─────── page fault ──────────►  │
+     │                                  │ vfio_pci_mmap_fault()
+     │                                  │   → io_remap_pfn_range()
+     │                                  │     在 QEMU 的用户页表 (TTBR0_EL2, VHE alias) 中:
+     │                                  │     HVA → BAR2 HPA (Device 属性)
+     │  ◄─── page fault resolved ────  │
+```
+
+关键点：
+- `vfio_pci_core_mmap()` 只设置 VMA 元数据，**不立即建页表**
+- Host S1 用户页表在 QEMU 首次访问 HVA 触发 page fault 时，由 `vfio_pci_mmap_fault()` → `io_remap_pfn_range()` 建立
+- `io_remap_pfn_range()` 通过 `vma->vm_mm` 操作 QEMU 进程的 `mm_struct`，在 QEMU 的 TTBR0_EL2 页表（VHE alias，代码写 TTBR0_EL1 但硬件路由到 TTBR0_EL2）中插入映射
+- 这跟普通文件 mmap 完全一样，区别只是映射目标是设备寄存器物理地址而非内存页
+
+### 11.2 内核 ioremap 的创建时机
+
+**不是绑定时创建的，是延迟创建的**——QEMU 首次通过 pread/pwrite 访问 BAR 时才创建：
+
+```c
+// drivers/vfio/pci/vfio_pci_rdwr.c:287
+ssize_t vfio_pci_bar_rw(struct vfio_pci_core_device *vdev, ...)
+{
+    ...
+    int ret = vfio_pci_setup_barmap(vdev, bar);  // 首次调用时才 ioremap
+    io = vdev->barmap[bar];
+    done = do_io_rw(vdev, ..., io, buf, pos, count, ...);
+    ...
+}
+
+// drivers/vfio/pci/vfio_pci_rdwr.c:263
+static int vfio_pci_setup_barmap(struct vfio_pci_core_device *vdev, int bar)
+{
+    if (vdev->barmap[bar])    // 已缓存？直接返回
+        return 0;
+
+    pci_request_selected_regions(pdev, 1 << bar, "vfio");
+    io = pci_iomap(pdev, bar, 0);         // ← ioremap 完整 BAR (64KB)
+    vdev->barmap[bar] = io;               // 缓存，后续复用
+    return 0;
+}
+```
+
+ioremap 一定成功，因为：
+- 内核内部映射，不涉及用户空间 PAGE_SIZE 对齐
+- `pci_iomap()` 映射完整 BAR 大小（64KB），不做截断
+- 只有内核自己用，不暴露给用户空间
+
+### 11.3 Guest 访问 RAM 时需要 Host S1 页表吗？
+
+**不需要。** 正常 VM 运行时，Guest 访问 RAM 只经过两级页表翻译：
+
+```
+Guest 访问 RAM:
+  GVA → GPA (Guest S1, Guest OS 管理, TTBR0_EL1 / TTBR1_EL1)
+  GPA → HPA (Host S2, KVM 管理, VTTBR_EL2)
+  → 直接到达物理内存
+
+Host S1 页表完全不参与！
+```
+
+CPU 硬件页表遍历器在 VM 运行时（HCR_EL2.VM=1）只查 Guest S1 + Host S2，不查 Host S1：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ VM 运行时 CPU 页表遍历 (硬件自动完成)                          │
+│                                                              │
+│   GVA                                                        │
+│    ↓ Guest S1 (TTBR0_EL1 / TTBR1_EL1, Guest 真实 EL1 寄存器) │
+│   GPA                                                        │
+│    ↓ Host S2 (VTTBR_EL2)                                     │
+│   HPA ──→ 物理内存                                            │
+│                                                              │
+│   Host S1 (TTBR0_EL2 / TTBR1_EL2, VHE alias) ── 完全不参与！  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Host S1 映射虽然存在，但它只在以下场景被使用：
+
+| 场景 | 使用的 Host S1 | 说明 |
+|---|---|---|
+| Guest 访问 RAM | **不使用** | Guest S1 + Host S2 直达 HPA |
+| Guest 访问 VFIO BAR（S2 有映射） | **不使用** | Guest S1 + Host S2 直达 HPA |
+| QEMU 用户态访问 guest 内存 | TTBR0_EL2 (VHE alias) | QEMU 模拟设备 DMA 时需要读/写 guest 内存 |
+| QEMU pread/pwrite 访问 VFIO BAR | TTBR1_EL2 (VHE alias) | 内核通过 ioremap 读设备 |
+| KVM 建 S2 页表 | TTBR0_EL2 (VHE alias) | KVM 通过 QEMU 提供的 HVA → `get_user_pages()` → HPA → 填 S2 |
+
+关键洞察：**Host S1 对 Guest 执行是透明的。** Host S1 存在是因为 QEMU 进程需要操作这些内存（建 S2、设备模拟等），但 Guest 运行时 CPU 硬件根本不查 Host S1。
+
+这也解释了为什么 mmap 对 KVM stage-2 如此重要：KVM 注册 memslot 时需要 QEMU 的 HVA（Host S1 用户映射），通过 `get_user_pages()` 解析出 HPA 来填 S2。**mmap 失败 → 没有 HVA → 无法建 S2 → Guest 运行时找不到 HPA。**
+
+### 11.3.1 S2 页表的建立过程：Host S1 是"脚手架"
+
+S2 页表不是凭空产生的，KVM 必须通过 Host S1 用户页表来获取 HPA。完整流程：
+
+```
+1. QEMU 分配 guest RAM 后端内存:
+   QEMU: mmap(MAP_ANONYMOUS) → 拿到 HVA = 0x7fff_0000_0000
+   此时 Host S1 (TTBR0_EL2) 中已有: HVA 0x7fff_0000_0000 → HPA (延迟建页表)
+
+2. QEMU 注册 KVM memslot:
+   QEMU: ioctl(KVM_SET_USER_MEMORY_REGION,
+               GPA=0x4000_0000, userspace_addr=HVA=0x7fff_0000_0000, size=1GB)
+
+3. KVM 内核模块建立 S2 映射:
+   KVM: get_user_pages(HVA=0x7fff_0000_0000)
+        → 查 Host S1 (TTBR0_EL2) 页表  ← 依赖 Host S1!
+        → 得到 HPA = 0x0000_8000_0000
+
+   KVM: 在 S2 页表 (VTTBR_EL2) 中填入:
+        GPA 0x4000_0000 → HPA 0x0000_8000_0000
+
+4. 之后 Guest 运行时:
+   Guest 访问 GPA 0x4000_0000 → S2 直接命中 → HPA 0x8000_0000
+   Host S1 不再参与!
+```
+
+关键依赖链：
+```
+mmap 成功 → QEMU 有 HVA → get_user_pages() 能查到 HPA → S2 能建立 → Guest 正常运行
+mmap 失败 → QEMU 无 HVA → 无法建 S2                → Guest 运行时 S2 缺页 → 崩溃
+```
+
+这就是为什么 VFIO BAR mmap 失败是致命的——它不是 QEMU 自己访问不了设备的问题，而是 **S2 页表无法建立**，导致 Guest 运行时所有对该 BAR 的访问都会触发 S2 Translation Fault。
+
+### 11.3.2 QEMU MemoryRegion 类型与 Host S1 映射的关系
+
+不是所有 MemoryRegion 都有 QEMU 侧的 Host S1 映射。核心规则：**`mr->ram == true` 的 MR 才有 Host S1 映射，`mr->ram == false` 的没有。**
+
+| MemoryRegion 类型 | `mr->ram` | QEMU 侧 Host S1 (TTBR0_EL2) | 创建方式 | KVM S2 | 说明 |
+|---|---|---|---|---|---|
+| RAM (普通 guest 内存) | true | ✓ 有 | `mmap(MAP_ANONYMOUS)` | ✓ | guest RAM, 大页等 |
+| RAM device (VFIO BAR mmap 成功) | true | ✓ 有 | `mmap(VFIO_fd)` | ✓ | VF BAR 快路径 |
+| IO (VFIO BAR mmap 失败) | false | ✗ 无 | 不需要 | ✗ | 走 pread/pwrite 慢路径 |
+| IO (virtio 等纯软件设备) | false | ✗ 无 | 不需要 | ✗ | 纯软件仿真 |
+| ROM / ROM device | true | ✓ 有 | `mmap(MAP_ANONYMOUS)` | ✓ | 固件等 |
+
+各类型的 Host S1 映射建立过程：
+
+```
+1. RAM (普通 guest 内存):
+   QEMU: qemu_anon_ram_alloc() → mmap(MAP_ANONYMOUS, 4GB)
+   Host S1 (TTBR0_EL2): HVA 0x7fff_0000_0000 → HPA (普通内存页)
+   KVM: get_user_pages(HVA) → HPA → 填 S2 (GPA → HPA)
+   → Guest 访问该 GPA 时，S2 命中，直接到物理内存
+
+2. RAM device (VFIO BAR, mmap 成功):
+   QEMU: mmap(VFIO_fd, 64KB) → 拿到 HVA
+   Host S1 (TTBR0_EL2): HVA 0x7fff_4000_0000 → HPA (设备寄存器物理地址)
+   KVM: get_user_pages(HVA) → HPA → 填 S2 (GPA → HPA)
+   → Guest 访问该 GPA 时，S2 命中，直接到设备寄存器
+
+3. IO (VFIO BAR, mmap 失败):
+   QEMU: 没有 HVA，只有 vfio_region_ops (pread/pwrite)
+   Host S1 (TTBR0_EL2): 无映射
+   KVM: 无法建 S2 → Guest 访问触发 S2 缺页 → MMIO 仿真
+   → 但内核侧 Host S1 (TTBR1_EL2) 有 ioremap 映射，慢路径可走 pread/pwrite
+
+4. IO (virtio 设备寄存器等):
+   QEMU: 纯软件模拟，不需要真实内存后端
+   Host S1 (TTBR0_EL2): 无映射
+   KVM: 无法建 S2 → Guest 访问走 MMIO trap → QEMU 软件仿真
+```
+
+### 11.3.3 慢路径用的不是 QEMU 侧 Host S1，而是内核侧 ioremap
+
+IO 类型 MR 没有 QEMU 侧的 Host S1 映射，但慢路径仍然能工作——因为它使用的是**内核侧** Host S1 (ioremap)，完全不依赖 QEMU 侧映射：
+
+```
+IO MR 的两条路径对比:
+
+快路径 (S2 直接访问, 需要 QEMU 侧 Host S1):
+  QEMU mmap(VFIO_fd) → TTBR0_EL2 用户页表 → HVA→HPA
+  KVM 用 HVA 建 S2 → Guest 直接访问
+  → mmap 失败时: 这条路不存在
+
+慢路径 (MMIO 仿真, 用内核侧 Host S1):
+  QEMU pread(VFIO_fd) → syscall → 内核 ioremap → TTBR1_EL2 内核页表 → KVA→HPA
+  → 这条路不需要 QEMU 有 HVA, 也不需要 S2
+```
+
+两种 Host S1 映射在 IO MR 场景中的使用对比：
+
+| | QEMU 侧 Host S1 (TTBR0_EL2) | 内核侧 Host S1 (TTBR1_EL2) | KVM S2 |
+|---|---|---|---|
+| RAM | ✓ mmap(ANONYMOUS) | 不需要 | ✓ 通过 TTBR0_EL2 建立 |
+| RAM device | ✓ mmap(VFIO_fd) | 不需要 | ✓ 通过 TTBR0_EL2 建立 |
+| IO (mmap 失败) | ✗ 无 | ✓ ioremap (首次 pread 时) | ✗ 无法建立 |
+
+**关键洞察：慢路径能走通，恰恰是因为它绕过了 QEMU 侧的 Host S1，直接用内核 ioremap。** 但这也意味着 S2 无法建立——KVM 建不了"脚手架"，Guest 运行时只能靠 VM exit + QEMU 仿真。
+
+这也回答了 ldr 是否能走慢路径的问题：ldr 理论上能走慢路径，是因为 pread → ioremap 这条路是通的。问题是 ldp ISV=0 根本走不到 QEMU 这一步（无法构造 KVM_EXIT_MMIO 退出），在 KVM 就被拦截并注入 SEA。
+
+### 11.4 KVM 为什么不能用 ioremap 映射建 S2
+
+KVM 注册 memslot 需要的是 **QEMU 用户空间的 HVA**：
+
+```c
+// accel/kvm/kvm-all.c
+ram = memory_region_get_ram_ptr(mr) + mr_offset;  // 需要 QEMU 的 HVA
+kvm_set_user_memory_region(kml, mem, true);         // 传给内核建 S2
+```
+
+内核通过 `get_user_pages()` 把 HVA 转成 HPA 来填 S2 页表。ioremap 产生的是**内核虚拟地址**，不在 QEMU 用户空间地址空间里，`get_user_pages()` 无法使用。所以 KVM 注册 memslot 只能依赖映射2（QEMU mmap），映射2 失败则 S2 无法建立。
+
+### 11.5 QEMU MMIO 仿真的完整路径
+
+QEMU 不是通过 GPA → HPA 的 S2 翻译来访问设备的，它走的是完全独立的 pread/pwrite 路径。注意慢路径使用的是**内核侧 Host S1 (ioremap, TTBR1_EL2)**，不是 QEMU 侧 Host S1：
+
+```
+路径A: Guest 直接访问 (需要 S2 映射)          路径B: QEMU 仿真访问 (不需要 S2)
+  Guest ldr x0, [x3]                           QEMU 收到 KVM_EXIT_MMIO
+    → GVA → GPA (S1) ✓                           → pread(VFIO_fd, buf, 8, offset)
+    → GPA → HPA (S2) ✗                            → 内核 VFIO 驱动通过 ioremap 读设备
+    → 失败                                        → 返回数据给 QEMU
+                                                   → QEMU 写入 kvm_run.mmio.data
+                                                   → KVM 写回 guest x0 寄存器
+
+  使用的 Host S1:                                使用的 Host S1:
+    QEMU 侧 TTBR0_EL2 (mmap)                     内核侧 TTBR1_EL2 (ioremap)
+    用于建 S2 "脚手架"                             用于 pread/pwrite 实际读设备
+    mmap 失败 → S2 无法建                          ioremap 总是成功，不依赖 mmap
+```
+
+### 11.6 单寄存器 ldr 的完整仿真流程
+
+以 `ldr x0, [x3]`（8 字节读，x3 = io_base + 0x300）为例，当 S2 无映射时：
+
+```
+Step 1: 硬件产生 Data Abort
+─────────────────────────────
+Guest 执行: ldr x0, [x3]
+  → S1 成功 → S2 无映射 → Data Abort
+  → CPU 硬件填写 ESR_EL2:
+      ISV  = 1       (有效 syndrome，单寄存器可以解码)
+      SAS  = 11      (8 字节)
+      SRT  = 00000   (目标寄存器 x0)
+      WNR  = 0       (读)
+      SF   = 1       (64-bit)
+      DFSC = 0x10    (Translation fault, level 0)
+  → CPU 跳转到 EL2 (KVM)
+
+Step 2: KVM 解码 ESR，构造 MMIO 请求
+──────────────────────────────────────
+io_mem_abort() (arch/arm64/kvm/mmio.c:168)
+  ISV=1 → 解码成功:
+    is_write = false    (ESR.WNR=0)
+    len      = 8        (ESR.SAS=11)
+    rt       = x0       (ESR.SRT=0)
+  → KVM 现在知道了: 这是一次 8 字节读，结果要写回 x0
+
+Step 3: KVM 退出到 QEMU
+────────────────────────
+kvm_io_bus_read() 失败 → VFIO 设备没注册在 KVM_MMIO_BUS 上
+  → 准备 kvm_run:
+      run->mmio.is_write   = false
+      run->mmio.phys_addr  = 0x8000200300
+      run->mmio.len        = 8
+      run->exit_reason     = KVM_EXIT_MMIO
+  → 返回 QEMU
+
+Step 4: QEMU 执行实际 MMIO 操作
+─────────────────────────────────
+kvm_cpu_exec() (accel/kvm/kvm-all.c:3124)
+  case KVM_EXIT_MMIO:
+    address_space_rw(&address_space_memory,
+                     phys_addr = 0x8000200300, len=8, is_read)
+      → 找到该 GPA 属于 VFIO BAR2 MemoryRegion
+      → 计算 BAR2 内偏移 = 0x8000200300 - BAR2_base = 0x300
+      → vfio_region_read(region, offset=0x300, size=8)
+        → pread(VFIO_fd, buf, 8, bar2_fd_offset + 0x300)
+
+Step 5: 内核 VFIO 驱动读设备
+──────────────────────────────
+vfio_pci_bar_rw() (drivers/vfio/pci/vfio_pci_rdwr.c:287)
+  → vfio_pci_setup_barmap() → pci_iomap(BAR2) → ioremap 成功 (映射1)
+  → do_io_rw():
+      vfio_pci_ioread32(vdev, &val, io + 0x300)   // 读前 4 字节
+      vfio_pci_ioread32(vdev, &val, io + 0x304)   // 读后 4 字节
+  → 返回 8 字节数据
+
+Step 6: QEMU 返回后，KVM 写回 guest 寄存器
+─────────────────────────────────────────────
+kvm_handle_mmio_return() (arch/arm64/kvm/mmio.c:108)
+  data = kvm_mmio_read_buf(run->mmio.data, 8)     // 从缓冲区读 8 字节
+  vcpu_set_reg(vcpu, kvm_vcpu_dabt_get_rd(vcpu), data)
+  //                   rt=x0                        ← 写回 x0
+  kvm_incr_pc(vcpu)    // 跳过已仿真的 ldr，继续执行下一条指令
+
+结果: Guest x0 有正确数据，继续执行，不会崩溃
+```
+
+### 11.7 为什么 ldp 无法仿真
+
+`ldp x0, x1, [x3]` 在 Step 1 就失败了：
+
+```
+CPU 填写 ESR_EL2:
+  ISV = 0    (多寄存器操作，syndrome 格式放不下)
+  → SAS/SRT/WNR 全部无效
+
+io_mem_abort():
+  ISV=0 → 无法知道读/写/大小/寄存器
+  → 无法构造 MMIO 请求
+  → 返回 KVM_EXIT_ARM_NISV
+  → QEMU 无法仿真
+  → 注入 SEA → Guest panic
+```
+
+### 11.8 ISV 填充原则（修正）
+
+ARM 架构规范对 ISV 的填充原则：
+
+**ISV = 1 的条件（有效 Syndrome）：**
+
+触发异常的 Data Abort 由单寄存器或通用寄存器 pair 操作引起，包括 LDR、STR、**LDP**、**STP**、LDUR、STUR 等。CPU 能解码指令并填充 SAS/SSE/SRT/SF/WNR/AR。
+
+**ISV = 0 的情况（无效 Syndrome）：**
+
+- 多寄存器指令（LDM、STM、LDRD、STRD）
+- SIMD/FP 寄存器操作（如 LDR Q0, [X0]）
+- 独占访问指令（LDXR、STXR）某些实现不提供 syndrome
+- 预取指令（PRFM）
+- CPU 无法解码该指令
+
+**注意**：LDP/STP 属于通用寄存器 pair 操作，ARM 规范允许 ISV=1。但 ISV=1 时 syndrome 只描述**第一个寄存器**，第二个寄存器的信息丢失。
+
+### 11.9 LDP 在 ISV=1 时的仿真问题
+
+即使 `ldp x0, x1, [x3]` 的 ISV=1，KVM 也无法正确仿真：
+
+```
+ESR_EL2 (ISV=1):
+  SAS = 11     (8 字节 — 每个 register 的大小，不是总和)
+  SRT = 00000  (x0 — 第一个寄存器)
+  WNR = 0      (读)
+```
+
+但 LDP 一次指令做两次 8 字节访问，syndrome 只描述了第一个（x0）：
+
+```
+ldp x0, x1, [x3] 实际执行:
+  访问1: 从 [x3]     读 8 字节 → x0    ← syndrome 只描述了这个
+  访问2: 从 [x3+0x8] 读 8 字节 → x1    ← 这个信息丢失了
+```
+
+KVM 只能仿真一次 MMIO 请求：
+
+```
+KVM 仿真:
+  pread(VFIO_fd, buf, 8, offset+0x300)  → 读 8 字节
+  vcpu_set_reg(vcpu, x0, data)           → x0 有数据
+  kvm_incr_pc()                          → 跳过 ldp
+
+问题:
+  x1 没有被写入！第二次 8 字节访问被完全跳过！
+  x1 中是垃圾值 → 后续使用 x1 的代码行为不可预测
+```
+
+### 11.10 本场景中 ISV 的实际值
+
+崩溃日志中 guest 看到的 ESR：
+
+```
+Internal error: synchronous external abort: 0000000096000010
+```
+
+ESR = `0x96000010`，bit[24] = 0 → ISV=0。但这是 **KVM 注入 SEA 后 guest 看到的 ESR**，不是 CPU 产生 S2 fault 时的原始 ESR_EL2。
+
+原始 ESR_EL2 是否 ISV=1，取决于具体 CPU 实现：
+- ARM 规范允许某些实现对 pair 指令不提供 syndrome（ISV=0）
+- 也有些实现提供 ISV=1
+
+需要通过 debug patch 在 `io_mem_abort()` 打印原始 ESR 来确认。
+
+### 11.11 LDP 无论 ISV 值如何都无法正确仿真
+
+| | ISV=0 (某些 CPU 实现) | ISV=1 (某些 CPU 实现) |
+|---|---|---|
+| KVM 能否解码 | 不能 | 能（但只描述第一个寄存器） |
+| 仿真结果 | 直接注入 SEA → panic | 部分仿真：x0 有数据，x1 丢失 |
+| 后果 | 崩溃 | x1 垃圾值，后续行为不可预测 |
+| 能否正常工作 | 不能 | 不能（仿真不完整） |
+
+**无论 ISV 是 0 还是 1，ldp 的 MMIO 仿真都无法正确完成。** 根本解法还是让 mmap 成功，让 ldp 走 S2 直接访问。
+
+### 11.12 ldr 单寄存器操作能否走 pread/pwrite 慢路径（待验证）
+
+基于代码推理，`ldr` 单寄存器读在 S2 无映射时应该能走 QEMU pread/pwrite 慢路径：
+
+```
+mmap 失败后的 MemoryRegion 层次:
+  bar->mr (外层容器, NULL ops, size=32KB)
+    └── region.mem (IO 类型, vfio_region_ops) at offset 0
+         → .read = vfio_region_read  → pread(VFIO_fd)
+         → .write = vfio_region_write → pwrite(VFIO_fd)
+```
+
+当 KVM_EXIT_MMIO 到达 QEMU 时：
+
+```
+QEMU: address_space_rw(GPA=0x8000200300, len=8, read)
+  → 找到 GPA 属于 VFIO BAR2 region.mem
+  → 计算 region 内偏移 = 0x300
+  → vfio_region_read(region, addr=0x300, size=8)
+  → pread(VFIO_fd, buf, 8, region->fd_offset + 0x300)
+  → 内核 VFIO 驱动通过 ioremap 读设备 → 返回数据
+```
+
+**但这是代码推理，有以下不确定性：**
+
+1. **GPA 到 MemoryRegion 的映射**：`hisi_acc_vfio_pci_ioctl` 把 BAR2 大小改成 32KB，QEMU 注册的 MR 也是 32KB。0x300 < 32KB，应该能找到。但未实测。
+
+2. **hisi_acc_vfio_pci_read 拦截**：`hisi_acc_vfio_pci` 覆盖了 read 回调，对 BAR2 做范围检查（offset >= 32KB 返回 -EINVAL）。0x300 < 32KB 不会被拦截。但未实测。
+
+3. **vfio_region_ops.max_access_size=8**：`ldr` 是 8 字节，在范围内。但未实测 QEMU 内存系统是否会拆分成更小的访问。
+
+**为验证这一点，已在 `vfio_region_read`/`vfio_region_write` 中添加了 debug 打印**（见 `qemu-DEBUG-VFIO-region-pread-pwrite-slow-path.patch`），确认 pread/pwrite 是否被调用。
+
+### 11.13 三层映射与三条路径总结
+
+```
+Guest 访问 BAR2 的三条路径:
+
+路径1: S2 直接访问 (最快，无 VM exit)
+  GVA → GPA (Guest S1, TTBR0_EL1/TTBR1_EL1, Guest ioremap 建立)
+  GPA → HPA (Host S2, VTTBR_EL2, KVM memslot 建立，依赖 QEMU mmap 成功)
+  → 直接访问设备寄存器
+  → 前提: QEMU mmap 成功 → ram_device → KVM memslot
+  → 64KB PAGE_SIZE 下: mmap 失败 → 不可用
+  → 4KB PAGE_SIZE 下: mmap 成功 → 可用
+
+路径2: KVM + QEMU MMIO 仿真 (慢，需 VM exit + QEMU 介入)
+  GVA → GPA (Guest S1, TTBR0_EL1/TTBR1_EL1)
+  GPA → Host S2 缺页 (VTTBR_EL2) → VM exit → KVM (EL2)
+  KVM 解码 ESR (需要 ISV=1)
+  KVM → QEMU (KVM_EXIT_MMIO)
+  QEMU pread(VFIO_fd) → 内核 ioremap (TTBR1_EL2) → 读设备
+  QEMU → KVM → 写回 guest 寄存器
+  → 前提: ISV=1 且单寄存器操作
+  → ldr: ISV=1 → 可用（代码推理可行，待实测验证）
+  → ldp: ISV=1 → 不完整（只仿真第一个寄存器，第二个丢失）
+  → ldp: ISV=0 → 不可用
+
+路径3: S2 缺页 + ISV=0 (失败，只能注入 SEA)
+  GVA → GPA (Guest S1, TTBR0_EL1/TTBR1_EL1)
+  GPA → Host S2 缺页 (VTTBR_EL2) → VM exit → KVM (EL2)
+  KVM 解码 ESR: ISV=0 → 无法处理
+  KVM → QEMU (KVM_EXIT_ARM_NISV)
+  QEMU 注入 SEA → Guest panic
+  → ldp 在某些 CPU 实现上 ISV=0 时走这条路
+```
+
+## 12. 环境信息
 
 | 项目 | 值 |
 |------|-----|
@@ -1029,15 +1633,21 @@ qemu:  DEBUG: kvm_set_phys_mem REGISTER mr->ram=1 mr->ram_device=1 → stage-2 m
 | QEMU | aarch64 system emulation |
 | VFIO 驱动 | hisi_acc_vfio_pci (VF_CTRL 模式) |
 
-## 11. 涉及的关键源码文件
+## 13. 涉及的关键源码文件
 
 | 文件 | 路径 | 关键行 |
 |------|------|--------|
 | QM 驱动主文件 | `drivers/crypto/hisilicon/qm.c` | qm_mb_read:625, hisi_qm_wait_mb_ready:666, qm_get_pci_res:5884 |
 | QM 寄存器定义 | `include/linux/hisi_acc_qm.h` | QM_MB_CMD_SEND_BASE:51, QM_MIG_REGION_SEL:103 |
+| ESR 寄存器定义 | `arch/arm64/include/asm/esr.h` | ESR_ELx_ISV:136, ESR_ELx_SAS:138, ESR_ELx_SRT:142 |
+| KVM MMIO 仿真 | `arch/arm64/kvm/mmio.c` | io_mem_abort:168, kvm_handle_mmio_return:108, kvm_mmio_write_buf:15, kvm_mmio_read_buf:47 |
+| KVM ESR 解码 | `arch/arm64/include/asm/kvm_emulate.h` | kvm_vcpu_dabt_isvalid:359, kvm_vcpu_dabt_get_as:400 |
+| VFIO PCI BAR 读写 | `drivers/vfio/pci/vfio_pci_rdwr.c` | vfio_pci_setup_barmap:263, vfio_pci_bar_rw:287, do_io_rw:157 |
 | hisi_acc_vfio_pci 驱动 | `drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c` | hisi_acc_get_resource_len:1320, hisi_acc_vfio_pci_mmap:1365, hisi_acc_vf_qm_init:1234 |
 | hisi_acc_vfio_pci 头文件 | `drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.h` | QM_MIG_REGION_OFFSET:66, drv_mode:77 |
 | QEMU VFIO container | `hw/vfio/container.c` | vfio_legacy_dma_map:220 |
 | QEMU VFIO helpers | `hw/vfio/helpers.c` | vfio_region_mmap:402 |
 | QEMU VFIO PCI | `hw/vfio/pci.c` | vfio_sub_page_bar_update_mapping:1171, vfio_bar_register:1785 |
-| QEMU KVM | `accel/kvm/kvm-all.c` | kvm_align_section:266 |
+| QEMU KVM ARM | `target/arm/kvm.c` | kvm_arm_handle_dabt_nisv:1268 |
+| QEMU KVM | `accel/kvm/kvm-all.c` | kvm_set_phys_mem:1327, kvm_align_section:266 |
+| KVM UAPI | `include/uapi/linux/kvm.h` | kvm_run.mmio.data[8]:354 |

@@ -1,0 +1,40 @@
+From f5da8274b763ccd62736fcda796bade3dbdbcb09 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 24 Jul 2026 00:49:48 +0800
+Subject: [PATCH] DEBUG: add debug info for VFIO region pread/pwrite slow path
+
+---
+ hw/vfio/helpers.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/hw/vfio/helpers.c b/hw/vfio/helpers.c
+index a672686782..642c414d87 100644
+--- a/hw/vfio/helpers.c
++++ b/hw/vfio/helpers.c
+@@ -164,6 +164,11 @@ void vfio_region_write(void *opaque, hwaddr addr,
+         uint64_t qword;
+     } buf;
+ 
++    error_report("DEBUG: vfio_region_write region=%s nr=%d addr=%#lx size=%u "
++                 "data=%#lx fd_offset=%#lx -> pwrite(VFIO_fd, %u, fd_offset+%#lx)",
++                 vbasedev->name, region->nr, addr, size,
++                 data, region->fd_offset, size, addr);
++
+     switch (size) {
+     case 1:
+         buf.byte = data;
+@@ -215,6 +220,11 @@ uint64_t vfio_region_read(void *opaque,
+     } buf;
+     uint64_t data = 0;
+ 
++    error_report("DEBUG: vfio_region_read region=%s nr=%d addr=%#lx size=%u "
++                 "fd_offset=%#lx -> pread(VFIO_fd, %u, fd_offset+%#lx)",
++                 vbasedev->name, region->nr, addr, size,
++                 region->fd_offset, size, addr);
++
+     if (pread(vbasedev->fd, &buf, size, region->fd_offset + addr) != size) {
+         error_report("%s(%s:region%d+0x%"HWADDR_PRIx", %d) failed: %m",
+                      __func__, vbasedev->name, region->nr,
+-- 
+2.43.0
+
