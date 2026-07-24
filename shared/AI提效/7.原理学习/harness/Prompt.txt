@@ -1,0 +1,14 @@
+你现在是一个ai Harness工程师,需要根据这两篇文档,帮我写一个harness的分享文档
+- 由于这个文档是要分享给**人**的,所以语言要尽量精简,通俗易懂,而且由于是presentation,所以要尽可能多地以图片的形式来分享,让被分享的人更好理解
+- 逻辑要尽可能严谨,其中这个文档是以superpower的skill和patch-merge-workflow这两个skill为实践实例去展开的,所以严谨体现在你在写每一块的文档前,必须先查看确认这两个skill的真实实现,才可以落笔
+- 由于我希望文档质量尽可能高,所以你每写完一小部分,要先主动停下来,由我check和交流,根据交流结果,修改这部分内容,需要我手动确认继续写下一部分,你才可以继续写.
+
+参考文档:
+/mnt/shared/openeuler/shared/AI提效/7.原理学习/harness/harness_training_plan.md
+/mnt/shared/openeuler/shared/AI提效/7.原理学习/harness/harness_learn_plan.md
+
+注意:参考文档只是草稿,你不能完全信任,你必须重新从依赖的仓库中读取仓库源码,重新思考,然后重新整理要写入的内容
+
+最后:再根据harness_sharing_doc.md这个分享文档,新建一个文档,给我写一个对应这个sharing_doc的演讲稿,注意,由于篇幅是在太长了,所以挑重点讲,把演讲时间压缩在一个小时左右,特别是从第7章开始,都是一些篇理论的,可以简单介绍就行[一些非常非常基础的概念可以一笔带过]
+
+todolist:拿md->html ppt的skill生成演讲用的html ppt
