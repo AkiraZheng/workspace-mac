@@ -1,6 +1,6 @@
-From 2ce0eb9fe03d409b71ead96810fa2e8253f21074 Mon Sep 17 00:00:00 2001
+From 8e2bdd63a6943601f21c4280c32e6bec0c16c21e Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
-Date: Mon, 27 Jul 2026 12:48:22 +0800
+Date: Mon, 27 Jul 2026 13:49:55 +0800
 Subject: [PATCH] KVM: arm64: Clear DBM on memslot commit for lazy split with
  HDBSS
 
@@ -17,18 +17,16 @@ permission faults, triggering lazy split into 4KB PTEs.  Each 4KB PTE
 reacquires DBM=1 from stage2_set_prot_attr() in the fault handler, enabling
 subsequent rounds of hardware dirty tracking at correct granularity.
 
-Use kvm_info() to log the elapsed time of the DBM-clearing walk and the
-total time in the logging branch for performance measurement.
-
-The pKVM variant is a no-op; required only for compilation when
+Log the elapsed time via kvm_info() for performance measurement.  The
+pKVM variant is a no-op; required only for KVM_PGT_FN() to compile when
 CONFIG_NVHE_EL2 is set.
 ---
  arch/arm64/include/asm/kvm_pgtable.h | 15 +++++++
  arch/arm64/include/asm/kvm_pkvm.h    |  1 +
  arch/arm64/kvm/hyp/pgtable.c         |  8 ++++
- arch/arm64/kvm/mmu.c                 | 62 ++++++++++++++++++++++++++++
- arch/arm64/kvm/pkvm.c                | 11 +++++
- 5 files changed, 97 insertions(+)
+ arch/arm64/kvm/mmu.c                 | 59 ++++++++++++++++++++++++++++
+ arch/arm64/kvm/pkvm.c                | 11 ++++++
+ 5 files changed, 94 insertions(+)
 
 diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
 index 5e0fac4bfa53..711fe27c33d8 100644
@@ -88,7 +86,7 @@ index 21ec456ecc41..e8f7e973b7d4 100644
  				enum kvm_pgtable_walk_flags flags)
  {
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index 484f48dae000..fcc86f5f78a0 100644
+index 484f48dae000..00dcbaddbd1a 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
 @@ -5,6 +5,7 @@
@@ -119,7 +117,7 @@ index 484f48dae000..fcc86f5f78a0 100644
  
 +/**
 + * kvm_mmu_clear_dbm_memory_region() - clear DBM bits for all stage-2 entries
-+ *				       in the memory region
++ *				       in the memory region.
 + * @kvm:	The KVM pointer
 + * @slot:	The memory slot
 + *
@@ -152,11 +150,11 @@ index 484f48dae000..fcc86f5f78a0 100644
  /**
   * kvm_mmu_split_memory_region() - split the stage 2 blocks into PAGE_SIZE
   *				   pages for memory slot
-@@ -2597,10 +2637,25 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+@@ -2597,10 +2637,29 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
  	 * memory slot is write protected.
  	 */
  	if (log_dirty_pages) {
-+		ktime_t t_enter, t_dbm, t_exit;
++		ktime_t t_enter, t_dbm;
  
  		if (change == KVM_MR_DELETE)
  			return;
@@ -175,23 +173,13 @@ index 484f48dae000..fcc86f5f78a0 100644
 +
 +		t_dbm = ktime_get();
 +
++		kvm_info("slot=%d npages=%lu dbm_clr=%llu ns\n",
++			 new->id, new->npages,
++			 ktime_to_ns(ktime_sub(t_dbm, t_enter)));
++
  		/*
  		 * Huge and normal pages are write-protected and split
  		 * on either of these two cases:
-@@ -2616,6 +2671,13 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
- 		 */
- 		kvm_mmu_wp_memory_region(kvm, new->id);
- 		kvm_mmu_split_memory_region(kvm, new->id);
-+
-+		t_exit = ktime_get();
-+
-+		kvm_info("slot=%d npages=%lu dbm_clr=%llu ns total=%llu ns\n",
-+			 new->id, new->npages,
-+			 ktime_to_ns(ktime_sub(t_dbm, t_enter)),
-+			 ktime_to_ns(ktime_sub(t_exit, t_enter)));
- 	} else {
- 		/*
- 		 * Free any leftovers from the eager page splitting cache. Do
 diff --git a/arch/arm64/kvm/pkvm.c b/arch/arm64/kvm/pkvm.c
 index 053e4f733e4b..1ddbdbe877b3 100644
 --- a/arch/arm64/kvm/pkvm.c
