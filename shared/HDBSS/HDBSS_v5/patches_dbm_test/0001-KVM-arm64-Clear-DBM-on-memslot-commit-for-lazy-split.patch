@@ -1,8 +1,8 @@
-From ffc70f62a2441eeafccce52942b567899b84ee39 Mon Sep 17 00:00:00 2001
+From e28d3aa739ac01179d277d50014d24c9115c033d Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
-Date: Mon, 27 Jul 2026 09:27:03 +0800
-Subject: [PATCH 1/2] KVM: arm64: Clear DBM on memslot commit for lazy split
- with HDBSS
+Date: Mon, 27 Jul 2026 11:28:33 +0800
+Subject: [PATCH] KVM: arm64: Clear DBM on memslot commit for lazy split with
+ HDBSS
 
 When FEAT_HDBSS is enabled (VTCR_EL2.HD=1), a block entry with DBM=1 and
 S2AP[1]=0 is writable-clean per ARM spec D8.5.2.1.  Hardware silently
@@ -13,24 +13,25 @@ tracking.
 Fix by adding kvm_pgtable_stage2_clear_dbm() that clears the DBM bit on
 all leaf entries, and calling it in kvm_arch_commit_memory_region() before
 write-protection and splitting.  This forces block entries to generate
-real permission faults, triggering lazy split into 4KB PTEs.  Each 4KB PTE
-reacquires DBM=1 from stage2_set_prot_attr() in the fault handler, enabling
-subsequent rounds of hardware dirty tracking at correct granularity.
+permission faults, triggering lazy split into 4KB PTEs.
 
-The clear_dbm walk uses the existing stage2_apply_range infrastructure
-and is symmetric to kvm_mmu_wp_memory_region().
+Include a trace_kvm_clear_dbm() tracepoint for performance measurement.
+The pKVM variant is a no-op; required only for compilation when
+CONFIG_NVHE_EL2 is set.
 ---
- arch/arm64/include/asm/kvm_pgtable.h | 18 +++++++++
+ arch/arm64/include/asm/kvm_pgtable.h | 15 +++++++
  arch/arm64/include/asm/kvm_pkvm.h    |  1 +
  arch/arm64/kvm/hyp/pgtable.c         |  8 ++++
- arch/arm64/kvm/mmu.c                 | 57 ++++++++++++++++++++++++++++
- 4 files changed, 84 insertions(+)
+ arch/arm64/kvm/mmu.c                 | 61 ++++++++++++++++++++++++++++
+ arch/arm64/kvm/pkvm.c                | 11 +++++
+ include/trace/events/kvm.h           | 26 ++++++++++++
+ 6 files changed, 122 insertions(+)
 
 diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
-index 5e0fac4bfa53..498d1df69b92 100644
+index 5e0fac4bfa53..711fe27c33d8 100644
 --- a/arch/arm64/include/asm/kvm_pgtable.h
 +++ b/arch/arm64/include/asm/kvm_pgtable.h
-@@ -739,6 +739,24 @@ int kvm_pgtable_stage2_unmap(struct kvm_pgtable *pgt, u64 addr, u64 size);
+@@ -739,6 +739,21 @@ int kvm_pgtable_stage2_unmap(struct kvm_pgtable *pgt, u64 addr, u64 size);
   */
  int kvm_pgtable_stage2_wrprotect(struct kvm_pgtable *pgt, u64 addr, u64 size);
  
@@ -44,9 +45,6 @@ index 5e0fac4bfa53..498d1df69b92 100644
 + * range. Used at migration start to ensure block entries will generate
 + * permission faults (triggering lazy split) rather than being silently
 + * upgraded by hardware when FEAT_HDBSS is enabled.
-+ *
-+ * Note that it is the caller's responsibility to invalidate the TLB after
-+ * calling this function if write permission was previously granted.
 + *
 + * Return: 0 on success, negative error code on failure.
 + */
@@ -87,10 +85,18 @@ index 21ec456ecc41..e8f7e973b7d4 100644
  				enum kvm_pgtable_walk_flags flags)
  {
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index 484f48dae000..aaa8bacfcf0a 100644
+index 484f48dae000..cdf8bd40dbd9 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
-@@ -1259,6 +1259,13 @@ void kvm_stage2_wp_range(struct kvm_s2_mmu *mmu, phys_addr_t addr, phys_addr_t e
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <linux/acpi.h>
++#include <linux/ktime.h>
+ #include <linux/mman.h>
+ #include <linux/kvm_host.h>
+ #include <linux/io.h>
+@@ -1259,6 +1260,13 @@ void kvm_stage2_wp_range(struct kvm_s2_mmu *mmu, phys_addr_t addr, phys_addr_t e
  	stage2_apply_range_resched(mmu, addr, end, KVM_PGT_FN(kvm_pgtable_stage2_wrprotect));
  }
  
@@ -104,7 +110,7 @@ index 484f48dae000..aaa8bacfcf0a 100644
  /**
   * kvm_mmu_wp_memory_region() - write protect stage 2 entries for memory slot
   * @kvm:	The KVM pointer
-@@ -1291,6 +1298,42 @@ static void kvm_mmu_wp_memory_region(struct kvm *kvm, int slot)
+@@ -1291,6 +1299,38 @@ static void kvm_mmu_wp_memory_region(struct kvm *kvm, int slot)
  	kvm_flush_remote_tlbs_memslot(kvm, memslot);
  }
  
@@ -119,10 +125,6 @@ index 484f48dae000..aaa8bacfcf0a 100644
 + * block entries will generate permission faults (triggering lazy split)
 + * rather than being silently upgraded by hardware when FEAT_HDBSS is
 + * enabled (VTCR_EL2.HD=1).
-+ *
-+ * Page entries (4KB PTE, level 3) reacquire DBM=1 from stage2_set_prot_attr
-+ * after being split in the fault handler, so this one-time clearing only
-+ * affects block entries in practice.
 + */
 +static void kvm_mmu_clear_dbm_memory_region(struct kvm *kvm, int slot)
 +{
@@ -147,10 +149,17 @@ index 484f48dae000..aaa8bacfcf0a 100644
  /**
   * kvm_mmu_split_memory_region() - split the stage 2 blocks into PAGE_SIZE
   *				   pages for memory slot
-@@ -2601,6 +2644,20 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+@@ -2597,10 +2637,25 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 	 * memory slot is write protected.
+ 	 */
+ 	if (log_dirty_pages) {
++		ktime_t t_enter, t_dbm, t_exit;
+ 
  		if (change == KVM_MR_DELETE)
  			return;
  
++		t_enter = ktime_get();
++
 +		/*
 +		 * Clear DBM on all leaf entries before write-protecting.
 +		 * When FEAT_HDBSS is enabled (VTCR_EL2.HD=1), a writable-clean
@@ -158,16 +167,86 @@ index 484f48dae000..aaa8bacfcf0a 100644
 +		 * hardware on the first write, generating no permission fault.
 +		 * Clearing DBM forces a real fault, allowing lazy split to break
 +		 * the block into 4KB PTEs with per-page DBM for HDBSS tracking.
-+		 *
-+		 * 4KB page entries reacquire DBM=1 from stage2_set_prot_attr
-+		 * after splitting, so subsequent wrprotects correctly produce
-+		 * writable-clean pages with correct HDBSS granularity.
 +		 */
 +		kvm_mmu_clear_dbm_memory_region(kvm, new->id);
++
++		t_dbm = ktime_get();
 +
  		/*
  		 * Huge and normal pages are write-protected and split
  		 * on either of these two cases:
+@@ -2616,6 +2671,12 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 		 */
+ 		kvm_mmu_wp_memory_region(kvm, new->id);
+ 		kvm_mmu_split_memory_region(kvm, new->id);
++
++		t_exit = ktime_get();
++
++		trace_kvm_clear_dbm(kvm, new->id, new->npages,
++			ktime_to_ns(ktime_sub(t_dbm, t_enter)),
++			ktime_to_ns(ktime_sub(t_exit, t_enter)));
+ 	} else {
+ 		/*
+ 		 * Free any leftovers from the eager page splitting cache. Do
+diff --git a/arch/arm64/kvm/pkvm.c b/arch/arm64/kvm/pkvm.c
+index 053e4f733e4b..1ddbdbe877b3 100644
+--- a/arch/arm64/kvm/pkvm.c
++++ b/arch/arm64/kvm/pkvm.c
+@@ -511,6 +511,17 @@ int pkvm_pgtable_stage2_wrprotect(struct kvm_pgtable *pgt, u64 addr, u64 size)
+ 	return ret;
+ }
+ 
++int pkvm_pgtable_stage2_clear_dbm(struct kvm_pgtable *pgt, u64 addr, u64 size)
++{
++	/*
++	 * pKVM does not use HDBSS and system_supports_hdbss() returns false
++	 * in protected mode, so kvm_mmu_clear_dbm_memory_region() will never
++	 * call this function. Required only for KVM_PGT_FN() to compile when
++	 * CONFIG_NVHE_EL2 is set.
++	 */
++	return 0;
++}
++
+ int pkvm_pgtable_stage2_flush(struct kvm_pgtable *pgt, u64 addr, u64 size)
+ {
+ 	struct kvm *kvm = kvm_s2_mmu_to_kvm(pgt->mmu);
+diff --git a/include/trace/events/kvm.h b/include/trace/events/kvm.h
+index b282e3a86769..22468c7d64f8 100644
+--- a/include/trace/events/kvm.h
++++ b/include/trace/events/kvm.h
+@@ -436,6 +436,32 @@ TRACE_EVENT(kvm_test_age_hva,
+ 	TP_printk("mmu notifier test age hva: %#016lx", __entry->hva)
+ );
+ 
++TRACE_EVENT(kvm_clear_dbm,
++
++	TP_PROTO(struct kvm *kvm, int slot, unsigned long npages,
++		 u64 dbm_ns, u64 total_ns),
++
++	TP_ARGS(kvm, slot, npages, dbm_ns, total_ns),
++
++	TP_STRUCT__entry(
++		__field(int,		slot)
++		__field(unsigned long,	npages)
++		__field(u64,		dbm_ns)
++		__field(u64,		total_ns)
++	),
++
++	TP_fast_assign(
++		__entry->slot		= slot;
++		__entry->npages		= npages;
++		__entry->dbm_ns		= dbm_ns;
++		__entry->total_ns	= total_ns;
++	),
++
++	TP_printk("slot=%d npages=%lu dbm_clr=%llu ns total=%llu ns",
++		__entry->slot, __entry->npages,
++		__entry->dbm_ns, __entry->total_ns)
++);
++
+ #endif /* _TRACE_KVM_MAIN_H */
+ 
+ /* This part must be outside protection */
 -- 
 2.43.0
 
