@@ -104,19 +104,75 @@ Dev2 BAR2 (32KB): GPA 0x8000_208000 ~ 0x8000_20ffff
 
 **两者在同一 64KB 页内（GPA 0x8000_200000 ~ 0x8000_20ffff）。**
 
-### 3.2 QEMU 注册 64KB MR → GPA 重叠
+### 3.2 QEMU 注册 64KB MR 到 Guest 分配的 GPA → 重叠
 
-QEMU 侧，每个 BAR2 的 ram_device MR 是 64KB（通过 mmap 修复）。`pci_update_mappings` 将这些 MR 挂到 Guest 分配的 GPA：
+Guest 分配好 GPA 后写入 BAR 寄存器，触发 QEMU `pci_update_mappings`。这个函数**把 QEMU 的 MR（64KB）挂到 Guest 分配的 GPA（32KB 间隔）上**——GPA 是 Guest 决定的，MR 大小是 QEMU 决定的，两者不匹配导致重叠。
+
+**`hw/pci/pci.c:1511-1553`** — `pci_update_mappings`:
+
+```c
+static void pci_update_mappings(PCIDevice *d)
+{
+    PCIIORegion *r;
+    int i;
+    pcibus_t new_addr;
+
+    for (i = 0; i < PCI_NUM_REGIONS; i++) {
+        r = &d->io_regions[i];                       // PCI 台账
+        if (!r->size) continue;
+
+        new_addr = pci_bar_address(d, i, r->type, r->size);
+        // ★ 从 PCI 配置空间读出 Guest 写入的 BAR 值
+        //    = GPA (Guest 在 3.1 分配的: 0x8000_200000 / 0x8000_208000)
+        //    校验对齐: new_addr &= ~(r->size - 1) = ~(32KB-1)
+
+        if (new_addr == r->addr) continue;            // 没变, 跳过
+
+        // 删除旧映射
+        if (r->addr != PCI_BAR_UNMAPPED)
+            memory_region_del_subregion(r->address_space, r->memory);
+
+        r->addr = new_addr;                           // 记录 Guest 分配的 GPA
+
+        if (r->addr != PCI_BAR_UNMAPPED) {
+            // ★ 把 bar->mr (含 64KB ram_device) 挂到 Guest 分配的 GPA
+            //   r->address_space = GPEX io_mmio
+            //   r->addr     = GPA offset (0x8000_200000 - base_mmio = 0x00200000)
+            //   r->memory   = bar->mr, 其内部的 mmaps[0].mem = 64KB!
+            //   priority = 1
+            memory_region_add_subregion_overlap(
+                r->address_space, r->addr, r->memory, 1);
+        }
+    }
+}
+```
+
+**重叠是怎么发生的——逐步追踪**:
 
 ```
-QEMU FlatView:
-  Dev1 BAR2 ram_device (64KB): GPA [0x8000_200000 ──────── 0x8000_20ffff]
-  Dev2 BAR2 ram_device (64KB): GPA               [0x8000_208000 ──────── 0x8000_217fff]
-                                                  └── 重叠 32KB! ──┘
+Dev1 Guest 写 BAR2 = GPA 0x8000_200000:
+  → pci_update_mappings
+  → r->addr = GPA 0x8000_200000
+  → bar->mr (含 64KB ram_device) 挂到 GPA 0x8000_200000
+  → 覆盖 GPA 区间: [0x8000_200000, 0x8000_20ffff]  ← 64KB
 
-重叠区间: GPA 0x8000_208000 ~ 0x8000_20ffff
-  同时被 Dev1 BAR2 MR 和 Dev2 BAR2 MR 覆盖
+Dev2 Guest 写 BAR2 = GPA 0x8000_208000:
+  → pci_update_mappings
+  → r->addr = GPA 0x8000_208000
+  → bar->mr (含 64KB ram_device) 挂到 GPA 0x8000_208000
+  → 覆盖 GPA 区间: [0x8000_208000, 0x8000_217fff]  ← 64KB
+
+GPA 空间重叠:
+  Dev1 MR: [0x8000_200000 ──────── 0x8000_20ffff]
+  Dev2 MR:             [0x8000_208000 ──────── 0x8000_217fff]
+                        └── 重叠 32KB! ──┘
+                        GPA 0x8000_208000 ~ 0x8000_20ffff
+                        同时被两个 MR 覆盖!
 ```
+
+**根因**: Guest 按 32KB 分配 GPA（因为台账 r->size=32KB），但 QEMU 注册的 MR 是 64KB（因为 mmap 修复成功）。`pci_update_mappings` 不关心 MR 的实际大小——它只是把 MR 挂到 Guest 指定的 GPA 上。GPA 由 Guest 决定，MR 大小由 QEMU 的 mmap 决定，两者独立→不匹配→重叠。
+
+
 
 **重叠的是 GPA**。不是 HPA，不是 HVA，是 Guest 物理地址空间中的 BAR2 区间。
 
@@ -176,27 +232,120 @@ static void vfio_sub_page_bar_update_mapping(PCIDevice *pdev, int bar)
 
 **对比**：原始 BAR 注册 (`pci_update_mappings`, 第1篇 8.1) 用 priority=1。
 
-### 4.3 FlatView 重叠 → 截断
+### 4.3 FlatView 渲染机制：为什么高 priority 会截断低 priority
 
-两个 priority=0 的 64KB MR 在 GPA 上重叠，FlatView 按"同 priority 后注册者覆盖先注册者"处理：
+FlatView 由 `render_memory_region` 生成，遍历 MR 子链表，**高 priority 的 MR 先渲染，占据 GPA 空间**，低 priority 的 MR 只能在空隙中填充。
 
-```
-Dev1 sub_page_bar 先执行:
-  FlatView:
-    Dev1 MR (64KB, priority=0) @ 0x8000_200000
-    Dev2 MR (32KB, priority=1) @ 0x8000_208000
-  → Dev2 priority=1 > Dev1 priority=0 → Dev2 覆盖重叠区
-  → Dev1 FlatView section 被截为 32KB
+**`system/memory.c:645-649`** — 子链表遍历顺序:
 
-Dev2 sub_page_bar 后执行:
-  Dev2 MR → 64KB, priority=0
-  FlatView:
-    Dev1 MR (32KB, priority=0)
-    Dev2 MR (64KB, priority=0) ← 后注册, 同 priority 覆盖 Dev1
-  → Dev2 覆盖重叠区, Dev1 仍为 32KB
+```c
+/* Render subregions in priority order. */
+QTAILQ_FOREACH(subregion, &mr->subregions, subregions_link) {
+    render_memory_region(view, subregion, base, clip, ...);
+}
 ```
 
-**结果**：被截断的那个 BAR 在 FlatView 中只有 32KB。
+QTAILQ 的排序规则（`system/memory.c:2699-2704`）：
+
+```c
+QTAILQ_FOREACH(other, &mr->subregions, subregions_link) {
+    if (subregion->priority >= other->priority) {
+        QTAILQ_INSERT_BEFORE(other, subregion, subregions_link);
+        goto done;
+    }
+}
+```
+
+**排序结果**: priority 降序。同 priority 时，**后插入的排前面**——后注册的 MR 优先渲染。
+
+**`system/memory.c:666-693`** — 渲染一个 MR 到 FlatView（"填入空隙"）:
+
+```c
+/* Render the region itself into any gaps left by the current view. */
+for (i = 0; i < view->nr && remain > 0; ++i) {
+    if (int128_ge(base, addrrange_end(view->ranges[i].addr)))
+        continue;                           // 跳过已经渲染过的区间
+
+    if (int128_lt(base, view->ranges[i].addr.start)) {
+        // ★ 有空洞! 把 MR 的一部分填入这个空洞
+        now = int128_min(remain, view->ranges[i].addr.start - base);
+        fr.addr = addrrange_make(base, now);
+        flatview_insert(view, i, &fr);      // 插入这里
+        base += now; remain -= now;         // 消耗掉这部分
+    }
+    // 重叠区域被消耗, 不插入 (被前面的 MR 占了)
+    now = int128_min(base + remain, addrrange_end(view->ranges[i].addr)) - base;
+    base += now; remain -= now;
+}
+// 尾部剩余 → 插入
+if (remain > 0) {
+    flatview_insert(view, i, &fr);
+}
+```
+
+**直译**: 遍历已经渲染好的 FlatView 区间。如果在当前区间前面有空洞 → 填入。如果当前区间已经覆盖了要渲染的范围 → 那块不填（"消耗掉"）。所以**先渲染的 MR 占据 GPA，后渲染的 MR 只能填补空隙。**
+
+### 4.4 截断的逐步演示
+
+以 Dev1 BAR2 @ GPA 0x8000_200000 和 Dev2 BAR2 @ GPA 0x8000_208000 为例。
+
+**初始状态** — 两个 BAR 都刚通过 `pci_update_mappings` 注册（priority=1，32KB）：
+
+```
+GPEX io_mmio.subregions (QTAILQ):
+  Dev1: priority=1, offset=0x200000, size=32KB
+  Dev2: priority=1, offset=0x208000, size=32KB
+
+FlatView 渲染 (两者同 priority, Dev1 offset 小→先渲染):
+  [0x8000_200000, 0x8000_207fff] → Dev1 BAR2 (IO, 32KB)
+  [0x8000_208000, 0x8000_20ffff] → Dev2 BAR2 (IO, 32KB)
+```
+
+**Round 1: Dev1 触发 sub_page_bar** → Dev1 priority=0, size=64KB, 插入到 Dev2 前面：
+
+```
+QTAILQ:
+  Dev1: priority=0, offset=0x200000, 64KB  ← 后插入, 排前面!
+  Dev2: priority=1, offset=0x208000, 32KB
+
+FlatView 渲染:
+  1) Dev1 (priority=0, 64KB) 先渲染 → 因为 FlatView 为空 → 填满64KB
+     FlatView: [0x8000_200000, 0x8000_20ffff] Dev1
+  2) Dev2 (priority=1, 32KB) 后渲染 → 因为 Dev1 已占满 0x200000~0x20ffff
+     → Dev2 的 [0x208000, 0x20ffff] 完全被覆盖 → 只能等待空隙
+     → 但在 0x8000_208000 处没有空隙 → Dev2 什么也插入不了!
+
+  FlatView 最终:
+    [0x8000_200000, 0x8000_20ffff] Dev1 BAR2 (64KB)
+    (Dev2 BAR2 被完全覆盖, 不出现!)                               ← 不是截断, 是完全消失!
+```
+
+**Round 2: Dev2 触发 sub_page_bar** → Dev2 priority=0, size=64KB, 插入到 Dev1 前面：
+
+```
+QTAILQ:
+  Dev2: priority=0, offset=0x208000, 64KB  ← 后插入, 排前面!
+  Dev1: priority=0, offset=0x200000, 64KB
+
+FlatView 渲染:
+  1) Dev2 (priority=0, 64KB) 先渲染 → FlatView 为空 → 填满:
+     FlatView: [0x8000_208000, 0x8000_217fff] Dev2
+  2) Dev1 (priority=0, 64KB) 后渲染 → 填入空隙:
+     base=0x200000, remain=64KB → FlatView ranges[0]=[0x208000, 0x217fff]
+     → 空洞在 0x200000~0x208000: 插入 32KB Dev1 section
+     → 0x208000~0x20ffff: Dev2 已占, 消耗掉
+     → 0x210000~0x217fff: Dev2 已占
+
+  FlatView 最终:
+    [0x8000_200000, 0x8000_207fff] Dev1 BAR2 (32KB!!)             ← 被截断了!
+    [0x8000_208000, 0x8000_217fff] Dev2 BAR2 (64KB)
+```
+
+**Round 3: Dev1 被截断为 32KB** → VFIO listener 再次触发 sub_page_bar → 循环往复。
+
+### 4.5 截断的本质
+
+FlatView 的 `render_memory_region` 逻辑保证了 "高 priority 先占，同 priority 后注册先占，低 priority / 先注册者只能填空隙"。sub_page_bar 把 priority 降到 0 后，两个 64KB BAR 在同一 GPA 区域竞争——后渲染的那个填满 64KB，先渲染的那个被截断为 32KB。被截断的又触发新一轮 sub_page_bar → 乒乓。
 
 ---
 
