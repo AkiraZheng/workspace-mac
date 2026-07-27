@@ -346,9 +346,11 @@ Step B — 渲染 Dev1 (priority=0, offset=0x200000, size=0x10000=64KB):
   base = 0x200000, remain = 0x10000
   i=0 → view->ranges[0] = {start=0x208000, end=0x218000}
 
-  ★ 空洞判定 (line 671):
+  ★ 空洞判定（`system/memory.c:671` — `int128_lt`）:
     int128_lt(0x200000, 0x208000)? → Yes! 0x200000 在 0x208000 前面 → 有空洞!
-    now = min(0x10000, 0x208000 - 0x200000) = min(0x10000, 0x8000) = 0x8000 (32KB)
+    now = int128_min(remain, int128_sub(ranges[0].start, base))
+        = min(0x10000, 0x208000 - 0x200000)
+        = 0x8000 (32KB)
 
     flatview_insert(view, 0, Dev1_hole_fr):
       → memmove → 原 ranges[0](Dev2) 右移一格
@@ -363,14 +365,18 @@ Step B — 渲染 Dev1 (priority=0, offset=0x200000, size=0x10000=64KB):
 
   i=1 → view->ranges[1] = {start=0x208000, end=0x218000}
     没有空洞需要插入。
-    ★ 覆盖消耗 (line 682-687):
-    now = min(0x208000+0x8000=0x210000, 0x218000) - 0x208000
+    ★ 覆盖消耗（`system/memory.c:682-687` — `int128_sub` + `int128_min`）:
+    now = int128_sub(
+              int128_min(int128_add(base, remain),
+                         addrrange_end(ranges[1].addr)),
+              base)
+        = min(0x208000+0x8000=0x210000, 0x218000) - 0x208000
         = 0x210000 - 0x208000 = 0x8000 (32KB)
     base   = 0x208000 + 0x8000 = 0x210000   (跳过被 Dev2 覆盖的区域)
     remain = 0x8000 - 0x8000 = 0            (刚好消耗完!)
     ++i → i=2 → 循环结束
 
-  remain==0 → 不插入 (line 689)
+  remain==0 → 不走到 `flatview_insert` (line 689)
 
 最终 FlatView:
   [0] Dev1 [0x200000, 0x208000) 32KB!!   ← 只有空洞部分留下了, 被截断!
