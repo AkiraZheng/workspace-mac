@@ -90,6 +90,13 @@ hisi_acc_get_resource_len → 32KB
 
 mmap 虽然失败，但 **MR 树和 FlatView 仍然有 BAR2 的记录**——只是没有 ram_device 层。QEMU 的 KVMSlot 和 KVM 的 memslot **都不会创建**，但 GPA 仍然存在于台账和 FlatView 中，用于 MMIO 的 GPA→MR 派发。
 
+| `subregions` | `ram_block` | 例子 | 说明 |
+|---|---|---|---|
+| 有 | 无 | `bar->mr`, `region.mem` | 纯容器/IO 层，通过子 MR 定义内容 |
+| 无 | 有 | `mmaps[0].mem`, `mach-virt.ram` | 叶子节点，`ram_block->host` = HVA |
+| 有 | 有 | 被 overlay 切割的 RAM | 罕见 |
+| **无** | **无** | **GIC, UART 等纯 IO MR** | **只通过 `ops` 回调处理 MMIO，得通过模拟的方式模拟 MMIO** |
+
 #### 2.3.1 PCI 台账分配 GPA
 
 Guest PCI 枚举时看到 BAR2=32KB（来自 wmask），分配 GPA `0x8000_200000` 并写入 BAR 寄存器。QEMU 收到写操作后，`pci_update_mappings` 记录 GPA：
@@ -132,14 +139,19 @@ FlatView.ranges[]:
 
 KVM listener 处理 FlatView 变化时，`kvm_set_phys_mem` 对 IO section 直接跳过：
 
-**`accel/kvm/kvm-all.c:1338-1342`**:
+**`accel/kvm/kvm-all.c:1338-1342`** — `kvm_set_phys_mem()`:
 
 ```c
-if (!memory_region_is_ram(mr)) {   // mr->ram = false → 跳过!
-    return;                         // 不创建 QEMU KVMSlot
-                                    // 不发出 ioctl
-                                    // 不创建 KVM memslot
-}
+static void kvm_set_phys_mem(KVMMemoryListener *kml,
+                             MemoryRegionSection *section, bool add)
+{
+    MemoryRegion *mr = section->mr;
+    // ...
+    if (!memory_region_is_ram(mr)) {   // mr->ram = false → 跳过!
+        return;                         // 不创建 QEMU KVMSlot
+                                        // 不发出 ioctl
+                                        // 不创建 KVM memslot
+    }
 ```
 
 **结论**：
@@ -230,6 +242,7 @@ uint64_t vfio_region_read(void *opaque, hwaddr addr, unsigned size)
 
 **关键限制**: `max_access_size = 8` → VFIO 慢路径只支持 1~8 字节。ldr (8 字节) 可通过 pread 完成。ldp (16 字节) 在进入 QEMU 之前就被 KVM 拦截（ISV=0），根本走不到这里。
 
+```
 KVM [EL2]: kvm_handle_mmio_return()
   → vcpu_set_reg(vcpu, x0, data)   ← 写回 Guest x0
   → kvm_incr_pc(vcpu)              ← 跳过已仿真的 ldr

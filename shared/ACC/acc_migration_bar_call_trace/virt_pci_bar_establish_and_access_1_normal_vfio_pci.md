@@ -342,7 +342,7 @@ struct MemoryRegion {
 | 有 | 无 | `bar->mr`, `region.mem` | 纯容器/IO 层，通过子 MR 定义内容 |
 | 无 | 有 | `mmaps[0].mem`, `mach-virt.ram` | 叶子节点，`ram_block->host` = HVA |
 | 有 | 有 | 被 overlay 切割的 RAM | 罕见 |
-| 无 | 无 | GIC, UART 等纯 IO MR | 只通过 `ops` 回调处理 MMIO |
+| 无 | 无 | GIC, UART 等纯 IO MR | 只通过 `ops` 回调处理 MMIO，得通过模拟的方式模拟 MMIO |
 
 **在 VFIO BAR 场景中的三层对应**：
 
