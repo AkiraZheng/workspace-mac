@@ -43,15 +43,37 @@
 **`drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c:1335`**:
 
 ```c
-if (hisi_acc_vdev->drv_mode == HW_ACC_MIG_VF_CTRL) {
-    ret_len = bar_len >> 1;      // 64KB → 32KB
-    return ret_len;
+static size_t hisi_acc_get_resource_len(struct vfio_pci_core_device *vdev,
+                                        unsigned int index)
+{
+    // ...
+    if (hisi_acc_vdev->drv_mode == HW_ACC_MIG_VF_CTRL) {
+        ret_len = bar_len >> 1;      // 64KB → 32KB
+        return ret_len;
+    }
+    // ...
 }
 ```
 
 此函数的返回值用于 `VFIO_DEVICE_GET_REGION_INFO` ioctl → QEMU 据此创建 MemoryRegion → Guest PCI 枚举读 wmask 得到 BAR2=32KB。
 
 ### 2.2 32KB < 64KB PAGE_SIZE → mmap 失败 → 无 KVM S2
+
+- QEMU 通过 mmap 获取 HVA，mmap 成功后才创建 ram_device MR（`mr->ram=true`），只有这类 MR 才会触发 KVM memslot 注册。
+
+  ```
+  QEMU [EL0]:
+    // 用 HVA 创建 ram_device MR
+    memory_region_init_ram_device_ptr(&mmaps[0].mem, ...,
+                                      HVA_0x7fff_xxxx, 64KB);
+    // mmaps[0].mem.ram = true
+    // mmaps[0].mem.ram_device = true
+    // mmaps[0].mem.ram_block->host = HVA_0x7fff_xxxx
+  ```
+
+- QEMU 通过 mmap 获取 HVA，目的是让 KVM 能用 `get_user_pages(HVA)` 查到设备 BAR2 的 HPA，进而填入 S2 页表（GPA→HPA），使 Guest 能通过 S2 硬件直达设备。
+
+但是由于 PAGE_SIZE=64KB，acc vfio-pci 驱动返回的 BAR2=32KB，导致 mmap 失败：
 
 ```
 hisi_acc_get_resource_len → 32KB
@@ -64,7 +86,159 @@ hisi_acc_get_resource_len → 32KB
   → Guest 访问 BAR2 → S2 缺页
 ```
 
-### 2.3 ldp 128-bit 指令 ISV=0 → 无法 MMIO 仿真 → SEA
+### 2.3 mmap 失败后 BAR2 的建立过程（GPA 去哪了）
+
+mmap 虽然失败，但 **MR 树和 FlatView 仍然有 BAR2 的记录**——只是没有 ram_device 层。QEMU 的 KVMSlot 和 KVM 的 memslot **都不会创建**，但 GPA 仍然存在于台账和 FlatView 中，用于 MMIO 的 GPA→MR 派发。
+
+#### 2.3.1 PCI 台账分配 GPA
+
+Guest PCI 枚举时看到 BAR2=32KB（来自 wmask），分配 GPA `0x8000_200000` 并写入 BAR 寄存器。QEMU 收到写操作后，`pci_update_mappings` 记录 GPA：
+
+**`hw/pci/pci.c:1511-1553`**:
+
+```c
+r->addr = 0x8000_200000;   // ← GPA 记录在 PCIIORegion 台账中
+memory_region_add_subregion_overlap(
+    r->address_space,       // GPEX io_mmio
+    0x00200000,             // GPA offset = 0x8000_200000 - base_mmio
+    r->memory,              // → bar->mr (容器, 含 region.mem)
+    1);
+```
+
+#### 2.3.2 MR 树：有 IO 层，没有 ram_device 层
+
+`bar->mr` 挂入 GPEX io_mmio 后，MR 树包含两层：
+
+```
+GPEX io_mmio.subregions:
+  bar->mr [offset=0x00200000, priority=1, IO, 32KB]
+    └── region.mem [IO, ops=vfio_region_ops, ram=false]
+         (无 mmaps[0].mem — mmap 失败时不会创建)
+```
+
+#### 2.3.3 FlatView：有 IO section，但 mr->ram=false
+
+FlatView 展平后，该 GPA 区间有一个 IO 类型的 section：
+
+```
+FlatView.ranges[]:
+  Section[S]: GPA [0x8000_200000, 0x8000_207fff], 32KB
+              mr = region.mem
+              mr->ram = false     ← IO 类型!
+              mr->ops = vfio_region_ops
+```
+
+#### 2.3.4 KVM memslot 和 QEMU KVMSlot：都不创建
+
+KVM listener 处理 FlatView 变化时，`kvm_set_phys_mem` 对 IO section 直接跳过：
+
+**`accel/kvm/kvm-all.c:1338-1342`**:
+
+```c
+if (!memory_region_is_ram(mr)) {   // mr->ram = false → 跳过!
+    return;                         // 不创建 QEMU KVMSlot
+                                    // 不发出 ioctl
+                                    // 不创建 KVM memslot
+}
+```
+
+**结论**：
+
+| 层 | BAR2 GPA 存在? | 说明 |
+|---|---|---|
+| PCI 台账 `r->addr` | **是** (0x8000_200000) | Guest 写入后 pci_update_mappings 记录 |
+| MR 树 `bar->mr` | **是** (IO 类型) | 挂入 GPEX io_mmio, 含 region.mem |
+| FlatView section | **是** (IO, mr->ram=false) | 用于 QEMU MMIO 派发 |
+| QEMU KVMSlot | **否** | mr->ram=false → kvm_set_phys_mem 跳过 |
+| KVM memslot | **否** | 同上, ioctl 未发出 |
+| KVM S2 PTE | **否** | 无 memslot → S2 无映射 |
+
+#### 2.3.5 GPA 在 MMIO 仿真中怎么用
+
+当 Guest 访问 BAR2 → S2 缺页 → VM exit：
+
+```
+KVM [EL2]:
+  CPU 硬件填写 HPFAR = 故障 IPA = GPA 0x8000_200300
+  → ISV=0 → KVM_EXIT_ARM_NISV → GPA 传给 QEMU (arm_nisv.fault_ipa)
+
+  如果 ISV=1 (单寄存器 ldr):
+  → KVM_EXIT_MMIO → GPA 填入 kvm_run->mmio.phys_addr
+
+QEMU [EL0]:
+  收到 GPA → address_space_rw(GPA) → 查 FlatView
+  → 找到 Section: [0x8000_200000, 32KB, mr=region.mem]
+  → vfio_region_ops.read() → vfio_region_read()
+  → pread(VFIO_fd, ..., fd_offset + 0x300) → 内核读设备
+```
+
+**GPA 虽然不在 memslot/S2 中，但存于台账和 FlatView——这是 QEMU MMIO 慢路径派发的关键。**
+
+### 2.4 单寄存器 ldr 的 MMIO 仿真路径 (ISV=1)
+
+在理解 ldp 为什么崩溃之前，先看一个正常工作的 MMIO 仿真路径：假设 Guest 执行的不是 `ldp`，而是普通的 `ldr x0, [x3]`（8 字节单寄存器读），S2 缺页时：
+
+```
+Guest [EL1]: ldr x0, [x3]  (x3 = io_base + 0x300)
+  → GVA → GPA (Guest S1 ✓) → S2 缺页 → VM exit
+
+KVM [EL2]: io_mem_abort()
+  → ISV=1 → 解码 ESR_EL2:
+      is_write=false, len=8, rt=x0
+  → kvm_io_bus_read 失败 (VFIO 设备不在 KVM_MMIO_BUS 上)
+  → 构造 KVM_EXIT_MMIO: {GPA=0x8000_200300, len=8, is_read}
+  → 返回 QEMU
+
+QEMU [EL0]:
+  → address_space_rw(GPA) → 查 FlatView → 找到 region.mem
+  → vfio_region_ops.read() → vfio_region_read()
+  → pread(VFIO_fd, buf, 8, fd_offset+0x300) //关键就是要找到这个GPA对应的VFIO的fd传给host内核
+    → syscall → Host 内核 VFIO 驱动 → ioremap 读设备 → 返回数据
+```
+
+**QEMU 侧的 ops 注册**（`hw/vfio/helpers.c:260`）:
+
+```c
+const MemoryRegionOps vfio_region_ops = {
+    .read = vfio_region_read,
+    .write = vfio_region_write,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,     // ← 最大只支持 8 字节!
+    },
+};
+```
+
+**`vfio_region_read`**（`hw/vfio/helpers.c:210`）:
+
+```c
+uint64_t vfio_region_read(void *opaque, hwaddr addr, unsigned size)
+{
+    VFIORegion *region = opaque;
+    union { uint8_t byte; uint16_t word; uint32_t dword; uint64_t qword; } buf;
+
+    if (pread(vbasedev->fd, &buf, size, region->fd_offset + addr) != size)
+        return (uint64_t)-1;
+
+    switch (size) {
+    case 8:  return le64_to_cpu(buf.qword);    // 8 字节 ✅
+    // ...
+    default: hw_error("unsupported read size"); // >8 字节 ❌
+    }
+}
+```
+
+**关键限制**: `max_access_size = 8` → VFIO 慢路径只支持 1~8 字节。ldr (8 字节) 可通过 pread 完成。ldp (16 字节) 在进入 QEMU 之前就被 KVM 拦截（ISV=0），根本走不到这里。
+
+KVM [EL2]: kvm_handle_mmio_return()
+  → vcpu_set_reg(vcpu, x0, data)   ← 写回 Guest x0
+  → kvm_incr_pc(vcpu)              ← 跳过已仿真的 ldr
+  → Guest 继续执行 ✅
+```
+
+**关键**: ISV=1 意味着 KVM 能从 ESR_EL2 解码出完整的指令信息（方向、大小、目标寄存器），从而构造有效的 MMIO 请求交给 QEMU。QEMU 通过 pread/pwrite 慢路径完成设备访问，再把结果写回 Guest 寄存器。
+
+### 2.5 ldp 128-bit 指令 ISV=0 → 无法 MMIO 仿真 → SEA
 
 崩溃发生在 `qm_mb_read` 读取 mailbox 寄存器时。该函数使用 ARM64 inline asm `ldp` 做 128-bit 原子读：
 
@@ -80,14 +254,14 @@ asm volatile("ldp %0, %1, %3\n"
 
 `ldp` 是双寄存器加载指令，一次读 16 字节（128-bit）。对于 S2 缺页触发的 Data Abort：
 
-- CPU 写入 ESR_EL2 的 ISV=0 —— 因为 ARM 规范下 ldp/stp 等多寄存器操作的 syndrome 格式无法完整描述两个目标寄存器
+- CPU 写入 ESR_EL2 的 ISV=0 —— ARM 规范下 ldp/stp 等多寄存器操作的 syndrome 格式无法完整描述两个目标寄存器
 - KVM 无法解码指令 → 不知道是读还是写、多大、哪个寄存器
 - 无法构造 MMIO 请求 → 只能返回 KVM_EXIT_ARM_NISV
 - QEMU 收到 NISV → 注入 SEA → Guest panic
 
-**而正常的 `ldr`（单寄存器 8 字节读）ISV=1**，KVM 可以解码并构造 MMIO 请求，通过 pread/pwrite 慢路径完成仿真。但 hisi_qm 驱动固定用 `ldp` 做 128-bit 原子读，无法改成单寄存器操作。
+**对比 2.4 的 ldr 路径**: ldr 的 ISV=1 让整个 MMIO 仿真链路畅通。ldp 的 ISV=0 在第一关 KVM 就被拦截——连 MMIO 请求都构造不出来，更不可能走到 QEMU 的 pread/pwrite 慢路径。hisi_qm 驱动固定用 `ldp` 做 128-bit 原子读，无法改成单寄存器操作。
 
-### 2.4 完整故障链
+### 2.6 完整故障链
 
 ```
 hisi_acc_get_resource_len: bar_len>>1 = 32KB
@@ -99,7 +273,7 @@ hisi_acc_get_resource_len: bar_len>>1 = 32KB
   → Guest kernel panic
 ```
 
-### 2.5 为什么 vfio-pci 正常
+### 2.7 为什么 vfio-pci 正常
 
 通用 vfio-pci 不截断 BAR2 → `VFIO_DEVICE_GET_REGION_INFO` 返回 64KB → QEMU mmap 64KB = PAGE_SIZE → 成功 → ram_device MR → KVM memslot → S2 映射 → ldp 通过 S2 直达硬件。
 

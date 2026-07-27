@@ -931,26 +931,36 @@ QEMU [EL0]:
 
 **产出**: `bar->mr` MR 创建, `region.mem` 挂入其 subregions。
 
-#### Step 4: mmap → 创建 ram_device MR [QEMU EL0]
+#### Step 4: mmap → 创建 ram_device MR [QEMU EL0 → Host EL2 → QEMU EL0]
+
+**mmap 的目的**: 获取一个 Host 用户态 HVA，使 KVM 能通过 `get_user_pages(HVA)` 查到设备 BAR2 的 HPA，进而填入 S2 页表（GPA→HPA）。只有 ram_device MR（`mr->ram=true`）才能触发 KVM memslot 注册，Guest 才能通过 S2 硬件直达设备（快路径）。
 
 ```
 QEMU [EL0]:
   vfio_region_mmap(&bar->region):
-    ptr = mmap(VFIO_fd, 64KB, ...)
-    ↓ syscall → Host 内核 VFIO 驱动 → 返回 HVA = 0x7fff_xxxx_0000
+    ptr = mmap(NULL, 64KB, PROT_READ|PROT_WRITE, MAP_SHARED,
+               vfio_device_fd, bar2_fd_offset)
+    ↓ syscall → Host 内核 VFIO 驱动
+    → vma->vm_pgoff = BAR2_HPA >> PAGE_SHIFT  (记录设备物理页帧号)
+    → 返回 HVA = 0x7fff_xxxx_0000
 
-  // 用 HVA 创建 ram_device MR
+QEMU [EL0]:
   memory_region_init_ram_device_ptr(&mmaps[0].mem, ..., HVA, 64KB);
-  //                                   ↑ MR树第3层: mmaps[0].mem 创建!
-  //                                      .ram = true
-  //                                      .ram_device = true
-  //                                      .ram_block->host = HVA
+  //   MR树第3层: ram_device → ram=true, ram_device=true
+  //   ram_block->host = HVA  ← KVM 用这个 HVA 通过 get_user_pages 查 HPA
 
-  // 将 ram_device MR 挂入 region.mem 下面
   memory_region_add_subregion(&bar->region.mem, 0, &mmaps[0].mem);
 ```
 
-**产出**: `VFIOMmap.mmap = HVA`, `mmaps[0].mem` MR 创建, 挂入 region.mem subregions。
+**mmap 后 vs mmap 前**:
+
+| | mmap 失败时 | mmap 成功时 |
+|---|---|---|
+| BAR 的 MR 类型 | 只有 IO (region.mem) | IO + **ram_device** (mmaps[0].mem) |
+| `mr->ram` | false | **true** (叶子节点) |
+| Guest 访问路径 | S2 miss → VM exit → QEMU pread/pwrite (慢) | **S2 命中 → 硬件直达设备 (快)** |
+| KVM memslot | 不建 | **建立** |
+| 本场景 | hisi_acc (已修复) | vfio-pci / hisi_acc 修复后 |
 
 #### 完成后: 数据结构与 MR 树的对应
 
@@ -1082,7 +1092,7 @@ Guest [EL1]:
 
 ---
 
-## 7. 阶段2：Guest PCI 枚举 - 通过qemu的wmask [Guest EL1]
+## 7. 阶段2：Guest PCI 枚举分配GPA - 通过qemu的wmask [Guest EL1]
 
 **函数调用链**:
 
