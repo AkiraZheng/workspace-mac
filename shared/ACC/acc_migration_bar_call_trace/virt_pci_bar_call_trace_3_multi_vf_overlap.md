@@ -326,20 +326,58 @@ FlatView 渲染:
 QTAILQ:
   Dev2: priority=0, offset=0x208000, 64KB  ← 后插入, 排前面!
   Dev1: priority=0, offset=0x200000, 64KB
-
-FlatView 渲染:
-  1) Dev2 (priority=0, 64KB) 先渲染 → FlatView 为空 → 填满:
-     FlatView: [0x8000_208000, 0x8000_217fff] Dev2
-  2) Dev1 (priority=0, 64KB) 后渲染 → 填入空隙:
-     base=0x200000, remain=64KB → FlatView ranges[0]=[0x208000, 0x217fff]
-     → 空洞在 0x200000~0x208000: 插入 32KB Dev1 section
-     → 0x208000~0x20ffff: Dev2 已占, 消耗掉
-     → 0x210000~0x217fff: Dev2 已占
-
-  FlatView 最终:
-    [0x8000_200000, 0x8000_207fff] Dev1 BAR2 (32KB!!)             ← 被截断了!
-    [0x8000_208000, 0x8000_217fff] Dev2 BAR2 (64KB)
 ```
+
+**`render_memory_region` 逐步模拟**（内核地址用 pcie-mmio alias 前的 offset, base_mmio=0x8000_000000）:
+
+```
+初始 FlatView: 空 (view->nr=0)
+
+Step A — 渲染 Dev2 (priority=0, offset=0x208000, size=0x10000=64KB):
+────────────────────────────────────────────────────────
+  base = 0x208000, remain = 0x10000
+  view->nr=0 → for 循环跳过
+  remain>0 → flatview_insert(view, 0, Dev2_fr):
+    view->ranges[0] = {start=0x208000, size=0x10000, mr=Dev2}
+  FlatView 暂态: [0] Dev2 [0x208000 ── 0x218000) 64KB
+
+Step B — 渲染 Dev1 (priority=0, offset=0x200000, size=0x10000=64KB):
+────────────────────────────────────────────────────────
+  base = 0x200000, remain = 0x10000
+  i=0 → view->ranges[0] = {start=0x208000, end=0x218000}
+
+  ★ 空洞判定 (line 671):
+    int128_lt(0x200000, 0x208000)? → Yes! 0x200000 在 0x208000 前面 → 有空洞!
+    now = min(0x10000, 0x208000 - 0x200000) = min(0x10000, 0x8000) = 0x8000 (32KB)
+
+    flatview_insert(view, 0, Dev1_hole_fr):
+      → memmove → 原 ranges[0](Dev2) 右移一格
+      → view->ranges[0] = {start=0x200000, size=0x8000, mr=Dev1}  ← 空洞部分插入!
+
+    base   = 0x200000 + 0x8000 = 0x208000   (推进到空洞末尾)
+    remain = 0x10000 - 0x8000 = 0x8000      (还剩 32KB)
+    ++i → i=1
+
+  FlatView 暂态: [0] Dev1 hole [0x200000 ── 0x208000) 32KB
+                 [1] Dev2      [0x208000 ── 0x218000) 64KB
+
+  i=1 → view->ranges[1] = {start=0x208000, end=0x218000}
+    没有空洞需要插入。
+    ★ 覆盖消耗 (line 682-687):
+    now = min(0x208000+0x8000=0x210000, 0x218000) - 0x208000
+        = 0x210000 - 0x208000 = 0x8000 (32KB)
+    base   = 0x208000 + 0x8000 = 0x210000   (跳过被 Dev2 覆盖的区域)
+    remain = 0x8000 - 0x8000 = 0            (刚好消耗完!)
+    ++i → i=2 → 循环结束
+
+  remain==0 → 不插入 (line 689)
+
+最终 FlatView:
+  [0] Dev1 [0x200000, 0x208000) 32KB!!   ← 只有空洞部分留下了, 被截断!
+  [1] Dev2 [0x208000, 0x218000) 64KB     ← 后注册, 占满 64KB
+```
+
+Dev1 的 64KB MR 在渲染时，前 32KB（0x200000~0x208000）插入为空洞，后 32KB（0x208000~0x20ffff）被 Dev2 的已渲染区间覆盖 → 消耗掉不插入 → **Dev1 在 FlatView 中只剩 32KB。这就是截断发生的精确机制。**
 
 **Round 3: Dev1 被截断为 32KB** → VFIO listener 再次触发 sub_page_bar → 循环往复。
 
