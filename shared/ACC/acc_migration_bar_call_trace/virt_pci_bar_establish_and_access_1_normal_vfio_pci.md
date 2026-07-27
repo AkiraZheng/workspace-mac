@@ -789,6 +789,29 @@ FlatView section (GPA, size) → 对比 KVMSlot 缓存
 
 ## 6. 阶段1：QEMU 启动 → 查询 BAR 信息 [QEMU EL0 → Host EL2 → QEMU EL0]
 
+**阶段1 流程总览**[QEMU EL0 → Host EL2 → QEMU EL0]:
+
+```
+6.1 打开 VFIO 设备 [QEMU EL0]
+    vfio_fd → ioctl → device_fd
+    │
+6.2 查询 BAR 大小 + bar->size 赋值 [QEMU EL0 → Host EL2]
+    ioctl(VFIO_DEVICE_GET_REGION_INFO) → info->size=64KB
+    → region->size=64KB → bar->size=64KB
+    │
+6.3 创建 MR 树 [QEMU EL0]
+    bar->mr (容器, IO) → region.mem (IO, ops) → mmaps[0].mem (ram_device)
+    │
+6.4 mmap 获取 HVA [QEMU EL0 → Host EL2]
+    mmap(VFIO_fd, 64KB) → HVA → ram_block->host
+    │
+6.5 PCI 台账固化 [QEMU EL0]
+    pci_register_bar → r->size=64KB, wmask, r->addr=UNMAPPED
+    │
+6.6 阶段1 完成
+    MR 树就绪, 台账就绪, BAR 尚未映射到 GPA, KVM 尚未建 memslot
+```
+
 ### 6.1 QEMU 打开 VFIO 设备
 
 QEMU [EL0] 启动时，每个 VFIO 直通设备对应一个 VFIO container 和一个 VFIO group。QEMU 通过文件操作打开设备：
@@ -801,6 +824,26 @@ QEMU [EL0]:
 ```
 
 ### 6.2 查询 BAR 物理大小
+
+**数据结构关系**：`region` 的类型是 `VFIORegion`，嵌入在 `VFIOBAR` 中，而 `VFIOBAR` 是 `VFIOPCIDevice` 的成员数组 `bars[]` 的元素：
+
+```
+VFIOPCIDevice.bars[2]        (VFIOBAR)
+  ├── .size       = 64KB    (来自 region.size 副本)
+  ├── .mr         → bar->mr (MemoryRegion*)  ← 与 system_memory 树中的 bar->mr 同一对象
+  └── .region     (VFIORegion)
+        ├── .size = 64KB    (来自 ioctl VFIO_DEVICE_GET_REGION_INFO)
+        ├── .mem  → region.mem (MemoryRegion*)  ← 与 system_memory 树中的 region.mem 同一对象
+        │    ops  = vfio_region_ops (.read / .write)
+        │    ram  = false
+        └── .mmaps[0]       (VFIOMmap)
+              ├── .mmap = HVA_0x7fff_xxxx  (mmap 返回值)
+              └── .mem  = mmaps[0].mem (MemoryRegion)  ← 与 system_memory 树中的 mmaps[0].mem 同一对象
+                   ram        = true
+                   ram_device = true
+                   ram_block->host = HVA_0x7fff_xxxx
+```
+> **注意**: 图中的三个 MemoryRegion (`bar->mr` / `region.mem` / `mmaps[0].mem`) 每个只有一个实例。`VFIOPCIDevice` 结构体中存的是这些 MR 的**指针**（用于 VFIO 代码快速访问），同时也挂在 `system_memory` 树的对应位置（定义 GPA 拓扑）。
 
 QEMU [EL0] 向内核查询每个 BAR 的大小：
 
@@ -815,31 +858,11 @@ Host 内核 [EL2] VFIO 驱动:
   ← info.size = 0x10000 (64KB)
 
 QEMU [EL0]:
-  region->size = info.size = 64KB        // 存到 VFIORegion
-```
+  // vfio_region_setup() — hw/vfio/helpers.c:370
+  region->size = info.size = 64KB        // ← VFIORegion.size 赋值
 
-**`hw/vfio/helpers.c:370`**:
-```c
-region->size = info->size;   // ← 来自内核 VFIO_DEVICE_GET_REGION_INFO ioctl
-```
-
-**数据结构关系**：`region` 的类型是 `VFIORegion`，嵌入在 `VFIOBAR` 中，而 `VFIOBAR` 是 `VFIOPCIDevice` 的成员数组 `bars[]` 的元素：
-
-```
-VFIOPCIDevice.bars[2]        (VFIOBAR)
-  ├── .size       = 64KB    (来自 region.size 副本)
-  ├── .mr         → bar->mr (外层容器 MemoryRegion)
-  └── .region     (VFIORegion)
-        ├── .size = 64KB    (来自 ioctl VFIO_DEVICE_GET_REGION_INFO)
-        ├── .mem  = region.mem (IO 层 MemoryRegion)
-        │    ops  = vfio_region_ops (.read / .write)
-        │    ram  = false
-        └── .mmaps[0]       (VFIOMmap)
-              ├── .mmap = HVA_0x7fff_xxxx  (mmap 返回值)
-              └── .mem  = mmaps[0].mem (ram_device MemoryRegion)
-                   ram        = true
-                   ram_device = true
-                   ram_block->host = HVA_0x7fff_xxxx
+  // vfio_bar_prepare() — hw/vfio/pci.c:1785
+  bar->size = bar->region.size = 64KB    // ← VFIOBAR.size 赋值, mmap 之前已就绪!
 ```
 
 > **正常 vfio-pci 下**: `info->size = 64KB`（物理 BAR 大小，不截断）。hisi_acc 驱动的问题（截断为 32KB）将在第 2 篇分析。
@@ -853,7 +876,12 @@ QEMU [EL0] 为 BAR 创建三层 MR 结构：
 ```c
 // Step 1: 外层容器 (纯拓扑, ram=false, 子 MR 链表)
 bar->mr = g_new0(MemoryRegion, 1);
-memory_region_init_io(bar->mr, ..., NULL, NULL, name, 64KB);
+memory_region_init_io(bar->mr, ..., NULL, NULL, name, bar->size);
+//                                                    ↑ = 64KB
+// 赋值链: ioctl → info.size=64KB (6.2)
+//              → region->size=64KB (helpers.c:370)
+//              → bar->size=64KB    (pci.c:1785, vfio_bar_prepare)
+//              → 这里用 bar->size 创建容器 MR
 
 // Step 2: 内层 IO MR (ops = vfio_region_ops, ram=false)
 if (bar->region.size > 0) {
@@ -890,6 +918,8 @@ VFIOPCIDevice (每个 VFIO 直通设备一个)
 ```
 
 > **三层 MR 的分工**: 第1层=容器(纯拓扑), 第2层=IO(慢路径), 第3层=ram_device(快路径, 存 HVA)。KVM 只看第3层——只有 `mr->ram=true` 才建 memslot。
+>
+> **与 VFIOPCIDevice 的关系**: 上图中的 `bar->mr` / `region.mem` / `mmaps[0].mem` 每个只有一个实例，VFIOPCIDevice 结构体通过 `.mr` 和 `.mem` 字段持有它们的指针（快速访问），同时这些 MR 也挂在 `system_memory` 树的对应位置（定义 GPA 拓扑）。两套路径访问同一块内存。
 
 **VFIOPCIDevice 如何与设备绑定**:
 
@@ -948,24 +978,47 @@ QEMU [EL0]:
 
 ### 6.5 pci_register_bar：PCI 台账固化
 
-QEMU [EL0] 在 PCI 配置空间注册 BAR：
+`pci_register_bar` 是 `vfio_bar_register` 的最后一步调用。它从已建好的 `bar->mr` 读取大小赋给 `r->size`，并写入 BAR wmask。
 
-**`hw/pci/pci.c:1321-1333`**:
+**`r->size` 赋值链**:
+
+```
+ioctl → info->size=64KB (6.2)
+     → region->size=64KB (helpers.c:370, vfio_region_setup)
+     → bar->size=64KB    (pci.c:1785, vfio_bar_prepare)
+     → bar->mr size=64KB (6.3, memory_region_init_io)
+     → r->size=64KB      (pci.c:1323, ← 这里!)
+```
+
+**`hw/pci/pci.c:1321-1333`** — pci_register_bar 内部:
 ```c
+pcibus_t size = memory_region_size(bar->mr);  // = 64KB, 从已建好的 MR 读取
+
 r = &pci_dev->io_regions[BAR2];
-r->size          = 0x10000;              // 64KB — 永久不改!
+r->size          = size;                  // 64KB — 永久不改!
 r->addr          = PCI_BAR_UNMAPPED;     // 尚未分配 GPA
 r->memory        = bar->mr;             // → MR 树
 r->address_space = bus->address_space_mem;  // → GPEX io_mmio
 
-// BAR 可写掩码 → Guest 通过它知道 BAR 大小
-wmask = ~(0x10000 - 1);                 // = 0xFFFFFFFFFFFF0000
+// BAR 可写掩码 → Guest 通过 PCI 协议探测 BAR 大小
+wmask = ~(size - 1);                 // ~(0xFFFF) = 0xFFFFFFFFFFFF0000
+// 逐步计算: size=0x10000, size-1=0xFFFF, ~0xFFFF=0xFFFF_FFFF_FFFF_0000
 pci_set_quad(pci_dev->wmask + addr, wmask);
 ```
 
-**wmask 机制**：
-- Guest 写 BAR 寄存器 = 0xFFFFFFFF → QEMU 返回 value & 0xFFFFFFFFFFFF0000
-- Guest 看到低 16 位全是 0 → 推断 BAR 大小 = 2^16 = 64KB
+**Guest 如何通过 PCI 协议探测 BAR 大小**：
+
+```
+1. Guest [EL1] 写 BAR2 寄存器 = 0xFFFFFFFF_FFFFFFFF
+   → VM exit → QEMU [EL0] 返回 value & wmask = 0xFFFF_FFFF_FFFF_0000
+   → 原理: wmask 中值为 0 的位在真实硬件上是"硬连线到地"的, Guest 写不进去
+
+2. Guest [EL1]: 0xFFFF_FFFF_FFFF_0000 低 16 位全是 0
+   → BAR 大小 = 2^16 = 65536 = 64KB
+
+3. Guest [EL1] 分配 GPA = 0x8000_200000 (64KB 对齐)
+   写 BAR2 寄存器 = 0x8000_200000
+```
 
 > **正常 vfio-pci 下**: `r->size = 64KB` → Guest 后续分配两个 VF 的 BAR2 至少间隔 64KB → 不会重叠。
 
