@@ -787,6 +787,53 @@ FlatView section (GPA, size) → 对比 KVMSlot 缓存
 
 > 以下每个步骤标注了执行主体 `[Guest EL1]` / `[QEMU EL0]` / `[Host 内核 EL2]`，以及涉及的地址类型 `GVA` / `GPA` / `HVA` / `HPA`。
 
+**流程总览**:
+
+```mermaid
+graph TD
+    subgraph Q["QEMU EL0"]
+        S1["① ioctl(VFIO_DEVICE_GET_REGION_INFO)<br/>← info->size=64KB"]
+        S2["② vfio_region_setup 创建region.mem<br/>vfio_bar_prepare: bar->size=64KB<br/>vfio_bar_register: bar->mr创建"]
+        S3["③ mmap(VFIO_fd,64KB)<br/>← HVA=0x7fff_xxxx<br/>创建mmaps[0].mem(ram_device)<br/>ram_block->host=HVA"]
+        S4["④ pci_register_bar<br/>r->size=64KB,wmask写入"]
+        S7["⑦ pci_update_mappings<br/>bar->mr挂入GPEX io_mmio<br/>r->addr=GPA 0x8000_200000"]
+        S8["⑧ FlatView全量重建<br/>新旧对比→ADD事件<br/>Section{GPA,64KB,ram_device}"]
+        S9["⑨ kvm_set_phys_mem ADD<br/>kvm_align_section:64KB<br/>ioctl(KVM_SET_USER_...) →"]
+        S11["⑪ 等待Guest访问<br/>无VM exit,硬件直达"]
+    end
+    subgraph H["Host内核 EL2"]
+        SH1["← 读物理PCI配置空间<br/>BAR2=64KB"]
+        SH2["← VFIO mmap处理<br/>vma->vm_pgoff=PFN<br/>建Host S1 PTE(lazy)"]
+        SH5["KVM: __kvm_set_memory_region<br/>kvm_check_memslot_overlap→OK<br/>memslot创建,插入数组"]
+        SH6["KVM: kvm_arch_commit_memory_region<br/>get_user_pages(HVA)→HPA<br/>填S2 PTE: GPA→HPA(Device)"]
+    end
+    subgraph G["Guest EL1"]
+        S5["⑤ PCI枚举:写BAR=全1<br/>读回wmask=0xFFFF..0000<br/>→推断 BAR2=64KB"]
+        S6["⑥ pci_assign_resource<br/>分配GPA=0x8000_200000<br/>pci_update_resource→写BAR<br/>→VM exit→QEMU拦截"]
+        S10["⑩ ioremap(BAR2)<br/>GVA=0xffff_ca00_0000<br/>Guest S1: GVA→GPA"]
+        S12["⑫ ldr [GVA+0x300]<br/>CPU: GVA→GPA(S1)→<br/>GPA→HPA(S2)→设备✅"]
+    end
+
+    S1 -->|"ioctl"| SH1 -->|"返回"| S1
+    S1 --> S2 --> S3 --> S4
+    S3 -->|"mmap"| SH2 -->|"返回HVA"| S3
+    S4 --> S5 --> S6
+    S6 -->|"VM exit"| S7 --> S8 --> S9
+    S9 -->|"ioctl"| SH5 --> SH6
+    SH6 -->|"S2就绪"| S9
+    S9 --> S10 --> S11
+    G -.-> S12
+
+    style Q fill:#e8f5e9
+    style H fill:#fff3e0
+    style G fill:#e3f2fd
+    style S12 fill:#c8e6c9
+```
+
+> 绿色=QEMU, 橙色=Host内核, 蓝色=Guest, 深绿=完成
+
+
+
 ## 6. 阶段1：QEMU 启动 → 查询 BAR 信息 [QEMU EL0 → Host EL2 → QEMU EL0]
 
 **函数调用链**:
