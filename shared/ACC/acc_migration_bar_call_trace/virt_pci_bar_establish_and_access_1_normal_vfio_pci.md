@@ -789,28 +789,36 @@ FlatView section (GPA, size) → 对比 KVMSlot 缓存
 
 ## 6. 阶段1：QEMU 启动 → 查询 BAR 信息 [QEMU EL0 → Host EL2 → QEMU EL0]
 
-**阶段1 流程总览**[QEMU EL0 → Host EL2 → QEMU EL0]:
+**函数调用链**:
 
 ```
+vfio_connect → vfio_get_group → vfio_get_device
+  → vfio_region_setup (helpers.c:370)       — region->size = info->size, 创建 region.mem
+  → vfio_bar_prepare (pci.c:1785)            — bar->size = region.size
+  → vfio_bar_register (pci.c:1797)           — 创建 MR 树 + mmap + 台账
+    → memory_region_init_io                  — 创建 bar->mr (容器)
+    → memory_region_add_subregion            — 挂入 region.mem
+    → vfio_region_mmap                       — mmap → 创建 mmaps[0].mem
+    → pci_register_bar (pci.c:1298)          — r->size, wmask
+```
+
+<!-- ```
 6.1 打开 VFIO 设备 [QEMU EL0]
-    vfio_fd → ioctl → device_fd
+    vfio_fd → ioctl(VFIO_DEVICE_GET_REGION_INFO) → device_fd
     │
-6.2 查询 BAR 大小 + bar->size 赋值 [QEMU EL0 → Host EL2]
-    ioctl(VFIO_DEVICE_GET_REGION_INFO) → info->size=64KB
-    → region->size=64KB → bar->size=64KB
+6.2 创建 MR + 赋值字段 [QEMU EL0 → Host EL2 → QEMU EL0]
+    ioctl → info->size=64KB → region.mem 创建
+    → bar->size=64KB → bar->mr 创建 → mmap → mmaps[0].mem 创建
     │
-6.3 创建 MR 树 [QEMU EL0]
-    bar->mr (容器, IO) → region.mem (IO, ops) → mmaps[0].mem (ram_device)
-    │
-6.4 mmap 获取 HVA [QEMU EL0 → Host EL2]
+6.3 mmap 获取 HVA [QEMU EL0 → Host EL2]
     mmap(VFIO_fd, 64KB) → HVA → ram_block->host
     │
-6.5 PCI 台账固化 [QEMU EL0]
+6.4 PCI 台账固化 [QEMU EL0]
     pci_register_bar → r->size=64KB, wmask, r->addr=UNMAPPED
     │
-6.6 阶段1 完成
+6.5 阶段1 完成
     MR 树就绪, 台账就绪, BAR 尚未映射到 GPA, KVM 尚未建 memslot
-```
+``` -->
 
 ### 6.1 QEMU 打开 VFIO 设备
 
@@ -823,124 +831,118 @@ QEMU [EL0]:
   ioctl(vfio_fd, VFIO_GROUP_GET_DEVICE_FD, "0000:01:00.0")  → device_fd
 ```
 
-### 6.2 查询 BAR 物理大小
+### 6.2 创建 BAR 的 MemoryRegion + 赋值数据结构
 
-**数据结构关系**：`region` 的类型是 `VFIORegion`，嵌入在 `VFIOBAR` 中，而 `VFIOBAR` 是 `VFIOPCIDevice` 的成员数组 `bars[]` 的元素：
+本节按 QEMU 代码执行顺序，逐步展开：每一步既修改 `VFIOPCIDevice` 中的字段值，又在 `system_memory` 的 MR 树上创建/连接节点。两者**同步发生**。
 
-```
-VFIOPCIDevice.bars[2]        (VFIOBAR)
-  ├── .size       = 64KB    (来自 region.size 副本)
-  ├── .mr         → bar->mr (MemoryRegion*)  ← 与 system_memory 树中的 bar->mr 同一对象
-  └── .region     (VFIORegion)
-        ├── .size = 64KB    (来自 ioctl VFIO_DEVICE_GET_REGION_INFO)
-        ├── .mem  → region.mem (MemoryRegion*)  ← 与 system_memory 树中的 region.mem 同一对象
-        │    ops  = vfio_region_ops (.read / .write)
-        │    ram  = false
-        └── .mmaps[0]       (VFIOMmap)
-              ├── .mmap = HVA_0x7fff_xxxx  (mmap 返回值)
-              └── .mem  = mmaps[0].mem (MemoryRegion)  ← 与 system_memory 树中的 mmaps[0].mem 同一对象
-                   ram        = true
-                   ram_device = true
-                   ram_block->host = HVA_0x7fff_xxxx
-```
-> **注意**: 图中的三个 MemoryRegion (`bar->mr` / `region.mem` / `mmaps[0].mem`) 每个只有一个实例。`VFIOPCIDevice` 结构体中存的是这些 MR 的**指针**（用于 VFIO 代码快速访问），同时也挂在 `system_memory` 树的对应位置（定义 GPA 拓扑）。
-
-QEMU [EL0] 向内核查询每个 BAR 的大小：
+#### Step 1: ioctl 查询 BAR 物理大小 [QEMU EL0 → Host EL2 → QEMU EL0]
 
 ```
 QEMU [EL0]:
   ioctl(device_fd, VFIO_DEVICE_GET_REGION_INFO, &info)
-    → info.index = VFIO_PCI_BAR2_REGION_INDEX
-    ↓ syscall 进入内核
+  ↓ syscall
 
 Host 内核 [EL2] VFIO 驱动:
-  通用 vfio-pci 驱动 → 读物理 PCI 配置空间 → BAR2 物理大小 = 64KB
-  ← info.size = 0x10000 (64KB)
+  读物理 PCI 配置空间 → BAR2 物理大小 = 64KB
+  ← info->size = 0x10000
 
 QEMU [EL0]:
-  // vfio_region_setup() — hw/vfio/helpers.c:370
-  region->size = info.size = 64KB        // ← VFIORegion.size 赋值
-
-  // vfio_bar_prepare() — hw/vfio/pci.c:1785
-  bar->size = bar->region.size = 64KB    // ← VFIOBAR.size 赋值, mmap 之前已就绪!
+  vfio_region_setup() — hw/vfio/helpers.c:370
+    region->size = info->size = 64KB               ← VFIORegion.size 赋值
+    region->mem  = 新建 MemoryRegion (IO 类型)       ← MR树第2层: region.mem 创建!
+      .ops = vfio_region_ops (.read / .write)
+      .ram = false
 ```
+
+**产出**: `VFIORegion.size = 64KB`, `region.mem` MR 已创建。
+
+#### Step 2: bar->size 赋值 [QEMU EL0]
+
+```
+QEMU [EL0]:
+  vfio_bar_prepare() — hw/vfio/pci.c:1785
+    bar->size = bar->region.size = 64KB            ← VFIOBAR.size 赋值, mmap 之前已就绪!
+```
+
+**产出**: `VFIOBAR.size = 64KB`。
+
+#### Step 3: 创建 bar->mr + 挂载子 MR [QEMU EL0]
+
+```
+QEMU [EL0]:
+  vfio_bar_register() — hw/vfio/pci.c:1797
+
+  // 3a) 创建外层容器 MR
+  bar->mr = g_new0(MemoryRegion, 1);               ← MR树第1层: bar->mr 创建!
+  memory_region_init_io(bar->mr, ..., name, bar->size);
+  //                                                  ↑ bar->size = 64KB
+
+  // 3b) 将已有的 region.mem 挂入 bar->mr 下面
+  memory_region_add_subregion(bar->mr, 0, bar->region.mem);
+  //                                     ↑ region.mem 在 Step1 已创建
+```
+
+**产出**: `bar->mr` MR 创建, `region.mem` 挂入其 subregions。
+
+#### Step 4: mmap → 创建 ram_device MR [QEMU EL0]
+
+```
+QEMU [EL0]:
+  vfio_region_mmap(&bar->region):
+    ptr = mmap(VFIO_fd, 64KB, ...)
+    ↓ syscall → Host 内核 VFIO 驱动 → 返回 HVA = 0x7fff_xxxx_0000
+
+  // 用 HVA 创建 ram_device MR
+  memory_region_init_ram_device_ptr(&mmaps[0].mem, ..., HVA, 64KB);
+  //                                   ↑ MR树第3层: mmaps[0].mem 创建!
+  //                                      .ram = true
+  //                                      .ram_device = true
+  //                                      .ram_block->host = HVA
+
+  // 将 ram_device MR 挂入 region.mem 下面
+  memory_region_add_subregion(&bar->region.mem, 0, &mmaps[0].mem);
+```
+
+**产出**: `VFIOMmap.mmap = HVA`, `mmaps[0].mem` MR 创建, 挂入 region.mem subregions。
+
+#### 完成后: 数据结构与 MR 树的对应
+
+每一步同步影响两个维度——结构调整**下加粗**为新增：
+
+| 步骤 | 数据字段 (VFIOPCIDevice) | MR 树节点 (system_memory) |
+|------|------------------------|--------------------------|
+| Step1 | `region->size = 64KB` | **创建 `region.mem` (IO)** |
+| Step2 | `bar->size = 64KB` | — (纯数据赋值) |
+| Step3 | `bar->mr → 新建 MR` | **创建 `bar->mr` (容器)**, 挂入 region.mem |
+| Step4 | `mmap = HVA` | **创建 `mmaps[0].mem` (ram_device)**, 挂入 region.mem 下 |
+
+**完成时的完整结构**:
+
+```
+VFIOPCIDevice.bars[2]        (VFIOBAR)                   system_memory 树中对应的 MR
+  ├── .size = 64KB                                       ─
+  ├── .mr ─────────────────────────→ bar->mr             ● (第1层: 容器, IO, ram=false)
+  │                                   subregions: [region.mem]
+  └── .region (VFIORegion)                               ─
+        ├── .size = 64KB                                 ─
+        ├── .mem ────────────────────→ region.mem        ● (第2层: IO, ops=vfio_region_ops)
+        │       .ops = vfio_region_ops  subregions: [mmaps[0].mem]
+        │       .ram = false                              ─
+        └── .mmaps[0] (VFIOMmap)                         ─
+              ├── .mmap = HVA_0x7fff_xxxx (mmap 返回)    ─
+              └── .mem ───────────────→ mmaps[0].mem     ● (第3层: ram_device, ram=true)
+                      .ram = true                         ram_block->host = HVA
+                      .ram_device = true                  subregions = 空
+                      .ram_block->host = HVA
+```
+
+> **注意**: `VFIOPCIDevice` 中存的是 MemoryRegion 的**指针**, 与 system_memory 树中的 MR 是**同一对象**。数据字段赋值与 MR 树创建同步进行, 两套路径访问同一块内存。
 
 > **正常 vfio-pci 下**: `info->size = 64KB`（物理 BAR 大小，不截断）。hisi_acc 驱动的问题（截断为 32KB）将在第 2 篇分析。
 
-### 6.3 创建 BAR 的 MemoryRegion 层级
-
-QEMU [EL0] 为 BAR 创建三层 MR 结构：
-
-**`hw/vfio/pci.c:1760-1785`** — vfio_bar_register:
-
-```c
-// Step 1: 外层容器 (纯拓扑, ram=false, 子 MR 链表)
-bar->mr = g_new0(MemoryRegion, 1);
-memory_region_init_io(bar->mr, ..., NULL, NULL, name, bar->size);
-//                                                    ↑ = 64KB
-// 赋值链: ioctl → info.size=64KB (6.2)
-//              → region->size=64KB (helpers.c:370)
-//              → bar->size=64KB    (pci.c:1785, vfio_bar_prepare)
-//              → 这里用 bar->size 创建容器 MR
-
-// Step 2: 内层 IO MR (ops = vfio_region_ops, ram=false)
-if (bar->region.size > 0) {
-    memory_region_add_subregion(bar->mr, 0, bar->region.mem);
-
-    // Step 3: 尝试 mmap → 若成功创建 ram_device 子 MR
-    vfio_region_mmap(&bar->region);
-}
-```
-
-**结果（正常 vfio-pci，mmap 成功）**:
-
-```
-VFIOPCIDevice (每个 VFIO 直通设备一个)
-  └── .bars[BAR2]  (VFIOBAR)
-       ├── .size = 64KB
-       ├── .mr → bar->mr (第1层: 容器, IO 类型, ram=false, size=64KB)
-       │         subregions: [region.mem]
-       │
-       └── .region  (VFIORegion)
-             ├── .size = 64KB
-             ├── .mem → region.mem (第2层: IO 层, ops=vfio_region_ops, ram=false)
-             │          subregions: [mmaps[0].mem]
-             │          ops->read  = vfio_region_read   ← 慢路径
-             │          ops->write = vfio_region_write
-             │
-             └── .mmaps[0]  (VFIOMmap)
-                   ├── .mmap = HVA_0x7fff_xxxx
-                   └── .mem → mmaps[0].mem (第3层: ram_device)
-                              ram       = true
-                              ram_device = true
-                              ram_block->host = HVA_0x7fff_xxxx  ← 从 mmap 得到
-                              subregions = 空 (叶子节点)
-```
-
-> **三层 MR 的分工**: 第1层=容器(纯拓扑), 第2层=IO(慢路径), 第3层=ram_device(快路径, 存 HVA)。KVM 只看第3层——只有 `mr->ram=true` 才建 memslot。
->
-> **与 VFIOPCIDevice 的关系**: 上图中的 `bar->mr` / `region.mem` / `mmaps[0].mem` 每个只有一个实例，VFIOPCIDevice 结构体通过 `.mr` 和 `.mem` 字段持有它们的指针（快速访问），同时这些 MR 也挂在 `system_memory` 树的对应位置（定义 GPA 拓扑）。两套路径访问同一块内存。
-
-**VFIOPCIDevice 如何与设备绑定**:
-
-```c
-// hw/vfio/pci.h:122
-struct VFIOPCIDevice {
-    PCIDevice pdev;              // 继承自 QEMU 的 PCI 设备基类
-    VFIODevice vbasedev;         // VFIO 设备基类
-    VFIOBAR bars[PCI_NUM_REGIONS - 1];  // ← 每个 BAR 一个 VFIOBAR
-};
-```
-
-- `VFIOPCIDevice` 是 QEMU Object 类型（`TYPE_VFIO_PCI`），QEMU 命令行 `-device vfio-pci,host=0000:01:00.0` 触发创建
-- 每个直通设备创建**一个** `VFIOPCIDevice` 实例，嵌入在 QEMU 的设备模型中
-- `pdev` 是 `PCIDevice` 基类——Guest 看到的就是这个 PCI 设备
-- `bars[]` 数组索引对应 BAR 编号（0~5），`bars[2]` 对应 BAR2
-- `VFIO_PCI(pdev)` 宏可以从父类 `PCIDevice` 反向获取 `VFIOPCIDevice` 指针
 
 
-
-### 6.4 mmap：获取 Host 用户态 HVA
+### 6.3 mmap：qemu 通过 mmap 获取 Host 用户态 HVA
 
 QEMU [EL0] 调用 mmap 获取 HVA：
 
@@ -976,14 +978,14 @@ QEMU [EL0]:
 | ram_device MR (QEMU: mr->ram=true) | KVM memslot (VTTBR_EL2): GPA → HPA |
 | QEMU 拿到 HVA 0x7fff_xxxx | 这两个等到后续步骤才建 |
 
-### 6.5 pci_register_bar：PCI 台账固化
+### 6.4 pci_register_bar：qemu 中 PCI 台账固化
 
 `pci_register_bar` 是 `vfio_bar_register` 的最后一步调用。它从已建好的 `bar->mr` 读取大小赋给 `r->size`，并写入 BAR wmask。
 
 **`r->size` 赋值链**:
 
 ```
-ioctl → info->size=64KB (6.2)
+ioctl(VFIO_DEVICE_GET_REGION_INFO) → info->size=64KB (6.2)
      → region->size=64KB (helpers.c:370, vfio_region_setup)
      → bar->size=64KB    (pci.c:1785, vfio_bar_prepare)
      → bar->mr size=64KB (6.3, memory_region_init_io)
@@ -1004,25 +1006,16 @@ r->address_space = bus->address_space_mem;  // → GPEX io_mmio
 wmask = ~(size - 1);                 // ~(0xFFFF) = 0xFFFFFFFFFFFF0000
 // 逐步计算: size=0x10000, size-1=0xFFFF, ~0xFFFF=0xFFFF_FFFF_FFFF_0000
 pci_set_quad(pci_dev->wmask + addr, wmask);
+// pci_set_quad: 把 wmask 写入qemu虚拟 PCI 配置空间的"BAR 可写掩码"区域
+// Guest 读 BAR 时: QEMU 返回 bar_val & wmask
+// wmask 中为 0 的位被强制清零, 模拟硬件"硬连线到地"
 ```
 
-**Guest 如何通过 PCI 协议探测 BAR 大小**：
-
-```
-1. Guest [EL1] 写 BAR2 寄存器 = 0xFFFFFFFF_FFFFFFFF
-   → VM exit → QEMU [EL0] 返回 value & wmask = 0xFFFF_FFFF_FFFF_0000
-   → 原理: wmask 中值为 0 的位在真实硬件上是"硬连线到地"的, Guest 写不进去
-
-2. Guest [EL1]: 0xFFFF_FFFF_FFFF_0000 低 16 位全是 0
-   → BAR 大小 = 2^16 = 65536 = 64KB
-
-3. Guest [EL1] 分配 GPA = 0x8000_200000 (64KB 对齐)
-   写 BAR2 寄存器 = 0x8000_200000
-```
+> wmask 写入虚拟 PCI 配置空间后，Guest 可通过 PCI 协议探测 BAR 大小（写全1→读回 wmask→推断 64KB），详细流程见 [7.1](#71-guest-读-bar-大小)。
 
 > **正常 vfio-pci 下**: `r->size = 64KB` → Guest 后续分配两个 VF 的 BAR2 至少间隔 64KB → 不会重叠。
 
-### 6.6 阶段1 完成时的状态
+### 6.5 阶段1 完成时的状态
 
 ```
 QEMU [EL0]:
@@ -1042,6 +1035,738 @@ Guest [EL1]:
 
 ---
 
-> **下一节**: 阶段2: Guest PCI 枚举 (7. 阶段2)
->
-> 请确认以上内容无误后，我继续写第 7 节。
+## 7. 阶段2：Guest PCI 枚举 - 通过qemu的wmask [Guest EL1]
+
+**函数调用链**:
+
+```
+Guest [EL1] PCI 子系统:
+  → pbus_assign_resources_sorted (setup-bus.c:493)
+    → __dev_sort_resources              — 收集所有 BAR, 按对齐排序
+    → __assign_resources_sorted         — 在 MMIO 窗口内依次分配
+      → pci_assign_resource (setup-res.c:327)
+        → _pci_assign_resource          — 找 align 对齐、size 大小的空闲区域
+        → pci_update_resource (setup-res.c:126)
+          → pci_write_config_dword      — 写 BAR 寄存器 = GPA → VM exit → QEMU
+
+Guest OS 启动后，PCI 子系统扫描 PCI 总线，枚举所有设备并为每个 BAR 分配 GPA。
+```
+
+### 7.1 Guest 读 BAR 大小
+
+Guest [EL1] 通过标准 PCI 协议探测 BAR2 的大小：
+
+```
+1. Guest [EL1] 写 BAR2 配置空间寄存器 = 0xFFFFFFFF_FFFFFFFF
+   → 这是一次 PCI 配置空间 MMIO 写, GPA 落在 ECAM 区域
+   → CPU: GVA → GPA (Guest S1) → S2 miss → VM exit → QEMU [EL0]
+
+2. QEMU [EL0] 拦截，模拟硬件"硬连线到地"的行为:
+   → bar2_val = 0xFFFFFFFF_FFFFFFFF
+   → 返回 bar2_val & wmask = 0xFFFFFFFF_FFFFFFFF & 0xFFFF_FFFF_FFFF_0000
+                           = 0xFFFF_FFFF_FFFF_0000
+
+3. Guest [EL1] 收到 0xFFFF_FFFF_FFFF_0000:
+   → 低 16 位全是 0 → BAR 大小 = 2^16 = 65536 = 64KB
+
+(Guest 不存储"BAR 大小"这个数字本身——它从 wmask 直接算出大小后,
+ 用于计算资源需求, 然后继续下一步分配 GPA)
+```
+
+### 7.2 Guest 分配 GPA
+
+Guest [EL1] 的 PCI 子系统遍历总线上所有设备，为每个 BAR 分配 GPA。
+
+**`drivers/pci/setup-bus.c:493-503`** — 遍历总线设备，收集所有 BAR 后依次分配:
+
+```c
+static void pbus_assign_resources_sorted(const struct pci_bus *bus, ...)
+{
+    struct pci_dev *dev;
+    LIST_HEAD(head);
+
+    list_for_each_entry(dev, &bus->devices, bus_list)
+        __dev_sort_resources(dev, &head);       // 收集所有设备的 BAR, 按对齐排序
+
+    __assign_resources_sorted(&head, ...);      // 依次在 MMIO 窗口内分配
+}
+```
+
+**`drivers/pci/setup-res.c:327-370`** — 单个 BAR 的分配:
+
+```c
+int pci_assign_resource(struct pci_dev *dev, int resno)
+{
+    struct resource *res = dev->resource + resno;   // → &dev->resource[resno]
+    align = pci_resource_alignment(dev, res);        // BAR 大小 = 对齐要求
+    size = resource_size(res);                       // 从 wmask 探测到的 BAR 大小
+
+    ret = _pci_assign_resource(dev, resno, size, align);
+    // 在 PCI MMIO 窗口中找一块 align 对齐、size 大小的空闲区域
+    // → res->start = GPA, res->end = GPA + size - 1
+
+    if (resno < PCI_BRIDGE_RESOURCES)
+        pci_update_resource(dev, resno);           // 把 GPA 写入 BAR 配置寄存器
+}
+```
+
+**正常 vfio-pci 下多 VF 的分配结果**:
+
+```
+Dev1 BAR4: size=2MB → alloc GPA 0x8000_0000_0000, current → 0x8000_0020_0000
+Dev1 BAR2: size=64KB → alloc GPA 0x8000_0020_0000, current → 0x8000_0021_0000
+Dev2 BAR4: size=2MB → alloc GPA 0x8000_0040_0000, current → 0x8000_0060_0000
+Dev2 BAR2: size=64KB → alloc GPA 0x8000_0060_0000, current → 0x8000_0061_0000
+```
+
+**两个 VF 的 BAR2 间隔 = 0x40_0000 (4MB) >> 64KB → 不重叠。**
+
+### 7.3 Guest 写 BAR 寄存器
+
+`pci_update_resource` 把分配的 GPA 写入 BAR2 配置空间寄存器。
+
+**`drivers/pci/setup-res.c:126`**:
+
+```c
+void pci_update_resource(struct pci_dev *dev, int resno)
+{
+    struct resource *res = dev->resource + resno;
+    // ...
+    pci_write_config_dword(dev, reg, new);    // 写 BAR 寄存器 = GPA
+}
+```
+
+Guest [EL1] 执行 `pci_write_config_dword(dev, BAR2, GPA 0x8000_2000_0000)`:
+→ CPU: GVA → GPA (Guest S1) → 落在 PCI ECAM 区域 GPA → VM exit → QEMU [EL0] 拦截
+→ Dev1 BAR2 寄存器新值 = 0x8000_2000_0000
+→ 与旧值不同 → 触发 QEMU `pci_update_mappings()`
+
+---
+
+## 8. 阶段3：QEMU 处理 BAR 写入 → MR 挂入 GPA [QEMU EL0]
+
+**函数调用链**:
+
+```
+Guest 写 BAR → VM exit → QEMU [EL0]:
+  → pci_default_write_config (pci.c)
+    → pci_update_mappings (pci.c:1511)
+      → pci_bar_address                 — 读取 + 对齐校验 Guest 写的 GPA
+      → memory_region_add_subregion_overlap
+            (GPEX io_mmio, offset, bar->mr, priority=1)
+          → MR 树变化, 标记 FlatView 脏
+
+Guest 写 BAR2 寄存器触发了 QEMU 的 `pci_update_mappings()`，这步把之前建好的 `bar->mr`（含 ram_device）挂到系统 GPA 上。
+```
+### 8.1 pci_update_mappings：BAR MR 挂入 PCI Bus 地址空间
+
+**`hw/pci/pci.c:1511-1553`**:
+
+```c
+static void pci_update_mappings(PCIDevice *d)
+{
+    PCIIORegion *r;
+    int i;
+    pcibus_t new_addr;
+
+    for (i = 0; i < PCI_NUM_REGIONS; i++) {
+        r = &d->io_regions[i];
+        if (!r->size) continue;
+
+        new_addr = pci_bar_address(d, i, r->type, r->size);
+        // → 从 PCI 配置空间读Guest写的 BAR 值 → GPA 0x8000_200000
+        // → 做对齐校验: new_addr &= ~(size-1)
+
+        if (new_addr == r->addr) continue;    // 没变, 跳过
+
+        // 删除旧映射 (如果有的话)
+        if (r->addr != PCI_BAR_UNMAPPED) {
+            memory_region_del_subregion(r->address_space, r->memory);
+        }
+
+        r->addr = new_addr;                  // 记录新 GPA
+
+        if (r->addr != PCI_BAR_UNMAPPED) {
+            // ★ 核心: 把 bar->mr (含 ram_device) 挂到 GPEX io_mmio 的子区域
+            //   r->address_space = GPEX io_mmio
+            //   r->addr          = GPA 0x8000_200000 - base_mmio = 0x00200000
+            //   r->memory        = bar->mr (含 ram_device 子 MR)
+            memory_region_add_subregion_overlap(
+                r->address_space, r->addr, r->memory, 1);
+        }
+    }
+}
+```
+
+**此时的变化**:
+
+```
+MR 树变化:
+  GPEX io_mmio.subregions
+    + [offset=0x00200000, priority=1] bar->mr (Dev1 BAR2)
+      ├── region.mem (IO)
+      └── mmaps[0].mem (ram_device, HVA, 64KB)
+
+通过 pcie-mmio alias:
+  GPEX offset 0x00200000 → system_memory GPA 0x8000_200000
+```
+
+**关键**: 挂入的位置是 `GPEX io_mmio`（PCI Bus 的 MMIO 地址空间），通过 `pcie-mmio` alias 1:1 映射到 system_memory 的 GPA 0x8000_200000。
+
+### 8.2 触发 FlatView 重建
+
+`memory_region_add_subregion_overlap` 改变了 GPEX io_mmio 的子链表 → MR 树变化 → QEMU 在事务提交时重建 FlatView → 下一节展开。
+
+---
+
+## 9. 阶段4：FlatView 重建 → KVM Listener [QEMU EL0]
+
+**函数调用链**:
+
+```
+memory_region_transaction_commit
+  → flatviews_reset (memory.c)              — 清空所有缓存的 FlatView
+  → generate_memory_topology (memory.c)     — 遍历整棵 MR 树
+    → render_memory_region                   — 递归渲染, 生成 FlatRange[]
+  → address_space_set_flatview (memory.c)
+    → address_space_update_topology_pass(old, new, false)  — DEL 先
+    → address_space_update_topology_pass(old, new, true)   — ADD 后
+      → MEMORY_LISTENER_UPDATE_REGION
+        → kvm_region_add / kvm_region_del (kvm-all.c)
+  → kvm_region_commit (kvm-all.c)           — 统一处理事务
+    → kvm_set_phys_mem(ADD/DEL)              — 进入阶段5
+
+`pci_update_mappings` 改变了 MR 树，QEMU 在下一次 `memory_region_transaction_commit()` 时重建 FlatView，新旧对比生成 ADD/DEL 事件。
+```
+### 9.1 FlatView 重建流程
+
+**`system/memory.c:1137-1155`** — `memory_region_commit()`:
+
+```c
+void memory_region_commit(void)
+{
+    if (memory_region_update_pending) {
+        flatviews_reset();                              // 1) 清空缓存的 FlatView
+
+        MEMORY_LISTENER_CALL_GLOBAL(begin, Forward);    // 2) 通知所有 listener: 要变了
+
+        QTAILQ_FOREACH(as, &address_spaces, ...) {
+            address_space_set_flatview(as);             // 3) 重建 FlatView + 生成 DEL/ADD
+        }
+
+        MEMORY_LISTENER_CALL_GLOBAL(commit, Forward);   // 4) 通知所有 listener 处理事务
+    }
+}
+```
+
+### 9.2 generate_memory_topology：遍历 MR 树生成 FlatView
+
+**`system/memory.c:1115`** — `generate_memory_topology()`:
+
+递归遍历 `system_memory` 的子 MR，处理 alias 和 priority 覆盖，输出 `FlatRange[]` 数组。
+
+**`system/memory.c:604-693`** — `render_memory_region()` 关键逻辑:
+
+```c
+static void render_memory_region(FlatView *view, MemoryRegion *mr, ...)
+{
+    // 1) 处理 alias: 如 pcie-mmio alias → 递归进入 GPEX io_mmio
+    if (mr->alias) {
+        render_memory_region(view, mr->alias, ...);
+        return;
+    }
+
+    // 2) 遍历子 MR (按 priority 降序 + offset 升序)
+    QTAILQ_FOREACH(subregion, &mr->subregions) {
+        render_memory_region(view, subregion, ...);
+    }
+
+    // 3) 按 GPA 排序插入 FlatView
+    for (i = 0; i < view->nr && remain > 0; ++i) {
+        if (base < view->ranges[i].addr.start) {
+            flatview_insert(view, i, &fr);    // 在 GPA 空洞处插入
+        }
+    }
+}
+```
+
+### 9.3 两遍扫描：DEL 旧 → ADD 新
+
+**`system/memory.c:953-1012`** — `address_space_update_topology_pass()`:
+
+```c
+static void address_space_update_topology_pass(as, old_view, new_view, adding)
+{
+    // 双指针归并旧/new FlatView, 生成事件:
+    //   adding=false: 生成 DEL (旧有新增/旧有变化)
+    //   adding=true:  生成 ADD (新有旧无)
+
+    while (iold < old_view->nr || inew < new_view->nr) {
+        if (in old but not in new) {
+            if (!adding)
+                MEMORY_LISTENER_UPDATE_REGION(frold, ..., region_del);  // DEL
+        } else if (in new but not in old) {
+            if (adding)
+                MEMORY_LISTENER_UPDATE_REGION(frnew, ..., region_add);  // ADD
+        }
+    }
+}
+```
+
+**两遍调用**（`system/memory.c:1088-1089`）:
+```c
+address_space_update_topology_pass(as, old_view, new_view, false);  // DEL 先
+address_space_update_topology_pass(as, old_view, new_view, true);   // ADD 后
+```
+
+> **先 DEL 后 ADD 是刻意的**：先释放旧的 GPA 范围，再分配新的，避免 memslot 重叠。
+
+### 9.4 两个 VF BAR2 产生的事件
+
+Guest PCI 枚举依次写入 Dev1 和 Dev2 的 BAR2 寄存器，每次写入触发独立的 FlatView 重建和 KVM listener 回调。
+
+**Dev1 BAR2**（Guest 写入后）:
+
+```
+旧 FlatView: BAR2 不在 FlatView 中 (r->addr = UNMAPPED)
+新 FlatView: +Section[A] = {GPA 0x8000_200000, 64KB, mr=Dev1_mmaps[0].mem, ram_device}
+→ ADD 事件: Section[A]
+```
+
+**Dev2 BAR2**（Guest 写入后）:
+
+```
+旧 FlatView: Dev1 BAR2 已在 FlatView 中，但 Dev2 BAR2 不在
+新 FlatView: +Section[B] = {GPA 0x8000_600000, 64KB, mr=Dev2_mmaps[0].mem, ram_device}
+→ ADD 事件: Section[B]
+```
+
+**两个 BAR2 在 FlatView 中不重叠**：
+
+```
+FlatView (按 GPA 升序):
+  Section[N-1]  → Dev1 BAR4  [0x8000_000000, 2MB]  ram_device
+  Section[N]    → Dev1 BAR2  [0x8000_200000, 64KB]  ram_device  ← 新增!
+  Section[N+1]  → Dev2 BAR4  [0x8000_400000, 2MB]  ram_device  ← 新增!
+  Section[N+2]  → Dev2 BAR2  [0x8000_600000, 64KB]  ram_device  ← 新增!
+```
+
+> **正常 vfio-pci 下**：Guest 看到的 BAR2=64KB，分配时间隔 64KB+ → 两个 BAR2 GPA 至少间距 0x400000 → 不重叠 → 各自独立的 ADD 事件 → 两个 memslot 不冲突。
+
+**Dev2 写入 BAR 后 FlatView 会全量重建，但 Dev1 不受影响**：
+
+每次 MR 树变化都会触发 FlatView 全量重建——`flatviews_reset()` 清空缓存，`generate_memory_topology()` 重新遍历整个 `system_memory` 树。但重建后的新旧 FlatView diff 只处理**变化的部分**：
+
+```
+Dev2 BAR2 写入 → FlatView 全量重建:
+  旧: Section[A] Dev1 BAR2 [0x8000_200000, 64KB]
+  新: Section[A] Dev1 BAR2 [0x8000_200000, 64KB]  ← 完全不变!
+      Section[B] Dev2 BAR2 [0x8000_600000, 64KB]  ← 新增!
+
+  双指针归并:
+
+  Section[A]: 新旧都有 && flatrange_equal → NOP (不触发 memslot 操作)
+              → Dev1 的 memslot 安安稳稳, 不删不重建
+
+  Section[B]: 新有旧无 → ADD 事件
+              → Dev2 走 kvm_set_phys_mem → 新建 memslot
+```
+
+**全量遍历 ≠ 全部重建 memslot。** FlatView 是全量生成，但只有 diff 不同的 section 才触发 KVM listener。不变的 section 对应的 memslot 完全不受影响。
+
+### 9.5 KVM MemoryListener 回调
+
+**`accel/kvm/kvm-all.c:1580-1622`** — `kvm_region_add` / `kvm_region_del`:
+
+```c
+static void kvm_region_add(MemoryListener *listener, MemoryRegionSection *section)
+{
+    // section 就是上面 ADD 事件中的 section
+    // 加入事务 ADD 队列, 等待 commit 时统一处理
+    update = g_new0(KVMMemoryUpdate, 1);
+    update->section = *section;
+    QSIMPLEQ_INSERT_TAIL(&kml->transaction_add, update, next);
+}
+```
+
+**kvm_region_commit** 统一处理所有 DEL → 再处理所有 ADD:
+```c
+// 先处理 DEL:
+QSIMPLEQ_FOREACH(u, &kml->transaction_del, next)
+    kvm_set_phys_mem(kml, &u->section, false);    // add=false → 删 memslot
+
+// 再处理 ADD:
+QSIMPLEQ_FOREACH(u, &kml->transaction_add, next)
+    kvm_set_phys_mem(kml, &u->section, true);     // add=true → 建 memslot
+```
+
+**Dev1 和 Dev2 各自产生一个 ADD 事件（没有 DEL），分别走到 kvm_set_phys_mem → 下一节展开。两个 memslot GPA 不重叠，先后注册都成功。**
+
+---
+
+## 10. 阶段5：KVM memslot 注册 [QEMU EL0 → Host EL2]
+
+**函数调用链**:
+
+```
+QEMU [EL0]:
+  kvm_set_phys_mem (kvm-all.c:1338)
+    → kvm_align_section (kvm-all.c:266)    — 对齐到 PAGE_SIZE
+    → kvm_alloc_slot                        — 分配 QEMU KVMSlot
+    → kvm_set_user_memory_region (kvm-all.c:318)
+      → ioctl(KVM_SET_USER_MEMORY_REGION, {slot, GPA, size, HVA})
+
+Host 内核 [EL2]:
+  kvm_vm_ioctl_set_memory_region
+    → __kvm_set_memory_region (kvm_main.c:2211)
+      → kvm_check_memslot_overlap (kvm_main.c:2141)  — 检查重叠
+      → kvm_set_memslot                               — 创建, 插入数组
+
+`kvm_set_phys_mem` 收到 ADD 事件后，通过 `ioctl(KVM_SET_USER_MEMORY_REGION)` 通知 Host 内核 KVM 创建 memslot 并建 S2 页表。
+```
+### 10.1 kvm_set_phys_mem：决定是否建 memslot
+
+**`accel/kvm/kvm-all.c:1338-1391`**:
+
+```c
+static void kvm_set_phys_mem(KVMMemoryListener *kml,
+                             MemoryRegionSection *section, bool add)
+{
+    MemoryRegion *mr = section->mr;
+
+    // 1) 只处理 RAM 类型 (ram_device 是 RAM 的子类型)
+    if (!memory_region_is_ram(mr)) {
+        // IO 类型的 MR → 跳过, 不建 memslot!
+        return;
+    }
+
+    // 2) 对齐 section 到 PAGE_SIZE
+    size = kvm_align_section(section, &start_addr);
+    if (!size) {
+        // section 太小 → 跳过 (32KB section 在此被过滤!)
+        return;
+    }
+
+    // 3) 从 ram_device MR 取出 QEMU 用户态 HVA
+    ram = memory_region_get_ram_ptr(mr);
+    // → mr->ram_block->host = HVA 0x7fff_xxxx
+
+    // 4) 注册 / 注销 memslot
+    if (!add) {
+        mem = kvm_lookup_matching_slot(kml, start_addr, slot_size);
+        kvm_set_user_memory_region(kml, mem, false);    // 删除
+    } else {
+        mem = kvm_alloc_slot(kml);
+        mem->start_addr = start_addr;                    // GPA 0x8000_200000
+        mem->memory_size = slot_size;                    // 64KB
+        mem->ram = ram;                                  // HVA 0x7fff_xxxx
+        kvm_set_user_memory_region(kml, mem, true);     // 创建
+    }
+}
+```
+
+### 10.2 kvm_align_section：页对齐门
+
+**`accel/kvm/kvm-all.c:266-280`**:
+
+```c
+static hwaddr kvm_align_section(MemoryRegionSection *section, hwaddr *start)
+{
+    hwaddr size = section->size;                           // 64KB
+
+    *start = ROUND_UP(section->offset_within_address_space, PAGE_SIZE);
+    // → GPA 0x8000_200000 已对齐到 64KB, 不变
+
+    hwaddr delta = *start - section->offset_within_address_space;  // 0
+    if (delta > size) return 0;                           // 不触发
+
+    return (size - delta) & PAGE_MASK;                    // 64KB
+}
+```
+
+> **对于 Dev1 BAR2**：section size=64KB=PAGE_SIZE，start 已对齐 → 直接返回 64KB → 允许建 memslot。
+
+### 10.3 从 QEMU KVMSlot 到 KVM kvm_memory_slot
+
+**`accel/kvm/kvm-all.c:318-351`** — `kvm_set_user_memory_region`:
+
+```c
+static int kvm_set_user_memory_region(KVMMemoryListener *kml,
+                                       KVMSlot *slot, bool new)
+{
+    struct kvm_userspace_memory_region mem;
+
+    mem.slot             = slot->slot;               // slot ID
+    mem.guest_phys_addr  = slot->start_addr;         // GPA 0x8000_200000
+    mem.userspace_addr   = (unsigned long)slot->ram; // HVA 0x7fff_xxxx
+    mem.flags            = slot->flags;              // 0
+    mem.memory_size      = slot->memory_size;        // 0x10000 (64KB)
+
+    ret = kvm_vm_ioctl(s, KVM_SET_USER_MEMORY_REGION, &mem);
+    // → syscall → Host 内核 [EL2] KVM
+}
+```
+
+**传入内核的值**:
+
+```
+KVM_SET_USER_MEMORY_REGION {
+    slot             = 2
+    guest_phys_addr  = 0x8000_200000      ← GPA
+    memory_size      = 0x10000            ← 64KB
+    userspace_addr   = 0x7fff_xxxx_0000   ← HVA
+    flags            = 0
+}
+```
+
+### 10.4 Host 内核 KVM：创建 memslot
+
+**`virt/kvm/kvm_main.c:2211-2284`** — `__kvm_set_memory_region`:
+
+```c
+int __kvm_set_memory_region(struct kvm *kvm,
+                            const struct kvm_userspace_memory_region2 *mem)
+{
+    base_gfn = mem->guest_phys_addr >> PAGE_SHIFT;    // GPA 0x8000_200000 >> 16
+    npages   = mem->memory_size >> PAGE_SHIFT;        // 64KB >> 16 = 1
+
+    if (!old || !old->npages) {
+        change = KVM_MR_CREATE;
+    }
+
+    // 检查 memslot 不重叠
+    if (kvm_check_memslot_overlap(slots, id, base_gfn, base_gfn + npages))
+        return -EEXIST;          // ← 重叠就拒绝!
+
+    new->base_gfn       = base_gfn;        // 0x8000_2000_00
+    new->npages         = npages;          // 1
+    new->userspace_addr = HVA;             // 0x7fff_xxxx_0000
+
+    kvm_set_memslot(kvm, old, new, KVM_MR_CREATE);
+}
+```
+
+**正常 vfio-pci 单 VF 场景**: Dev1 BAR2 的 memslot `[0x8000_200000, 64KB]` 不与任何已有 memslot 重叠 → 创建成功。
+
+**memslot 重叠检查** — `kvm_check_memslot_overlap` (`virt/kvm/kvm_main.c:2141`):
+
+```c
+static bool kvm_check_memslot_overlap(struct kvm_memslots *slots, int id,
+                                      gfn_t start, gfn_t end)
+{
+    struct kvm_memslot_iter iter;
+
+    // 遍历所有已存在的 memslot, 检查是否与 [start, end) 区间重叠
+    kvm_for_each_memslot_in_gfn_range(&iter, slots, start, end) {
+        if (iter.slot->id != id)      // ≠ 自身 (可能是修改同 id 的 slot)
+            return true;              // 重叠! 返回 -EEXIST
+    }
+    return false;                     // 无重叠, 允许创建
+}
+```
+
+**原理**：遍历整个 `kvm_memslots.memslots[]` 数组，检查 `[start, end)` GPA 区间内是否已有其他 memslot。如果一个普通 VM 只有一个地址空间（`as_id=0`），那么**所有 root port 下的 BAR memslot 都在同一个 memslots 数组中**——跨 root port 的 memslot 如果 GPA 重叠也会被检查出来。root port 能解决双 VF 问题，是因为每个 bridge 有独立的 MMIO 窗口，Guest 在各自窗口内分配 GPA，不会重叠。
+
+---
+
+## 11. 阶段6：KVM 建 S2 页表 [Host EL2]
+
+**函数调用链**:
+
+```
+Host 内核 [EL2] KVM:
+  kvm_set_memslot (kvm_main.c)
+    → kvm_arch_prepare_memory_region (mmu.c)      — ARM64 参数校验
+    → kvm_replace_memslot                          — 插入 memslots 数组
+    → kvm_arch_commit_memory_region (mmu.c:2112)   — 建 S2 PTE
+      → get_user_pages(HVA)                        — 查 Host S1, 获取 HPA
+      → 填入 VTTBR_EL2 S2 页表: GPA → HPA
+
+memslot 创建成功后，KVM 在 `kvm_arch_commit_memory_region` 中填入 S2 PTE。
+```
+### 11.1 get_user_pages：HVA → HPA
+
+KVM 用 memslot 中存的 HVA，调用 `get_user_pages()` 查 Host S1 页表获取 HPA：
+
+```
+Host 内核 [EL2] KVM:
+
+  kvm_set_memslot(kvm, old, new, KVM_MR_CREATE)
+    → kvm_arch_commit_memory_region()    — arch/arm64/kvm/mmu.c:2112
+
+  // ARM64 架构代码填充 S2:
+  get_user_pages(QEMU 进程, HVA=0x7fff_xxxx_0000, 1 page)
+    → 查 Host S1 用户页表 (TTBR0_EL2)
+    → 如果 Host S1 PTE 尚未建立 (mmap 后首次访问)
+      → Host page fault → vfio_pci_mmap_fault()
+      → io_remap_pfn_range(vma, HVA, PFN, 64KB, DEVICE_nGnRE)
+      → 建 Host S1 PTE: HVA → HPA
+    → HPA = 0x0800_0000_0000 (设备 BAR2 物理地址)
+```
+
+### 11.2 填 S2 PTE：GPA → HPA
+
+```
+Host 内核 [EL2] KVM:
+
+  在 VTTBR_EL2 指向的 S2 页表中填入 1 个 PTE:
+    PTE.source  = GPA 0x8000_2000_0000
+    PTE.target  = HPA 0x0800_0000_0000
+    PTE.attr    = Device-nGnRE (设备内存, 不可缓存, 不可 speculate)
+    PTE.size    = 64KB (整个页, npages=1)
+```
+
+### 11.3 最终 memslot 值
+
+```
+Host 内核 [EL2] KVM — kvm_memory_slot:
+
+  kvm->memslots[0]->memslots[2] = {
+      base_gfn       = 0x8000_2000_00,         // GPA 0x8000_200000 >> 16
+      npages         = 1,                      // 64KB / 64KB = 1 页
+      userspace_addr = 0x7fff_xxxx_0000,       // QEMU 用户态 HVA
+  }
+
+S2 页表 (VTTBR_EL2):
+  GPA 0x8000_2000_0000 → HPA 0x0800_0000_0000 (Device-nGnRE)
+```
+
+**完成: Guest 可以通过 S2 页表访问 Dev1 BAR2 的设备寄存器。**
+
+---
+
+> **下一节**: 阶段7: Guest 驱动加载 → 访问 BAR2 (12. 阶段7)
+
+## 12. 阶段7：Guest 驱动加载 → 访问 BAR2 [Guest EL1]
+
+**函数调用链**:
+
+```
+Guest [EL1] 驱动 (hisi_zip):
+  → hisi_zip_probe (zip_main.c)
+    → hisi_qm_init (qm.c)
+      → pci_iomap(pdev, BAR2, 0)
+        → ioremap(GPA 0x8000_200000, 64KB)
+          → 填 Guest S1 PTE (TTBR1_EL1): GVA → GPA
+
+Guest [EL1] 使用 mailbox 寄存器 (qm.c:633):
+  → qm_mb_read → hisi_qm_wait_mb_ready → ldp x0, x1, [io_base + 0x300]
+    → CPU: GVA → GPA (Guest S1) → GPA → HPA (Host S2) → 设备 ✅
+
+S2 页表就绪后，Guest 驱动初始化时 `ioremap(BAR2)` 建立 Guest S1 映射，之后每一次访问设备寄存器通过两级页表遍历直达硬件。
+```
+### 12.1 Guest 驱动 ioremap 建立 Guest S1 映射
+
+**Guest 驱动的初始化路径**（以 hisi_zip 为例）:
+
+```c
+// Guest [EL1] 驱动: drivers/crypto/hisilicon/zip/zip_main.c
+hisi_zip_probe(pdev)
+  → hisi_qm_init()                            // drivers/crypto/hisilicon/qm.c
+    → pci_request_regions(pdev, ...)          // 预留 BAR 空间
+    → io_base = pci_iomap(pdev, BAR2, 0);     // ← ioremap!
+      → ioremap(GPA 0x8000_2000_0000, 64KB)
+        → 在 Guest 内核 vmalloc 区域分配 GVA
+        → 填 Guest S1 PTE (TTBR1_EL1): GVA → GPA
+```
+
+**结果**:
+
+```
+Guest S1 页表 (TTBR1_EL1):
+  PTE: GVA 0xffff_8000_ca00_0000 → GPA 0x8000_2000_0000
+  属性: Device-nGnRE (与 S2 属性一致)
+```
+
+### 12.2 Guest 访问 BAR2 → 两级页表遍历
+
+Guest 驱动首次访问 mailbox 寄存器（BAR2 内偏移 0x300）:
+
+```
+Guest [EL1] 驱动:
+  ldr x0, [x3]                  // x3 = GVA 0xffff_8000_ca00_0000 + 0x300
+                                 //    = GVA 0xffff_8000_ca00_0300
+
+CPU 硬件两级页表遍历 (无 VM exit):
+
+  Stage 1 — Guest S1 (TTBR1_EL1):
+    GVA 0xffff_8000_ca00_0300
+    ↓ 查 Guest S1 PTE
+    GPA 0x8000_2000_0300
+
+  Stage 2 — Host S2 (VTTBR_EL2):
+    GPA 0x8000_2000_0300
+    ↓ 命中 memslot [0x8000_200000, 64KB] → S2 PTE 存在
+    HPA 0x0800_0000_0300
+
+  → CPU 发出读请求到物理地址 HPA 0x0800_0000_0300
+  → PCIe 总线 → HISILICON 加速卡 BAR2 响应
+  → 返回 mailbox 寄存器值 → 写入 x0 → 指令完成 ✅
+```
+
+**全程无 VM exit，无 QEMU 介入。** 这就是 ram_device MR + KVM memslot 提供的"快路径"。
+
+---
+
+## 13. 完整流程总览（11 步）
+
+```
+═══════════════════════════════════════════════════════════════════
+阶段1: QEMU 启动 [QEMU EL0 → Host EL2]
+═══════════════════════════════════════════════════════════════════
+1. ioctl(VFIO_DEVICE_GET_REGION_INFO) → BAR2=64KB
+2. 创建 MR 树: bar->mr → region.mem → mmaps[0].mem (ram_device)
+3. mmap(VFIO_fd, 64KB) → HVA → ram_block->host
+4. pci_register_bar → r->size=64KB, wmask, r->addr=UNMAPPED
+
+═══════════════════════════════════════════════════════════════════
+阶段2: Guest PCI 枚举 [Guest EL1 → QEMU EL0]
+═══════════════════════════════════════════════════════════════════
+5. Guest 读 BAR wmask → 推断 BAR2=64KB
+6. Guest 分配 GPA 0x8000_200000 + 写 BAR 寄存器
+   → QEMU pci_update_mappings → bar->mr 挂入 GPEX io_mmio
+
+═══════════════════════════════════════════════════════════════════
+阶段3: QEMU FlatView + KVM memslot [QEMU EL0 → Host EL2]
+═══════════════════════════════════════════════════════════════════
+7. FlatView 重建 → ADD 事件: section [GPA 0x8000_200000, 64KB, ram_device]
+8. KVM listener: kvm_set_phys_mem ADD
+   → ioctl(KVM_SET_USER_MEMORY_REGION, {GPA, 64KB, HVA})
+
+═══════════════════════════════════════════════════════════════════
+阶段4: KVM 建 S2 [Host EL2]
+═══════════════════════════════════════════════════════════════════
+9. __kvm_set_memory_region → memslot 不重叠 → 创建成功
+10. get_user_pages(HVA) → HPA → 填 S2 PTE: GPA 0x8000_200000 → HPA
+
+═══════════════════════════════════════════════════════════════════
+阶段5: Guest 访问 [Guest EL1, 硬件自动]
+═══════════════════════════════════════════════════════════════════
+11. Guest ioremap(BAR2) → GVA → Guest S1: GVA→GPA
+    ldr → Guest S1(GVA→GPA) + Host S2(GPA→HPA) → 设备 ✅
+```
+
+---
+
+## 附录 A: 关键代码索引
+
+| 文件 | 行号 | 内容 |
+|------|------|------|
+| `drivers/pci/setup-res.c` | 327 | `pci_assign_resource` — Guest 分配 BAR GPA |
+| `drivers/pci/setup-bus.c` | 493 | `pbus_assign_resources_sorted` — 遍历总线分配 |
+| `drivers/crypto/hisilicon/qm.c` | 633 | `qm_mb_read` — Guest ldp 访问 mailbox 寄存器 |
+| `hw/vfio/helpers.c` | 370 | `region->size = info->size` — VFIORegion.size 赋值 |
+| `hw/vfio/pci.c` | 1785 | `bar->size = region.size` — VFIOBAR.size 赋值 |
+| `hw/vfio/pci.c` | 1797 | `vfio_bar_register` — 创建三层 MR, mmap |
+| `hw/pci/pci.c` | 1298 | `pci_register_bar` — 台账固化 (r->size, wmask) |
+| `hw/pci/pci.c` | 1511 | `pci_update_mappings` — BAR MR 挂入 GPA |
+| `system/memory.c` | 604 | `render_memory_region` — 递归生成 FlatView |
+| `system/memory.c` | 953 | `address_space_update_topology_pass` — 两遍扫描 |
+| `system/memory.c` | 1137 | `memory_region_commit` — 事务提交 + FlatView 重建 |
+| `accel/kvm/kvm-all.c` | 266 | `kvm_align_section` — 页对齐门 |
+| `accel/kvm/kvm-all.c` | 1338 | `kvm_set_phys_mem` — 决定是否建 memslot |
+| `accel/kvm/kvm-all.c` | 1580 | `kvm_region_add/del` — KVM listener 回调 |
+| `virt/kvm/kvm_main.c` | 2141 | `kvm_check_memslot_overlap` — memslot 重叠检查 |
+| `virt/kvm/kvm_main.c` | 2211 | `__kvm_set_memory_region` — 创建/删除 memslot |
+| `arch/arm64/kvm/mmu.c` | 2229 | `kvm_arch_flush_shadow_memslot` — 清 S2 PTE |
+
