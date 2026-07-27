@@ -1,0 +1,173 @@
+From d5b8a54bcd49a364a99bdea3dd24ff63ac6e605d Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Mon, 27 Jul 2026 09:27:03 +0800
+Subject: [PATCH 1/2] KVM: arm64: Clear DBM on memslot commit for lazy split
+ with HDBSS
+
+When FEAT_HDBSS is enabled (VTCR_EL2.HD=1), a block entry with DBM=1 and
+S2AP[1]=0 is writable-clean per ARM spec D8.5.2.1.  Hardware silently
+upgrades it to writable-dirty on the first write, generating no permission
+fault.  This prevents lazy splitting of huge pages, breaking per-4KB dirty
+tracking.
+
+Fix by adding kvm_pgtable_stage2_clear_dbm() that clears the DBM bit on
+all leaf entries, and calling it in kvm_arch_commit_memory_region() before
+write-protection and splitting.  This forces block entries to generate
+real permission faults, triggering lazy split into 4KB PTEs.  Each 4KB PTE
+reacquires DBM=1 from stage2_set_prot_attr() in the fault handler, enabling
+subsequent rounds of hardware dirty tracking at correct granularity.
+
+The clear_dbm walk uses the existing stage2_apply_range infrastructure
+and is symmetric to kvm_mmu_wp_memory_region().
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 18 +++++++++
+ arch/arm64/include/asm/kvm_pkvm.h    |  1 +
+ arch/arm64/kvm/hyp/pgtable.c         |  8 ++++
+ arch/arm64/kvm/mmu.c                 | 57 ++++++++++++++++++++++++++++
+ 4 files changed, 84 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 5e0fac4bfa53..498d1df69b92 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -739,6 +739,24 @@ int kvm_pgtable_stage2_unmap(struct kvm_pgtable *pgt, u64 addr, u64 size);
+  */
+ int kvm_pgtable_stage2_wrprotect(struct kvm_pgtable *pgt, u64 addr, u64 size);
+ 
++/**
++ * kvm_pgtable_stage2_clear_dbm() - Clear DBM bits in stage-2 page-table entries.
++ * @pgt:	Page-table structure initialised by kvm_pgtable_stage2_init*().
++ * @addr:	Intermediate physical address from which to clear DBM.
++ * @size:	Size of the range.
++ *
++ * Clears the DBM (Dirty Bit Management) bit for all leaf entries in the
++ * range. Used at migration start to ensure block entries will generate
++ * permission faults (triggering lazy split) rather than being silently
++ * upgraded by hardware when FEAT_HDBSS is enabled.
++ *
++ * Note that it is the caller's responsibility to invalidate the TLB after
++ * calling this function if write permission was previously granted.
++ *
++ * Return: 0 on success, negative error code on failure.
++ */
++int kvm_pgtable_stage2_clear_dbm(struct kvm_pgtable *pgt, u64 addr, u64 size);
++
+ /**
+  * kvm_pgtable_stage2_mkyoung() - Set the access flag in a page-table entry.
+  * @pgt:	Page-table structure initialised by kvm_pgtable_stage2_init*().
+diff --git a/arch/arm64/include/asm/kvm_pkvm.h b/arch/arm64/include/asm/kvm_pkvm.h
+index 74fedd9c5ff0..941a88f79d19 100644
+--- a/arch/arm64/include/asm/kvm_pkvm.h
++++ b/arch/arm64/include/asm/kvm_pkvm.h
+@@ -209,6 +209,7 @@ int pkvm_pgtable_stage2_map(struct kvm_pgtable *pgt, u64 addr, u64 size, u64 phy
+ 			    enum kvm_pgtable_walk_flags flags);
+ int pkvm_pgtable_stage2_unmap(struct kvm_pgtable *pgt, u64 addr, u64 size);
+ int pkvm_pgtable_stage2_wrprotect(struct kvm_pgtable *pgt, u64 addr, u64 size);
++int pkvm_pgtable_stage2_clear_dbm(struct kvm_pgtable *pgt, u64 addr, u64 size);
+ int pkvm_pgtable_stage2_flush(struct kvm_pgtable *pgt, u64 addr, u64 size);
+ bool pkvm_pgtable_stage2_test_clear_young(struct kvm_pgtable *pgt, u64 addr, u64 size, bool mkold);
+ int pkvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr, enum kvm_pgtable_prot prot,
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 21ec456ecc41..e8f7e973b7d4 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -1307,6 +1307,14 @@ int kvm_pgtable_stage2_wrprotect(struct kvm_pgtable *pgt, u64 addr, u64 size)
+ 					KVM_PGTABLE_WALK_IGNORE_EAGAIN);
+ }
+ 
++int kvm_pgtable_stage2_clear_dbm(struct kvm_pgtable *pgt, u64 addr, u64 size)
++{
++	return stage2_update_leaf_attrs(pgt, addr, size, 0,
++					KVM_PTE_LEAF_ATTR_HI_S2_DBM,
++					NULL, NULL,
++					KVM_PGTABLE_WALK_IGNORE_EAGAIN);
++}
++
+ void kvm_pgtable_stage2_mkyoung(struct kvm_pgtable *pgt, u64 addr,
+ 				enum kvm_pgtable_walk_flags flags)
+ {
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 484f48dae000..aaa8bacfcf0a 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1259,6 +1259,13 @@ void kvm_stage2_wp_range(struct kvm_s2_mmu *mmu, phys_addr_t addr, phys_addr_t e
+ 	stage2_apply_range_resched(mmu, addr, end, KVM_PGT_FN(kvm_pgtable_stage2_wrprotect));
+ }
+ 
++static void kvm_stage2_clear_dbm_range(struct kvm_s2_mmu *mmu,
++				       phys_addr_t addr, phys_addr_t end)
++{
++	stage2_apply_range_resched(mmu, addr, end,
++		KVM_PGT_FN(kvm_pgtable_stage2_clear_dbm));
++}
++
+ /**
+  * kvm_mmu_wp_memory_region() - write protect stage 2 entries for memory slot
+  * @kvm:	The KVM pointer
+@@ -1291,6 +1298,42 @@ static void kvm_mmu_wp_memory_region(struct kvm *kvm, int slot)
+ 	kvm_flush_remote_tlbs_memslot(kvm, memslot);
+ }
+ 
++/**
++ * kvm_mmu_clear_dbm_memory_region() - clear DBM bits for all stage-2 entries
++ *				       in the memory region
++ * @kvm:	The KVM pointer
++ * @slot:	The memory slot
++ *
++ * Clears the DBM bit for every valid leaf entry in the memslot's stage-2
++ * page table. Called at migration start before wp_memory_region() to ensure
++ * block entries will generate permission faults (triggering lazy split)
++ * rather than being silently upgraded by hardware when FEAT_HDBSS is
++ * enabled (VTCR_EL2.HD=1).
++ *
++ * Page entries (4KB PTE, level 3) reacquire DBM=1 from stage2_set_prot_attr
++ * after being split in the fault handler, so this one-time clearing only
++ * affects block entries in practice.
++ */
++static void kvm_mmu_clear_dbm_memory_region(struct kvm *kvm, int slot)
++{
++	struct kvm_memslots *slots = kvm_memslots(kvm);
++	struct kvm_memory_slot *memslot = id_to_memslot(slots, slot);
++	phys_addr_t start, end;
++
++	if (!system_supports_hdbss())
++		return;
++
++	if (WARN_ON_ONCE(!memslot))
++		return;
++
++	start = memslot->base_gfn << PAGE_SHIFT;
++	end = (memslot->base_gfn + memslot->npages) << PAGE_SHIFT;
++
++	write_lock(&kvm->mmu_lock);
++	kvm_stage2_clear_dbm_range(&kvm->arch.mmu, start, end);
++	write_unlock(&kvm->mmu_lock);
++}
++
+ /**
+  * kvm_mmu_split_memory_region() - split the stage 2 blocks into PAGE_SIZE
+  *				   pages for memory slot
+@@ -2601,6 +2644,20 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 		if (change == KVM_MR_DELETE)
+ 			return;
+ 
++		/*
++		 * Clear DBM on all leaf entries before write-protecting.
++		 * When FEAT_HDBSS is enabled (VTCR_EL2.HD=1), a writable-clean
++		 * block entry (DBM=1, S2AP[1]=0) would be silently upgraded by
++		 * hardware on the first write, generating no permission fault.
++		 * Clearing DBM forces a real fault, allowing lazy split to break
++		 * the block into 4KB PTEs with per-page DBM for HDBSS tracking.
++		 *
++		 * 4KB page entries reacquire DBM=1 from stage2_set_prot_attr
++		 * after splitting, so subsequent wrprotects correctly produce
++		 * writable-clean pages with correct HDBSS granularity.
++		 */
++		kvm_mmu_clear_dbm_memory_region(kvm, new->id);
++
+ 		/*
+ 		 * Huge and normal pages are write-protected and split
+ 		 * on either of these two cases:
+-- 
+2.43.0
+

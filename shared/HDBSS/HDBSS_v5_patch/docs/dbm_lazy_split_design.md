@@ -305,6 +305,255 @@ HDBSS 清 DBM 时 W=1，Guest 读写正常进行。wrprotect 后 W=0，首次写
 
 ---
 
+## 两条 wrprotect 路径的完整调用栈
+
+最终两条路径都到达同一个 `stage2_attr_walker`，区别在入口和操作粒度。
+
+### 路径 1：迁移初始化（migration start）
+
+```
+kvm_arch_commit_memory_region                         (mmu.c:2584)
+│
+├─ kvm_arm_hdbss_on_dirty_logging_change              (dirty_bit.c:209)
+│   └─ kvm_arm_enable_hdbss_global                     → VTCR_EL2.HD=1
+│
+├─ [方案B] kvm_mmu_clear_dbm_memory_region             (mmu.c:NEW)
+│   │ 遍历 memslot 全范围
+│   │
+│   ├─ write_lock(&kvm->mmu_lock)
+│   ├─ kvm_stage2_clear_dbm_range                      (mmu.c:NEW)
+│   │   └─ stage2_apply_range_resched(mmu, addr, end,
+│   │         KVM_PGT_FN(kvm_pgtable_stage2_clear_dbm))
+│   │       └─ stage2_apply_range                      (mmu.c:63)
+│   │           │ do {
+│   │           │   next = stage2_range_addr_end()     ← 按 block size 切 chunk
+│   │           │   fn(pgt, addr, next-addr)
+│   │           │   cond_resched_rwlock_write()        ← 定期放锁
+│   │           │ } while (addr != end)
+│   │           │
+│   │           └─ kvm_pgtable_stage2_clear_dbm        (pgtable.c:NEW)
+│   │               └─ stage2_update_leaf_attrs(
+│   │                     attr_set=0,
+│   │                     attr_clr=DBM)                 ← 只清 DBM
+│   │                   └─ kvm_pgtable_walk
+│   │                       └─ stage2_attr_walker
+│   │                            pte &= ~DBM
+│   │                            stage2_try_set_pte()
+│   └─ write_unlock(&kvm->mmu_lock)
+│
+├─ kvm_mmu_wp_memory_region                            (mmu.c:1275)
+│   │
+│   ├─ write_lock(&kvm->mmu_lock)
+│   ├─ kvm_stage2_wp_range                             (mmu.c:1257)
+│   │   └─ stage2_apply_range_resched(mmu, addr, end,
+│   │         KVM_PGT_FN(kvm_pgtable_stage2_wrprotect))
+│   │       └─ stage2_apply_range                      ← 同一 chunk 机制
+│   │           └─ kvm_pgtable_stage2_wrprotect        (pgtable.c:1302)
+│   │               └─ stage2_update_leaf_attrs(
+│   │                     attr_set=0,
+│   │                     attr_clr=S2AP_W)              ← 只清 W，DBM 不动
+│   │                   └─ kvm_pgtable_walk
+│   │                       └─ stage2_attr_walker       (pgtable.c:1236)
+│   │                            pte &= ~S2AP_W
+│   │                            stage2_try_set_pte()
+│   ├─ kvm_nested_s2_wp(kvm)
+│   ├─ write_unlock(&kvm->mmu_lock)
+│   └─ kvm_flush_remote_tlbs_memslot
+│
+├─ kvm_mmu_split_memory_region                          (mmu.c:1303)
+│   │
+│   ├─ write_lock(&kvm->mmu_lock)
+│   ├─ kvm_mmu_split_huge_pages                        (mmu.c:121)
+│   │   │ 内部分 chunk 机制同 stage2_apply_range
+│   │   └─ kvm_pgtable_stage2_split                   (pgtable.c:1588)
+│   │       └─ stage2_split_walker                     (pgtable.c:1520)
+│   │           对每个 block entry:
+│   │             create_unlinked → 分配下级页表页
+│   │             try_break_pte  → 原子替换为 table PTE
+│   │             make_pte       → 挂上新 table
+│   └─ write_unlock(&kvm->mmu_lock)
+│
+└─ kvm_mmu_free_memory_cache                            ← 清理（非 logging 时）
+```
+
+### 路径 2：迭代轮次（CLEAR ioctl）
+
+```
+KVM_CLEAR_DIRTY_LOG ioctl
+│
+└─ kvm_vm_ioctl_clear_dirty_log                         (kvm_main.c:2407)
+    │
+    └─ kvm_clear_dirty_log_protect                       (kvm_main.c:2331)
+       │  mutex_lock(&kvm->slots_lock)
+       │
+       ├─ kvm_arch_sync_dirty_log                        (arm.c)
+       │   │ HDBSS 模式下: 遍历所有 vCPU，flush HDBSS buffer
+       │   │ mark_page_dirty_in_slot → 更新软件 dirty bitmap
+       │
+       ├─ copy_from_user(dirty_bitmap_buffer)            ← QEMU 传来的 dirty 位图
+       │
+       ├─ KVM_MMU_LOCK(kvm)
+       │
+       ├─ for each dirty page set:
+       │     atomic_long_fetch_andnot(mask, &dirty_bitmap[i])  ← 原子清 dirty
+       │     │
+       │     └─ kvm_arch_mmu_enable_log_dirty_pt_masked  (mmu.c:1333)
+       │          │
+       │          ├─ kvm_stage2_wp_range(&kvm->arch.mmu,  (mmu.c:1257)
+       │          │     start, end)                       ← mask → addr
+       │          │   └─ stage2_apply_range_resched       ← 同一入口
+       │          │       └─ stage2_apply_range
+       │          │           └─ kvm_pgtable_stage2_wrprotect
+       │          │               └─ stage2_update_leaf_attrs
+       │          │                   └─ kvm_pgtable_walk
+       │          │                       └─ stage2_attr_walker
+       │          │                           │ 此时已是 4KB PTE
+       │          │                           │ pte &= ~S2AP_W  ← 只清 W
+       │          │                           │ DBM 保持 =1
+       │          │                           │ stage2_try_set_pte()
+       │          │
+       │          └─ kvm_mmu_split_huge_pages            ← 未拆 block 补拆
+       │
+       ├─ KVM_MMU_UNLOCK(kvm)
+       │
+       └─ kvm_flush_remote_tlbs_memslot
+```
+
+### 两条路径的差异
+
+| | 路径 1（初始化） | 路径 2（迭代轮） |
+|---|---|---|
+| 入口 | `kvm_arch_commit_memory_region` | `KVM_CLEAR_DIRTY_LOG` ioctl |
+| wrprotect wrapper | `kvm_mmu_wp_memory_region` | `kvm_arch_mmu_enable_log_dirty_pt_masked` |
+| 范围 | 整个 memslot | 仅 dirty 的 4KB 页集合 |
+| 操作粒度 | block + 4KB 混合 | 4KB PTE 为主 |
+| 锁范围 | mmu_lock 内部锁 | slots_lock + mmu_lock |
+| 到达 walker 路径 | `stage2_apply_range_resched` → … | `stage2_apply_range_resched` → … |
+| DBM 状态（方案B后） | 已清过，此时 DBM=0 | fault 后 DBM=1，wrprotect 保留 |
+
+---
+
+## 性能测试方案：TRACE_EVENT 埋点
+
+### 设计思路
+
+不改内核源码进行 walk 计时，而是在 `kvm_mmu_clear_dbm_memory_region` 上下加 `ktime_get()` 打点，通过 TRACE_EVENT 输出到 ftrace ring buffer。tracepoint 未启用时开销为零（nop），启用后可被 ftrace/perf/trace-cmd 消费。
+
+### 改动清单
+
+**1. `include/trace/events/kvm.h`**：新增 `kvm_clear_dbm` tracepoint
+
+```c
+TRACE_EVENT(kvm_clear_dbm,
+
+    TP_PROTO(struct kvm *kvm, int slot, unsigned long npages,
+             u64 dbm_ns, u64 total_ns),
+
+    TP_ARGS(kvm, slot, npages, dbm_ns, total_ns),
+
+    TP_STRUCT__entry(
+        __field(int,           slot)
+        __field(unsigned long, npages)
+        __field(u64,           dbm_ns)
+        __field(u64,           total_ns)
+    ),
+
+    TP_fast_assign(
+        __entry->slot     = slot;
+        __entry->npages   = npages;
+        __entry->dbm_ns   = dbm_ns;
+        __entry->total_ns = total_ns;
+    ),
+
+    TP_printk("slot=%d npages=%lu "
+              "dbm_clr=%llu ns total=%llu ns (%.1f%%)",
+        __entry->slot, __entry->npages,
+        __entry->dbm_ns, __entry->total_ns,
+        (double)__entry->dbm_ns * 100 / (__entry->total_ns ?: 1))
+);
+```
+
+**2. `arch/arm64/kvm/mmu.c`**：加头文件 + 计时 + tracepoint 调用
+
+```c
+#include <linux/ktime.h>
+#include <trace/events/kvm.h>
+
+void kvm_arch_commit_memory_region(...)
+{
+    ktime_t t_enter, t_dbm, t_exit;
+    ...
+    if (log_dirty_pages) {
+        ...
+        t_enter = ktime_get();
+
+        if (system_supports_hdbss())
+            kvm_mmu_clear_dbm_memory_region(kvm, new->id);
+
+        t_dbm = ktime_get();
+
+        if (kvm_dirty_log_manual_protect_and_init_set(kvm))
+            return;
+
+        kvm_mmu_wp_memory_region(kvm, new->id);
+        kvm_mmu_split_memory_region(kvm, new->id);
+
+        t_exit = ktime_get();
+
+        trace_kvm_clear_dbm(kvm, new->id, new->npages,
+                            ktime_to_ns(ktime_sub(t_dbm, t_enter)),
+                            ktime_to_ns(ktime_sub(t_exit, t_enter)));
+    }
+}
+```
+
+### 使用方式
+
+```bash
+# 启用 tracepoint
+echo 1 > /sys/kernel/debug/tracing/events/kvm/kvm_clear_dbm/enable
+
+# 按大页过滤（只看 > 16GB 的 VM）
+echo 'npages > 4194304' > /sys/kernel/debug/tracing/events/kvm/kvm_clear_dbm/filter
+
+# 启动热迁移，查看结果
+cat /sys/kernel/debug/tracing/trace
+
+# 也可以用 perf
+perf record -e kvm:kvm_clear_dbm -a -- qemu-kvm ...
+
+# 关闭
+echo 0 > /sys/kernel/debug/tracing/events/kvm/kvm_clear_dbm/enable
+```
+
+### 输出示例
+
+```
+qemu-kvm-12345 [001] .... 124.820: kvm_clear_dbm:
+  slot=0 npages=67108864
+  dbm_clr=423000000 ns total=2120000000 ns (19.9%)
+```
+
+### 字段含义
+
+| 字段 | 含义 |
+|------|------|
+| `dbm_ns` | `kvm_mmu_clear_dbm_memory_region` 耗时（ns） |
+| `total_ns` | `kvm_arch_commit_memory_region` logging 分支总耗时（DBM清 + wrprotect + split） |
+| 占比 | `dbm_ns / total_ns × 100%`：清 DBM 在 memslot commit 中的开销占比 |
+
+### vs trace_printk
+
+| | trace_printk | TRACE_EVENT |
+|---|---|---|
+| 运行时开关 | ❌ 编译决定 | ✅ `/sys/.../enable` |
+| 未启用开销 | 有（每次调都写 ring buffer） | **零**（相当于 nop） |
+| 结构化过滤 | ❌ 纯文本 | ✅ 可按字段聚合/过滤 |
+| perf 兼容 | ❌ | ✅ `perf record -e kvm:...` |
+| 可随 patch 提交 | 不建议 | ✅ |
+
+---
+
 ## 推荐方案
 
 **方案 B**，理由：

@@ -1,0 +1,114 @@
+From 82c0cd0c4cf133f5924ab3aa32d6705c790dea82 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Mon, 27 Jul 2026 09:28:00 +0800
+Subject: [PATCH 2/2] KVM: arm64: Add tracepoint for DBM-clear performance
+ measurement
+
+Add a trace_kvm_clear_dbm() tracepoint that records the elapsed time of
+the DBM-clearing page table walk and the total time spent in the logging
+branch of kvm_arch_commit_memory_region().
+
+The tracepoint outputs:
+- slot: memslot index
+- npages: number of pages in the memslot
+- dbm_clr: nanoseconds spent clearing DBM
+- total: nanoseconds spent in the full logging branch (DBM-clear + wrprotect + split)
+- percentage: DBM-clear overhead relative to the total
+
+Zero cost when disabled (nop).  Enable with:
+  echo 1 > /sys/kernel/debug/tracing/events/kvm/kvm_clear_dbm/enable
+---
+ arch/arm64/kvm/mmu.c       | 12 ++++++++++++
+ include/trace/events/kvm.h | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index aaa8bacfcf0a..66ff6fd7aab4 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <linux/acpi.h>
++#include <linux/ktime.h>
+ #include <linux/mman.h>
+ #include <linux/kvm_host.h>
+ #include <linux/io.h>
+@@ -2640,10 +2641,13 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 	 * memory slot is write protected.
+ 	 */
+ 	if (log_dirty_pages) {
++		ktime_t t_enter, t_dbm, t_exit;
+ 
+ 		if (change == KVM_MR_DELETE)
+ 			return;
+ 
++		t_enter = ktime_get();
++
+ 		/*
+ 		 * Clear DBM on all leaf entries before write-protecting.
+ 		 * When FEAT_HDBSS is enabled (VTCR_EL2.HD=1), a writable-clean
+@@ -2658,6 +2662,8 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 		 */
+ 		kvm_mmu_clear_dbm_memory_region(kvm, new->id);
+ 
++		t_dbm = ktime_get();
++
+ 		/*
+ 		 * Huge and normal pages are write-protected and split
+ 		 * on either of these two cases:
+@@ -2673,6 +2679,12 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 		 */
+ 		kvm_mmu_wp_memory_region(kvm, new->id);
+ 		kvm_mmu_split_memory_region(kvm, new->id);
++
++		t_exit = ktime_get();
++
++		trace_kvm_clear_dbm(kvm, new->id, new->npages,
++			ktime_to_ns(ktime_sub(t_dbm, t_enter)),
++			ktime_to_ns(ktime_sub(t_exit, t_enter)));
+ 	} else {
+ 		/*
+ 		 * Free any leftovers from the eager page splitting cache. Do
+diff --git a/include/trace/events/kvm.h b/include/trace/events/kvm.h
+index b282e3a86769..18b36d2de44c 100644
+--- a/include/trace/events/kvm.h
++++ b/include/trace/events/kvm.h
+@@ -436,6 +436,34 @@ TRACE_EVENT(kvm_test_age_hva,
+ 	TP_printk("mmu notifier test age hva: %#016lx", __entry->hva)
+ );
+ 
++TRACE_EVENT(kvm_clear_dbm,
++
++	TP_PROTO(struct kvm *kvm, int slot, unsigned long npages,
++		 u64 dbm_ns, u64 total_ns),
++
++	TP_ARGS(kvm, slot, npages, dbm_ns, total_ns),
++
++	TP_STRUCT__entry(
++		__field(int,		slot)
++		__field(unsigned long,	npages)
++		__field(u64,		dbm_ns)
++		__field(u64,		total_ns)
++	),
++
++	TP_fast_assign(
++		__entry->slot		= slot;
++		__entry->npages		= npages;
++		__entry->dbm_ns		= dbm_ns;
++		__entry->total_ns	= total_ns;
++	),
++
++	TP_printk("slot=%d npages=%lu "
++		  "dbm_clr=%llu ns total=%llu ns (%.1f%%)",
++		__entry->slot, __entry->npages,
++		__entry->dbm_ns, __entry->total_ns,
++		(double)__entry->dbm_ns * 100 / (__entry->total_ns ?: 1))
++);
++
+ #endif /* _TRACE_KVM_MAIN_H */
+ 
+ /* This part must be outside protection */
+-- 
+2.43.0
+
