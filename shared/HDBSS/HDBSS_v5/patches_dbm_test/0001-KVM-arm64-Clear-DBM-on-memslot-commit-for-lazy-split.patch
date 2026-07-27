@@ -1,6 +1,6 @@
-From e28d3aa739ac01179d277d50014d24c9115c033d Mon Sep 17 00:00:00 2001
+From 2ce0eb9fe03d409b71ead96810fa2e8253f21074 Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
-Date: Mon, 27 Jul 2026 11:28:33 +0800
+Date: Mon, 27 Jul 2026 12:48:22 +0800
 Subject: [PATCH] KVM: arm64: Clear DBM on memslot commit for lazy split with
  HDBSS
 
@@ -13,19 +13,22 @@ tracking.
 Fix by adding kvm_pgtable_stage2_clear_dbm() that clears the DBM bit on
 all leaf entries, and calling it in kvm_arch_commit_memory_region() before
 write-protection and splitting.  This forces block entries to generate
-permission faults, triggering lazy split into 4KB PTEs.
+permission faults, triggering lazy split into 4KB PTEs.  Each 4KB PTE
+reacquires DBM=1 from stage2_set_prot_attr() in the fault handler, enabling
+subsequent rounds of hardware dirty tracking at correct granularity.
 
-Include a trace_kvm_clear_dbm() tracepoint for performance measurement.
+Use kvm_info() to log the elapsed time of the DBM-clearing walk and the
+total time in the logging branch for performance measurement.
+
 The pKVM variant is a no-op; required only for compilation when
 CONFIG_NVHE_EL2 is set.
 ---
  arch/arm64/include/asm/kvm_pgtable.h | 15 +++++++
  arch/arm64/include/asm/kvm_pkvm.h    |  1 +
  arch/arm64/kvm/hyp/pgtable.c         |  8 ++++
- arch/arm64/kvm/mmu.c                 | 61 ++++++++++++++++++++++++++++
+ arch/arm64/kvm/mmu.c                 | 62 ++++++++++++++++++++++++++++
  arch/arm64/kvm/pkvm.c                | 11 +++++
- include/trace/events/kvm.h           | 26 ++++++++++++
- 6 files changed, 122 insertions(+)
+ 5 files changed, 97 insertions(+)
 
 diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
 index 5e0fac4bfa53..711fe27c33d8 100644
@@ -85,7 +88,7 @@ index 21ec456ecc41..e8f7e973b7d4 100644
  				enum kvm_pgtable_walk_flags flags)
  {
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index 484f48dae000..cdf8bd40dbd9 100644
+index 484f48dae000..fcc86f5f78a0 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
 @@ -5,6 +5,7 @@
@@ -175,16 +178,17 @@ index 484f48dae000..cdf8bd40dbd9 100644
  		/*
  		 * Huge and normal pages are write-protected and split
  		 * on either of these two cases:
-@@ -2616,6 +2671,12 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+@@ -2616,6 +2671,13 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
  		 */
  		kvm_mmu_wp_memory_region(kvm, new->id);
  		kvm_mmu_split_memory_region(kvm, new->id);
 +
 +		t_exit = ktime_get();
 +
-+		trace_kvm_clear_dbm(kvm, new->id, new->npages,
-+			ktime_to_ns(ktime_sub(t_dbm, t_enter)),
-+			ktime_to_ns(ktime_sub(t_exit, t_enter)));
++		kvm_info("slot=%d npages=%lu dbm_clr=%llu ns total=%llu ns\n",
++			 new->id, new->npages,
++			 ktime_to_ns(ktime_sub(t_dbm, t_enter)),
++			 ktime_to_ns(ktime_sub(t_exit, t_enter)));
  	} else {
  		/*
  		 * Free any leftovers from the eager page splitting cache. Do
@@ -210,43 +214,6 @@ index 053e4f733e4b..1ddbdbe877b3 100644
  int pkvm_pgtable_stage2_flush(struct kvm_pgtable *pgt, u64 addr, u64 size)
  {
  	struct kvm *kvm = kvm_s2_mmu_to_kvm(pgt->mmu);
-diff --git a/include/trace/events/kvm.h b/include/trace/events/kvm.h
-index b282e3a86769..22468c7d64f8 100644
---- a/include/trace/events/kvm.h
-+++ b/include/trace/events/kvm.h
-@@ -436,6 +436,32 @@ TRACE_EVENT(kvm_test_age_hva,
- 	TP_printk("mmu notifier test age hva: %#016lx", __entry->hva)
- );
- 
-+TRACE_EVENT(kvm_clear_dbm,
-+
-+	TP_PROTO(struct kvm *kvm, int slot, unsigned long npages,
-+		 u64 dbm_ns, u64 total_ns),
-+
-+	TP_ARGS(kvm, slot, npages, dbm_ns, total_ns),
-+
-+	TP_STRUCT__entry(
-+		__field(int,		slot)
-+		__field(unsigned long,	npages)
-+		__field(u64,		dbm_ns)
-+		__field(u64,		total_ns)
-+	),
-+
-+	TP_fast_assign(
-+		__entry->slot		= slot;
-+		__entry->npages		= npages;
-+		__entry->dbm_ns		= dbm_ns;
-+		__entry->total_ns	= total_ns;
-+	),
-+
-+	TP_printk("slot=%d npages=%lu dbm_clr=%llu ns total=%llu ns",
-+		__entry->slot, __entry->npages,
-+		__entry->dbm_ns, __entry->total_ns)
-+);
-+
- #endif /* _TRACE_KVM_MAIN_H */
- 
- /* This part must be outside protection */
 -- 
 2.43.0
 
