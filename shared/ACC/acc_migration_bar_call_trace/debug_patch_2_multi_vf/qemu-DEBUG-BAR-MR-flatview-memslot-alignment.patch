@@ -1,0 +1,146 @@
+From 70922dc7a75a949aeac8045b8f056b05e9918891 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Mon, 27 Jul 2026 09:37:38 +0800
+Subject: [PATCH] DEBUG: add debug info for BAR MR mapping, Flat View changes,
+ and KVM memslot aligment expansion
+
+---
+ accel/kvm/kvm-all.c | 71 +++++++++++++++++++++++++++++++++++----------
+ hw/pci/pci.c        |  8 +++++
+ 2 files changed, 63 insertions(+), 16 deletions(-)
+
+diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
+index d289ea85a0..ea529cecb7 100644
+--- a/accel/kvm/kvm-all.c
++++ b/accel/kvm/kvm-all.c
+@@ -280,7 +280,18 @@ static hwaddr kvm_align_section(MemoryRegionSection *section,
+         return 0;
+     }
+ 
+-    return (size - delta) & qemu_real_host_page_mask();
++    {
++        hwaddr result = (size - delta) & qemu_real_host_page_mask();
++        if (delta != 0 || result != size) {
++            error_report("DEBUG: %s: sec_off=%#"HWADDR_PRIx" sec_size=%#"HWADDR_PRIx
++                         " -> aligned_start=%#"HWADDR_PRIx" aligned_size=%#"HWADDR_PRIx
++                         " (delta=%#"HWADDR_PRIx", PAGE_SIZE=%#"HWADDR_PRIx")",
++                         __func__, section->offset_within_address_space, size,
++                         *start, result, delta,
++                         (hwaddr)qemu_real_host_page_size());
++        }
++        return result;
++    }
+ }
+ 
+ int kvm_physical_memory_addr_from_host(KVMState *s, void *ram,
+@@ -1352,24 +1363,28 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
+ 
+     size = kvm_align_section(section, &start_addr);
+     if (!size) {
+-        error_report("DEBUG: kvm_set_phys_mem SKIP zero-aligned mr=%s "
+-                     "mr->ram=%d mr->ram_device=%d "
+-                     "section_size=%#" HWADDR_PRIx
+-                     " section_offset=%#" HWADDR_PRIx
+-                     " host_page_size=%#lx -> kvm_align_section returned 0",
+-                     memory_region_name(mr), mr->ram, mr->ram_device,
+-                     int128_get64(section->size),
+-                     section->offset_within_address_space,
+-                     qemu_real_host_page_size());
++        if (mr->ram_device || mr->rom_device) {
++            error_report("DEBUG: kvm_set_phys_mem SKIP zero-aligned mr=%s "
++                         "mr->ram=%d mr->ram_device=%d "
++                         "section_size=%#" HWADDR_PRIx
++                         " section_offset=%#" HWADDR_PRIx
++                         " host_page_size=%#lx -> kvm_align_section returned 0",
++                         memory_region_name(mr), mr->ram, mr->ram_device,
++                         int128_get64(section->size),
++                         section->offset_within_address_space,
++                         qemu_real_host_page_size());
++        }
+         return;
+     }
+ 
+-    error_report("DEBUG: kvm_set_phys_mem REGISTER mr=%s mr->ram=%d "
+-                 "mr->ram_device=%d start_addr=%#" HWADDR_PRIx
+-                 " size=%#" HWADDR_PRIx " -> KVM memslot registered, "
+-                 "stage-2 mapping created",
+-                 memory_region_name(mr), mr->ram, mr->ram_device,
+-                 start_addr, size);
++    if (mr->ram_device || mr->rom_device) {
++        error_report("DEBUG: kvm_set_phys_mem %s mr=%s mr->ram=%d "
++                     "mr->ram_device=%d start_addr=%#" HWADDR_PRIx
++                     " size=%#" HWADDR_PRIx,
++                     add ? "ADD" : "DEL",
++                     memory_region_name(mr), mr->ram, mr->ram_device,
++                     start_addr, size);
++    }
+ 
+     /* The offset of the kvmslot within the memory region */
+     mr_offset = section->offset_within_region + start_addr -
+@@ -1572,6 +1587,18 @@ static void kvm_region_add(MemoryListener *listener,
+     KVMMemoryListener *kml = container_of(listener, KVMMemoryListener, listener);
+     KVMMemoryUpdate *update;
+ 
++    if (section->mr->ram_device || section->mr->rom_device) {
++        error_report("DEBUG: %s: sec_off=%#"HWADDR_PRIx" sec_size=%#"HWADDR_PRIx
++                     " mr=%s mr->ram=%d mr->ram_device=%d mr->readonly=%d",
++                     __func__,
++                     section->offset_within_address_space,
++                     (hwaddr)int128_get64(section->size),
++                     memory_region_name(section->mr),
++                     memory_region_is_ram(section->mr),
++                     section->mr->ram_device,
++                     section->mr->readonly);
++    }
++
+     update = g_new0(KVMMemoryUpdate, 1);
+     update->section = *section;
+ 
+@@ -1584,6 +1611,18 @@ static void kvm_region_del(MemoryListener *listener,
+     KVMMemoryListener *kml = container_of(listener, KVMMemoryListener, listener);
+     KVMMemoryUpdate *update;
+ 
++    if (section->mr->ram_device || section->mr->rom_device) {
++        error_report("DEBUG: %s: sec_off=%#"HWADDR_PRIx" sec_size=%#"HWADDR_PRIx
++                     " mr=%s mr->ram=%d mr->ram_device=%d mr->readonly=%d",
++                     __func__,
++                     section->offset_within_address_space,
++                     (hwaddr)int128_get64(section->size),
++                     memory_region_name(section->mr),
++                     memory_region_is_ram(section->mr),
++                     section->mr->ram_device,
++                     section->mr->readonly);
++    }
++
+     update = g_new0(KVMMemoryUpdate, 1);
+     update->section = *section;
+ 
+diff --git a/hw/pci/pci.c b/hw/pci/pci.c
+index ba180e14a2..678aa06bdb 100644
+--- a/hw/pci/pci.c
++++ b/hw/pci/pci.c
+@@ -1540,6 +1540,10 @@ static void pci_update_mappings(PCIDevice *d)
+                                           PCI_SLOT(d->devfn),
+                                           PCI_FUNC(d->devfn),
+                                           i, r->addr, r->size);
++            error_report("DEBUG: %s: BAR%d addr DEL: old_gpa=%#"HWADDR_PRIx
++                         " size=%#"HWADDR_PRIx" mr_name=%s",
++                         d->name, i, r->addr, r->size,
++                         memory_region_name(r->memory));
+             memory_region_del_subregion(r->address_space, r->memory);
+         }
+         r->addr = new_addr;
+@@ -1548,6 +1552,10 @@ static void pci_update_mappings(PCIDevice *d)
+                                           PCI_SLOT(d->devfn),
+                                           PCI_FUNC(d->devfn),
+                                           i, r->addr, r->size);
++            error_report("DEBUG: %s: BAR%d addr ADD: new_gpa=%#"HWADDR_PRIx
++                         " size=%#"HWADDR_PRIx" mr_name=%s",
++                         d->name, i, r->addr, r->size,
++                         memory_region_name(r->memory));
+             memory_region_add_subregion_overlap(r->address_space,
+                                                 r->addr, r->memory, 1);
+         }
+-- 
+2.43.0
+

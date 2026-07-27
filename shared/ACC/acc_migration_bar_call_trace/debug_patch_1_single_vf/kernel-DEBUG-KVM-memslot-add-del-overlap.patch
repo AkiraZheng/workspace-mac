@@ -1,0 +1,71 @@
+From de3c619cb67fa5b086a3399993177a7722fc6b34 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Mon, 27 Jul 2026 09:44:55 +0800
+Subject: [PATCH 2/2] DEBUG: add trace_printk for KVM memslot ADD/DEL/OVERLAP
+ operations
+
+---
+ virt/kvm/kvm_main.c | 31 +++++++++++++++++++++++++++++--
+ 1 file changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 717cbbb253cc..48298b249eef 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -2215,6 +2215,13 @@ int __kvm_set_memory_region(struct kvm *kvm,
+ 		if (WARN_ON_ONCE(kvm->nr_memslot_pages < old->npages))
+ 			return -EIO;
+ 
++		trace_printk("DEBUG: %s: DELETE memslot id=%d base_gfn=%#llx "
++			"npages=%lu size=%#llx GPA=[%#llx,%#llx]\n",
++			__func__, id, old->base_gfn, old->npages,
++			old->npages << PAGE_SHIFT,
++			old->base_gfn << PAGE_SHIFT,
++			(old->base_gfn + old->npages) << PAGE_SHIFT);
++
+ 		return kvm_set_memslot(kvm, old, NULL, KVM_MR_DELETE);
+ 	}
+ 
+@@ -2248,8 +2255,14 @@ int __kvm_set_memory_region(struct kvm *kvm,
+ 	}
+ 
+ 	if ((change == KVM_MR_CREATE || change == KVM_MR_MOVE) &&
+-	    kvm_check_memslot_overlap(slots, id, base_gfn, base_gfn + npages))
++	    kvm_check_memslot_overlap(slots, id, base_gfn, base_gfn + npages)) {
++		trace_printk("DEBUG: %s: OVERLAP DETECTED! id=%d base_gfn=%#llx "
++			"npages=%lu size=%#llx GPA=[%#llx,%#llx] -> returning -EEXIST\n",
++			__func__, id, base_gfn, npages, npages << PAGE_SHIFT,
++			base_gfn << PAGE_SHIFT,
++			(base_gfn + npages) << PAGE_SHIFT);
+ 		return -EEXIST;
++	}
+ 
+ 	/* Allocate a slot that will persist in the memslot. */
+ 	new = kzalloc(sizeof(*new), GFP_KERNEL_ACCOUNT);
+@@ -2269,8 +2282,22 @@ int __kvm_set_memory_region(struct kvm *kvm,
+ 	}
+ 
+ 	r = kvm_set_memslot(kvm, old, new, change);
+-	if (r)
++	if (r) {
++		trace_printk("DEBUG: %s: kvm_set_memslot FAILED change=%d id=%d "
++			"GPA=[%#llx,%#llx] size=%#llx ret=%d\n",
++			__func__, change, id,
++			base_gfn << PAGE_SHIFT,
++			(base_gfn + npages) << PAGE_SHIFT,
++			npages << PAGE_SHIFT, r);
+ 		goto out_unbind;
++	}
++
++	trace_printk("DEBUG: %s: SUCCESS change=%d id=%d "
++		"GPA=[%#llx,%#llx] size=%#llx\n",
++		__func__, change, id,
++		base_gfn << PAGE_SHIFT,
++		(base_gfn + npages) << PAGE_SHIFT,
++		npages << PAGE_SHIFT);
+ 
+ 	return 0;
+ 
+-- 
+2.43.0
+

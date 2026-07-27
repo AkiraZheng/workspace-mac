@@ -1014,11 +1014,271 @@ qemu:  DEBUG: kvm_set_phys_mem REGISTER mr->ram=1 mr->ram_device=1 → stage-2 m
 
 ### 9.6 Patch 文件
 
-- **kernel-DEBUG-add-debug-info-for-hisi_acc_vfio_pci-BAR2-mmap.patch** — Kernel 侧 3 处打桩
-- **qemu-DEBUG-add-debug-info-for-VFIO-BAR-mmap-and-KVM-stage-2-mapping.patch** — QEMU 侧 4 处打桩
-- **kernel-DEBUG-KVM-ISV0-128bit-emulation-failure-path.patch** — Kernel KVM `io_mem_abort()` ISV=0 分支打桩
+**注意：Kernel 侧 patch 3 和 patch 6/7 使用 `trace_printk` 输出到 ftrace ring buffer，不会污染 dmesg。** 使用时需要：
+```bash
+# 查看 ftrace 日志
+cat /sys/kernel/tracing/trace
+# 或开机参数加 trace_event=printk 让 trace_printk 同时输出到 dmesg
+```
+
+> **注意**：如果内核未编译 `CONFIG_DYNAMIC_FTRACE`，`trace_printk` 不可用。此时可直接改成 `pr_info`。
+
+- **kernel-DEBUG-add-debug-info-for-hisi_acc_vfio_pci-BAR2-mmap.patch** — Kernel 侧 3 处打桩 (hisi_acc_vf_qm_init, hisi_acc_get_resource_len, hisi_acc_vfio_pci_mmap)
+- **qemu-DEBUG-add-debug-info-for-VFIO-BAR-mmap-and-KVM-stage-2-mapping.patch** — QEMU 侧 4 处打桩 (vfio_region_mmap, vfio_bar_register, vfio_sub_page_bar_update_mapping, kvm_set_phys_mem)
+- **kernel-DEBUG-KVM-ISV0-128bit-emulation-failure-path.patch** — Kernel KVM `io_mem_abort()` ISV=0 分支打桩 (trace_printk)
 - **qemu-DEBUG-SEA-injection-on-NISV-exit.patch** — QEMU `kvm_arm_handle_dabt_nisv()` SEA 注入打桩
 - **qemu-DEBUG-VFIO-region-pread-pwrite-slow-path.patch** — QEMU `vfio_region_read`/`vfio_region_write` pread/pwrite 慢路径打桩，验证 ldr 单寄存器操作在 S2 无映射时是否能走 QEMU 仿真
+- **qemu-DEBUG-BAR-MR-flatview-memslot-alignment.patch** — QEMU 侧 4 处打桩 (pci_update_mappings, kvm_align_section, kvm_region_add/del, kvm_set_phys_mem ADD/DEL)，追踪 BAR MR GPA 变化、Flat View 重建、kvm_align_section 扩展和 KVM memslot 操作。**依赖 qemu-DEBUG-add-debug-info-for-VFIO-BAR-mmap-and-KVM-stage-2-mapping.patch，须先 apply 它再 apply 这个**
+- **kernel-DEBUG-KVM-memslot-add-del-overlap.patch** — Kernel KVM `__kvm_set_memory_region()` 打桩 (trace_printk)，追踪 memslot CREATE/DELETE/MOVE/OVERLAP 全过程
+
+### 9.7 Patch apply 顺序
+
+由于 `kvm_set_phys_mem` 被两个 QEMU patch 修改，须按以下顺序 apply：
+
+```
+# Kernel patches
+1. kernel-DEBUG-add-debug-info-for-hisi_acc_vfio_pci-BAR2-mmap.patch
+2. kernel-DEBUG-KVM-ISV0-128bit-emulation-failure-path.patch
+3. kernel-DEBUG-KVM-memslot-add-del-overlap.patch
+
+# QEMU patches (注意顺序!)
+4. qemu-DEBUG-add-debug-info-for-VFIO-BAR-mmap-and-KVM-stage-2-mapping.patch
+5. qemu-DEBUG-SEA-injection-on-NISV-exit.patch
+6. qemu-DEBUG-VFIO-region-pread-pwrite-slow-path.patch
+7. qemu-DEBUG-BAR-MR-flatview-memslot-alignment.patch   ← 最后 apply
+```
+
+### 9.8 高频打印点过滤说明
+
+QEMU 侧部分打桩点已加 `mr->ram_device || mr->rom_device` 过滤，跳过普通 guest RAM 的打印：
+
+| 打桩点 | 过滤条件 | 说明 |
+|---|---|---|
+| `kvm_region_add/del` | `ram_device \|\| rom_device` | 只打印 VFIO BAR 等设备映射 section |
+| `kvm_set_phys_mem` ADD/DEL | `ram_device \|\| rom_device` | 只打印设备 mmap 的 memslot 操作 |
+| `kvm_set_phys_mem` SKIP zero-aligned | `ram_device \|\| rom_device` | 同上 |
+| `kvm_align_section` | `delta != 0 \|\| result != size` | 仅在 section 被对齐扩展时打印 |
+| `pci_update_mappings` | 无（仅 BAR 变化时触发） | 低频，无需过滤 |
+
+Kernel 侧全部使用 `trace_printk`，写入 ftrace ring buffer，不污染 dmesg。
+
+## 10. 对齐修复后的新问题：双设备直通时 BAR MR 重叠导致 S2 失效
+
+### 10.1 问题描述
+
+方案2对 `hisi_acc_get_resource_len` 做 PAGE_SIZE 对齐后，单设备直通工作正常（BAR2 mmap 成功 → S2 建好 → guest 正常访问）。但**同时直通两个 VFIO 设备到同一 PCI bus（无 PCIe root port 隔离）时，仍然报同样的 SEA call trace**。
+
+使用 PCIe root port 将两个设备隔离到不同 PCI bus 后问题消失。
+
+### 10.2 根因：Guest 认为 BAR2=32KB 导致 GPA 重叠
+
+核心矛盾在于 **Guest 和 QEMU 对 BAR2 大小的认知不一致**：
+
+```
+hisi_acc_get_resource_len 返回 BAR2 = 64KB (修复后)
+  → VFIO_DEVICE_GET_REGION_INFO 报告 size = 64KB
+  → QEMU mmap 64KB → 成功 → ram_device MR = 64KB
+
+但 hisi_acc_vfio_pci 的 read/write 拦截仍将 BAR2 截断为 32KB:
+  → VFIO 设备 fd 的 read/write 只允许访问前 32KB (offset >= 32KB 返回错误)
+  → Guest PCI 枚举: 写 all-1s 读回 BAR 可写 mask → BAR 大小 = 32KB
+  → Guest 以为 BAR2 只占 32KB!
+```
+
+Guest 以 32KB 的认知分配 BAR 地址：
+
+```
+单设备:
+  Device 1 BAR4 (2MB): [0x8000000000, 0x80001fffff]
+  Device 1 BAR2 (32KB):  [0x8000200000, 0x8000207fff]  ← Guest 认为 32KB
+                          但 QEMU 注册了 64KB MR!
+
+双设备 (同一 PCI Bus, 无 Root Port):
+  Device 1 BAR4 (2MB): [0x8000000000, 0x80001fffff]
+  Device 1 BAR2 (32KB):  [0x8000200000, 0x8000207fff]  ← Guest 认为 32KB
+  Device 2 BAR4 (2MB): [0x8000208000, 0x8000407fff]    ← Guest 分配在 Dev1 BAR2 后面!
+
+  但实际上 QEMU 注册的 MR:
+    Dev1 BAR2: [0x8000200000, 0x800020ffff]  64KB  ← QEMU 实际注册的
+    Dev2 BAR4: [0x8000208000, 0x8000407fff]   2MB  ← QEMU 注册的
+                 └── 重叠 32KB! (0x8000208000 ~ 0x800020ffff)
+```
+
+### 10.3 QEMU MemoryRegion Flat View 重建过程
+
+QEMU 不是逐个修改 MR，而是**每次拓扑变化后重建整个 Flat View，然后对比新旧生成 ADD/DEL 事件**。
+
+**Device 1 单独时 — Flat View**:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Section1: GPA [0x8000200000, 0x800020ffff] 64KB                     │
+│            → Dev1 BAR2 ram_device (mr->ram = true)                  │
+│            → KVM memslot: [0x8000200000, 0x800020ffff] → HPA        │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Device 2 加入后 — Flat View 重建, 新旧对比**:
+
+```
+旧 Flat View:
+  Section1: [0x8000200000, 0x800020ffff] 64KB (Dev1 BAR2 ram_device)  ← 要被删除
+
+新 Flat View (MR 优先级相同, 后注册者覆盖重叠区域):
+  Section1: [0x8000200000, 0x8000207fff] 32KB (Dev1 BAR2 ram_device, 非重叠部分)
+  Section2: [0x8000208000, 0x800020ffff] 32KB (Dev2 BAR4 ram_device, 重叠区, Dev2 胜)
+  Section3: [0x8000210000, 0x8000407fff] ...  (Dev2 BAR4 剩余)
+
+Diff → 三个 KVM Listener 事件:
+  事件1: DEL  Dev1 BAR2 64KB section [0x8000200000, 0x800020ffff]
+  事件2: ADD  Dev1 BAR2 32KB section [0x8000200000, 0x8000207fff]  ← 被截断!
+  事件3: ADD  Dev2 BAR4 32KB section [0x8000208000, 0x800020ffff]
+```
+
+### 10.4 KVM Memslot 注册冲突
+
+事件2 和事件3 的处理中，`kvm_align_section()` 会将 section 对齐到 PAGE_SIZE (64KB)：
+
+```
+事件2: kvm_region_add(Section [0x8000200000, 0x8000207fff], size=32KB)
+  → kvm_align_section(start=0x8000200000, size=0x8000):
+      start_aligned = 0x8000200000
+      end_aligned   = ALIGN_UP(0x8000208000, 0x10000) = 0x8000210000
+      size_aligned  = 0x10000 = 64KB  ← 被扩展!
+  → KVM_SET_USER_MEMORY_REGION(GPA=0x8000200000, size=64KB, add=true)
+
+事件3: kvm_region_add(Section [0x8000208000, 0x800020ffff], size=32KB)
+  → kvm_align_section(start=0x8000208000, size=0x8000):
+      start_aligned = 0x8000200000
+      end_aligned   = ALIGN_UP(0x8000210000, 0x10000) = 0x8000210000
+      size_aligned  = 0x10000 = 64KB  ← 也被扩展!
+  → KVM_SET_USER_MEMORY_REGION(GPA=0x8000200000, size=64KB, add=true)  ← 与事件2 相同!
+```
+
+**两个 kvm_align_section 将不同 section 扩展到了完全相同的 GPA 范围！** KVM 不允许 memslot 重叠，后执行的那个必然失败：
+
+```
+如果事件2先执行:
+  → Dev1 BAR2 memslot [0x8000200000, 64KB] 注册成功
+  → 事件3: Dev2 BAR4 memslot 与 Dev1 重叠 → KVM 拒绝注册
+  → Dev2 BAR4 S2 无映射
+
+如果事件3先执行:
+  → Dev2 BAR4 memslot [0x8000200000, 64KB] 注册成功
+  → 事件2: Dev1 BAR2 memslot 与 Dev2 重叠 → KVM 拒绝注册
+  → Dev1 BAR2 S2 无映射 ← 触发 SEA crash!
+```
+
+### 10.5 三份页表的完整变化流程
+
+**初始状态 (Device 1 单独)**:
+
+```
+Host S1 (TTBR0_EL2, QEMU 用户页表):
+  Dev1 BAR2 HVA → HPA (OK, mmap 成功)
+
+Host S2 (VTTBR_EL2, KVM):
+  GPA 0x8000200000 → HPA (Dev1 BAR2)  ✓
+  GPA 0x8000201000 → HPA (Dev1 BAR2)  ✓
+  ...                                  (共 64KB, 已建立)
+
+Guest S1 (TTBR0_EL1/TTBR1_EL1):
+  Guest ioremap BAR2 → GVA → GPA 0x8000200000  ✓
+
+TLB: 可能缓存了 GPA 0x8000200000 区域的 S2 翻译
+```
+
+**事件1: KVM Region DEL — 删除 Dev1 BAR2 的整个 64KB memslot**:
+
+```
+操作:
+  KVM: KVM_SET_USER_MEMORY_REGION(memslot_old, remove=true)
+  KVM 内核: 扫描 VTTBR_EL2 指向的 S2 页表
+    → 找到 memslot 覆盖的所有 PTE
+    → 清除 S2 PTE (标记为 invalid)
+    → dsb ishst + tlbi 刷新 TLB
+
+执行后:
+  Host S2:
+    GPA 0x8000200000 → INVALID  ✗  (PTE cleared)
+    GPA 0x8000201000 → INVALID  ✗
+    ...                            (64KB 全部清空)
+  TLB: 已刷新, 无残留
+```
+
+**事件2 + 事件3: KVM Region ADD — 两个 memslot 注册冲突**:
+
+```
+假设事件2先执行, 事件3后执行:
+
+事件2 先:
+  KVM: KVM_SET_USER_MEMORY_REGION(GPA=0x8000200000, size=0x10000, HVA=Dev1_BAR2_HVA)
+  KVM: get_user_pages(HVA) → 查 Host S1 (TTBR0_EL2) → HPA = Dev1 BAR2
+  KVM: 填 S2 PTE: GPA 0x8000200000 → HPA (Dev1 BAR2)  ✓
+  → Dev1 BAR2 S2 已恢复!
+
+事件3 后:
+  KVM: KVM_SET_USER_MEMORY_REGION(GPA=0x8000208000, size=..., HVA=Dev2_BAR4_HVA)
+  KVM: 发现该 GPA 范围 [0x8000208000, ...] 与已有 memslot [0x8000200000, 64KB] 重叠!
+  → 拒绝注册, 返回 -EINVAL
+  → Dev2 BAR4 S2 无映射
+
+最终 Host S2 状态:
+  GPA 0x8000200000 → HPA (Dev1 BAR2)  ✓  ← Dev1 OK (事件2 成功)
+  GPA 0x8000208000 → INVALID          ✗  ← Dev2 的 BAR4 前 32KB 无映射
+
+但如果是事件3先于事件2:
+
+事件3 先:
+  → Dev2 BAR4 memslot [0x8000200000, 64KB] 注册成功
+
+事件2 后:
+  → 与 Dev2 memslot 重叠 → 拒绝!
+  → Dev1 BAR2 S2 无映射!
+
+最终 Host S2 状态:
+  GPA 0x8000200000 → INVALID  ✗  ← Dev1 BAR2 无映射!
+  ...
+  → Guest 访问 Dev1 BAR2 → S2 Translation Fault
+  → KVM: ISV=0 (ldp) → KVM_EXIT_ARM_NISV → SEA → Guest panic
+```
+
+### 10.6 为什么 Root Port 能解决问题
+
+PCIe Root Port 创建独立的 PCI bus，每个 bus 有独立的 `address_space_mem`：
+
+```
+有 Root Port (独立 bus):
+
+  Root Port 1 address_space_mem:       Root Port 2 address_space_mem:
+  ┌────────────────────────────┐       ┌────────────────────────────┐
+  │ Dev1 BAR4 (2MB)           │       │ Dev2 BAR4 (2MB)           │
+  │ Dev1 BAR2 MR (64KB)       │       │ Dev2 BAR2 MR (64KB)       │
+  └────────────────────────────┘       └────────────────────────────┘
+         ↑ 独立的 MR namespace                ↑ 独立的 MR namespace
+
+Flat View 对比:
+  旧: Section1 (Dev1 BAR2, 64KB)    ← 来自 PCI Bus 1
+  新: Section1 (Dev1 BAR2, 64KB)    ← 来自 PCI Bus 1, 完全不涉及 PCI Bus 2
+     Section2 (Dev2 BAR4, 2MB)      ← 来自 PCI Bus 2 bridge alias
+     Section3 (Dev2 BAR2, 64KB)     ← 来自 PCI Bus 2 bridge alias
+
+  → 两个 bus 的 MR 独立, 不会重叠
+  → Flat View 不会截断 Dev1 BAR2
+  → KVM memslot 不冲突
+  → S2 正常
+```
+
+### 10.7 正确的修复方案
+
+仅仅对齐 `hisi_acc_get_resource_len` 是不够的，还需要确保 **Guest 看到的 BAR2 大小与 QEMU 注册的 MR 大小一致**。需要同步修改：
+
+1. **`hisi_acc_get_resource_len`**: 返回 `PAGE_ALIGN(len)` 或完整 BAR size
+2. **`hisi_acc_vfio_pci_read`/`hisi_acc_vfio_pci_write`**: 不再拦截 offset >= 32KB 的访问（或者至少让 VFIO_DEVICE_GET_REGION_INFO 报告的 size 与允许访问的 range 一致）
+3. **确保 BAR 可写 mask 返回的值与 VFIO_DEVICE_GET_REGION_INFO 报告的 size 一致**，让 Guest 正确认知 BAR2 大小
+
+或者直接使用方案1（PF_CTRL 模式），从根源上消除 BAR2 截断问题。
+
 
 ## 11. 三份页表、VHE 模式、Host S1 映射与 MMIO 仿真机制
 

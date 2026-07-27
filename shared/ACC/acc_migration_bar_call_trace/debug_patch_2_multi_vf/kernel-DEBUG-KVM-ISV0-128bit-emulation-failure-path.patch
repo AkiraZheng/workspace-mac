@@ -1,0 +1,41 @@
+From 41a17afce861796a9d6c46ad167daece23ae9354 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Mon, 27 Jul 2026 09:44:55 +0800
+Subject: [PATCH 1/2] DEBUG: add trace_printk for KVM ISV=0 128-bit emulation
+ failure path
+
+---
+ arch/arm64/kvm/mmio.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/arch/arm64/kvm/mmio.c b/arch/arm64/kvm/mmio.c
+index 7d95412261f2..5583b31b73e8 100644
+--- a/arch/arm64/kvm/mmio.c
++++ b/arch/arm64/kvm/mmio.c
+@@ -180,6 +180,14 @@ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
+ 	 * volunteered to do so, and bail out otherwise.
+ 	 */
+ 	if (!kvm_vcpu_dabt_isvalid(vcpu)) {
++		trace_printk("DEBUG: %s ISV=0 (no valid syndrome), likely 128-bit ldp/stp "
++			"or other unsupported instruction, fault_ipa=%#llx, "
++			"ESR=%#08x, DFSC=%#x, HFA=%#016llx\n",
++			__func__, fault_ipa,
++			kvm_vcpu_get_esr(vcpu),
++			kvm_vcpu_get_esr(vcpu) & 0x3f,
++			kvm_vcpu_get_hfar(vcpu));
++
+ 		if (vcpu_is_rec(vcpu)) {
+ 			kvm_inject_dabt(vcpu, kvm_vcpu_get_hfar(vcpu));
+ 			return 1;
+@@ -187,6 +195,8 @@ int io_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa)
+ 
+ 		if (test_bit(KVM_ARCH_FLAG_RETURN_NISV_IO_ABORT_TO_USER,
+ 			     &vcpu->kvm->arch.flags)) {
++			trace_printk("DEBUG: %s returning KVM_EXIT_ARM_NISV to userspace "
++				"(QEMU), will inject SEA to guest\n", __func__);
+ 			run->exit_reason = KVM_EXIT_ARM_NISV;
+ 			run->arm_nisv.esr_iss = kvm_vcpu_dabt_iss_nisv_sanitized(vcpu);
+ 			run->arm_nisv.fault_ipa = fault_ipa;
+-- 
+2.43.0
+

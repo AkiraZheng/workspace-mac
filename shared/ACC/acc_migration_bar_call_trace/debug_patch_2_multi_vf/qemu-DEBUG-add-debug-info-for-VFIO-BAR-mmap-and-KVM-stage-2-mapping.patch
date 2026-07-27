@@ -1,0 +1,149 @@
+From 131487fc21a2ef271f3f8f744283a515c80aaa2b Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Thu, 23 Jul 2026 13:59:28 +0800
+Subject: [QEMU] DEBUG: add debug info for VFIO BAR mmap and KVM stage-2
+ mapping
+
+---
+ accel/kvm/kvm-all.c | 21 +++++++++++++++++++++
+ hw/vfio/helpers.c   | 19 +++++++++++++++++++
+ hw/vfio/pci.c       | 26 +++++++++++++++++++++++++-
+ 3 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
+index e2807157cb..d289ea85a0 100644
+--- a/accel/kvm/kvm-all.c
++++ b/accel/kvm/kvm-all.c
+@@ -1337,6 +1337,11 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
+ 
+     if (!memory_region_is_ram(mr)) {
+         if (writable || !kvm_readonly_mem_allowed) {
++            error_report("DEBUG: kvm_set_phys_mem SKIP non-RAM mr=%s "
++                         "mr->ram=%d mr->ram_device=%d size=%#" HWADDR_PRIx
++                         " -> no KVM memslot, no stage-2 mapping",
++                         memory_region_name(mr), mr->ram, mr->ram_device,
++                         int128_get64(section->size));
+             return;
+         } else if (!mr->romd_mode) {
+             /* If the memory device is not in romd_mode, then we actually want
+@@ -1347,9 +1352,25 @@ static void kvm_set_phys_mem(KVMMemoryListener *kml,
+ 
+     size = kvm_align_section(section, &start_addr);
+     if (!size) {
++        error_report("DEBUG: kvm_set_phys_mem SKIP zero-aligned mr=%s "
++                     "mr->ram=%d mr->ram_device=%d "
++                     "section_size=%#" HWADDR_PRIx
++                     " section_offset=%#" HWADDR_PRIx
++                     " host_page_size=%#lx -> kvm_align_section returned 0",
++                     memory_region_name(mr), mr->ram, mr->ram_device,
++                     int128_get64(section->size),
++                     section->offset_within_address_space,
++                     qemu_real_host_page_size());
+         return;
+     }
+ 
++    error_report("DEBUG: kvm_set_phys_mem REGISTER mr=%s mr->ram=%d "
++                 "mr->ram_device=%d start_addr=%#" HWADDR_PRIx
++                 " size=%#" HWADDR_PRIx " -> KVM memslot registered, "
++                 "stage-2 mapping created",
++                 memory_region_name(mr), mr->ram, mr->ram_device,
++                 start_addr, size);
++
+     /* The offset of the kvmslot within the memory region */
+     mr_offset = section->offset_within_region + start_addr -
+         section->offset_within_address_space;
+diff --git a/hw/vfio/helpers.c b/hw/vfio/helpers.c
+index 1f3bfed917..a672686782 100644
+--- a/hw/vfio/helpers.c
++++ b/hw/vfio/helpers.c
+@@ -412,6 +412,14 @@ int vfio_region_mmap(VFIORegion *region)
+     prot |= region->flags & VFIO_REGION_INFO_FLAG_WRITE ? PROT_WRITE : 0;
+ 
+     for (i = 0; i < region->nr_mmaps; i++) {
++        error_report("DEBUG: vfio_region_mmap region=%s index=%d mmap_size=%#lx "
++                     "host_page_size=%#lx requesting_mmap_size=%#lx",
++                     memory_region_name(region->mem), i,
++                     region->mmaps[i].size,
++                     qemu_real_host_page_size(),
++                     region->mmaps[i].size < qemu_real_host_page_size()
++                         ? qemu_real_host_page_size() : region->mmaps[i].size);
++
+         region->mmaps[i].mmap = mmap(NULL, region->mmaps[i].size, prot,
+                                      MAP_SHARED, region->vbasedev->fd,
+                                      region->fd_offset +
+@@ -419,6 +427,12 @@ int vfio_region_mmap(VFIORegion *region)
+         if (region->mmaps[i].mmap == MAP_FAILED) {
+             int ret = -errno;
+ 
++            error_report("DEBUG: vfio_region_mmap FAILED region=%s index=%d "
++                         "mmap_size=%#lx errno=%d(%s) PAGE_SIZE=%#lx",
++                         memory_region_name(region->mem), i,
++                         region->mmaps[i].size, -ret, strerror(-ret),
++                         qemu_real_host_page_size());
++
+             trace_vfio_region_mmap_fault(memory_region_name(region->mem), i,
+                                          region->fd_offset +
+                                          region->mmaps[i].offset,
+@@ -435,6 +449,11 @@ int vfio_region_mmap(VFIORegion *region)
+             return ret;
+         }
+ 
++        error_report("DEBUG: vfio_region_mmap SUCCESS region=%s index=%d "
++                     "mmap_ptr=%p mmap_size=%#lx -> ram_device created",
++                     memory_region_name(region->mem), i,
++                     region->mmaps[i].mmap, region->mmaps[i].size);
++
+         name = g_strdup_printf("%s mmaps[%d]",
+                                memory_region_name(region->mem), i);
+         memory_region_init_ram_device_ptr(&region->mmaps[i].mem,
+diff --git a/hw/vfio/pci.c b/hw/vfio/pci.c
+index be7dc6787e..23e8740441 100644
+--- a/hw/vfio/pci.c
++++ b/hw/vfio/pci.c
+@@ -1177,9 +1177,21 @@ static void vfio_sub_page_bar_update_mapping(PCIDevice *pdev, int bar)
+     pcibus_t bar_addr;
+     uint64_t size = region->size;
+ 
++    error_report("DEBUG: vfio_sub_page_bar_update_mapping BAR%d "
++                 "nr_mmaps=%d mmaps[0].mmap=%p mmaps[0].size=%#lx "
++                 "region_size=%#lx host_page_size=%#lx",
++                 bar, region->nr_mmaps,
++                 region->nr_mmaps > 0 ? region->mmaps[0].mmap : NULL,
++                 region->nr_mmaps > 0 ? region->mmaps[0].size : 0,
++                 region->size, qemu_real_host_page_size());
++
+     /* Make sure that the whole region is allowed to be mmapped */
+     if (region->nr_mmaps != 1 || !region->mmaps[0].mmap ||
+         region->mmaps[0].size != region->size) {
++        error_report("DEBUG: vfio_sub_page_bar_update_mapping BAR%d "
++                     "SKIPPED: nr_mmaps!=1 or mmap=NULL or size mismatch -> "
++                     "no sub-page expansion, BAR stays as IO type",
++                     bar);
+         return;
+     }
+ 
+@@ -1799,8 +1811,20 @@ static void vfio_bar_register(VFIOPCIDevice *vdev, int nr)
+     if (bar->region.size) {
+         memory_region_add_subregion(bar->mr, 0, bar->region.mem);
+ 
++        error_report("DEBUG: vfio_bar_register %s BAR%d bar_size=%#lx "
++                     "region_size=%#lx nr_mmaps=%d host_page_size=%#lx "
++                     "bar_size<PAGE_SIZE=%d",
++                     vdev->vbasedev.name, nr, bar->size, bar->region.size,
++                     bar->region.nr_mmaps, qemu_real_host_page_size(),
++                     bar->size < qemu_real_host_page_size());
++
+         if (vfio_region_mmap(&bar->region)) {
+-            error_report("Failed to mmap %s BAR %d. Performance may be slow",
++            error_report("DEBUG: vfio_bar_register %s BAR%d mmap FAILED -> "
++                         "BAR is IO type (no ram_device), no stage-2 mapping",
++                         vdev->vbasedev.name, nr);
++        } else {
++            error_report("DEBUG: vfio_bar_register %s BAR%d mmap SUCCESS -> "
++                         "BAR has ram_device subregion, stage-2 mapping enabled",
+                          vdev->vbasedev.name, nr);
+         }
+     }
+-- 
+2.43.0
+
