@@ -1,23 +1,22 @@
-From 10713680949834819b1b6301d39743decc152db9 Mon Sep 17 00:00:00 2001
+From 9cec1caea13988170799f283f83c5a192379503a Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Thu, 23 Jul 2026 13:59:21 +0800
-Subject: [PATCH] DEBUG: add debug info for hisi_acc_vfio_pci BAR2 mmap on 64KB
- page
+Subject: [PATCH 3/3] DEBUG: add trace_printk for hisi_acc_vfio_pci BAR2 mmap
+ on 64KB page
 
 ---
- .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    | 42 ++++++++++++-------
- 1 file changed, 28 insertions(+), 14 deletions(-)
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    | 38 ++++++++++++-------
+ 1 file changed, 24 insertions(+), 14 deletions(-)
 
 diff --git a/drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c b/drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c
-index 5e99cac7665b..b12a78e7af14 100644
+index 5e99cac7665b..acec66c74ea2 100644
 --- a/drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c
 +++ b/drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c
-@@ -1245,6 +1245,12 @@ static int hisi_acc_vf_qm_init(struct hisi_acc_vf_core_device *hisi_acc_vdev)
+@@ -1245,6 +1245,11 @@ static int hisi_acc_vf_qm_init(struct hisi_acc_vf_core_device *hisi_acc_vdev)
  	else
  		hisi_acc_vdev->drv_mode = HW_ACC_MIG_VF_CTRL;
  
-+	dev_info(&vf_dev->dev,
-+		 "DEBUG: %s pf_ver=%#x mig_region_sel=%#x drv_mode=%s(%d) PAGE_SIZE=%#lx\n",
++	trace_printk("DEBUG: %s pf_ver=%#x mig_region_sel=%#x drv_mode=%s(%d) PAGE_SIZE=%#lx\n",
 +		 __func__, pf_qm->ver, val,
 +		 hisi_acc_vdev->drv_mode == HW_ACC_MIG_PF_CTRL ? "PF_CTRL" : "VF_CTRL",
 +		 hisi_acc_vdev->drv_mode, PAGE_SIZE);
@@ -25,7 +24,7 @@ index 5e99cac7665b..b12a78e7af14 100644
  	if (hisi_acc_vdev->drv_mode == HW_ACC_MIG_PF_CTRL) {
  		/*
  		 * On hardware platforms greater than QM_HW_V3, the migration function
-@@ -1322,21 +1328,23 @@ static size_t hisi_acc_get_resource_len(struct vfio_pci_core_device *vdev,
+@@ -1322,21 +1327,21 @@ static size_t hisi_acc_get_resource_len(struct vfio_pci_core_device *vdev,
  {
  	struct hisi_acc_vf_core_device *hisi_acc_vdev =
  			hisi_acc_drvdata(vdev->pdev);
@@ -49,26 +48,23 @@ index 5e99cac7665b..b12a78e7af14 100644
 +
 +	if (hisi_acc_vdev->drv_mode == HW_ACC_MIG_VF_CTRL) {
 +		ret_len = bar_len >> 1;
-+		dev_info(&vdev->pdev->dev,
-+			 "DEBUG: %s drv_mode=VF_CTRL index=%u bar_len=%#lx ret_len=%#lx PAGE_SIZE=%#lx ret_len<PAGE_SIZE=%d\n",
++		trace_printk("DEBUG: %s drv_mode=VF_CTRL index=%u bar_len=%#lx ret_len=%#lx PAGE_SIZE=%#lx ret_len<PAGE_SIZE=%d\n",
 +			 __func__, index, bar_len, ret_len, PAGE_SIZE,
 +			 ret_len < PAGE_SIZE);
 +		return ret_len;
 +	}
 +
-+	dev_info(&vdev->pdev->dev,
-+		 "DEBUG: %s drv_mode=PF_CTRL index=%u bar_len=%#lx PAGE_SIZE=%#lx\n",
++	trace_printk("DEBUG: %s drv_mode=PF_CTRL index=%u bar_len=%#lx PAGE_SIZE=%#lx\n",
 +		 __func__, index, bar_len, PAGE_SIZE);
 +	return bar_len;
  }
  
  static int hisi_acc_pci_rw_access_check(struct vfio_device *core_vdev,
-@@ -1380,6 +1388,12 @@ static int hisi_acc_vfio_pci_mmap(struct vfio_device *core_vdev,
+@@ -1380,6 +1385,11 @@ static int hisi_acc_vfio_pci_mmap(struct vfio_device *core_vdev,
  			((1U << (VFIO_PCI_OFFSET_SHIFT - PAGE_SHIFT)) - 1);
  		req_start = pgoff << PAGE_SHIFT;
  
-+		dev_info(&vdev->pdev->dev,
-+			 "DEBUG: %s BAR2 mmap check: end=%#llx req_start=%#llx req_len=%#llx req_start+req_len=%#llx > end=%d PAGE_SIZE=%#lx\n",
++		trace_printk("DEBUG: %s BAR2 mmap check: end=%#llx req_start=%#llx req_len=%#llx req_start+req_len=%#llx > end=%d PAGE_SIZE=%#lx\n",
 +			 __func__, end, req_start, req_len,
 +			 req_start + req_len,
 +			 req_start + req_len > end, PAGE_SIZE);
