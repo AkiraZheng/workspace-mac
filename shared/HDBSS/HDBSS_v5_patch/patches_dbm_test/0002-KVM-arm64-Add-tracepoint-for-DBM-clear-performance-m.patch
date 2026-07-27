@@ -1,26 +1,24 @@
-From 82c0cd0c4cf133f5924ab3aa32d6705c790dea82 Mon Sep 17 00:00:00 2001
+From 221a7ffbe6a3dddd88daa2977c182a7aefb931dd Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
-Date: Mon, 27 Jul 2026 09:28:00 +0800
+Date: Mon, 27 Jul 2026 10:43:27 +0800
 Subject: [PATCH 2/2] KVM: arm64: Add tracepoint for DBM-clear performance
  measurement
 
 Add a trace_kvm_clear_dbm() tracepoint that records the elapsed time of
 the DBM-clearing page table walk and the total time spent in the logging
-branch of kvm_arch_commit_memory_region().
-
-The tracepoint outputs:
-- slot: memslot index
-- npages: number of pages in the memslot
-- dbm_clr: nanoseconds spent clearing DBM
-- total: nanoseconds spent in the full logging branch (DBM-clear + wrprotect + split)
-- percentage: DBM-clear overhead relative to the total
+branch of kvm_arch_commit_memory_region().  Outputs slot index, number
+of pages, DBM-clear duration (ns), and total branch duration (ns).
+Userspace can compute the overhead percentage from these values.
 
 Zero cost when disabled (nop).  Enable with:
   echo 1 > /sys/kernel/debug/tracing/events/kvm/kvm_clear_dbm/enable
+
+Note: TP_printk avoids floating-point arithmetic because the arm64
+kernel is built with -mgeneral-regs-only.
 ---
  arch/arm64/kvm/mmu.c       | 12 ++++++++++++
- include/trace/events/kvm.h | 28 ++++++++++++++++++++++++++++
- 2 files changed, 40 insertions(+)
+ include/trace/events/kvm.h | 26 ++++++++++++++++++++++++++
+ 2 files changed, 38 insertions(+)
 
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
 index aaa8bacfcf0a..66ff6fd7aab4 100644
@@ -71,10 +69,10 @@ index aaa8bacfcf0a..66ff6fd7aab4 100644
  		/*
  		 * Free any leftovers from the eager page splitting cache. Do
 diff --git a/include/trace/events/kvm.h b/include/trace/events/kvm.h
-index b282e3a86769..18b36d2de44c 100644
+index b282e3a86769..22468c7d64f8 100644
 --- a/include/trace/events/kvm.h
 +++ b/include/trace/events/kvm.h
-@@ -436,6 +436,34 @@ TRACE_EVENT(kvm_test_age_hva,
+@@ -436,6 +436,32 @@ TRACE_EVENT(kvm_test_age_hva,
  	TP_printk("mmu notifier test age hva: %#016lx", __entry->hva)
  );
  
@@ -99,11 +97,9 @@ index b282e3a86769..18b36d2de44c 100644
 +		__entry->total_ns	= total_ns;
 +	),
 +
-+	TP_printk("slot=%d npages=%lu "
-+		  "dbm_clr=%llu ns total=%llu ns (%.1f%%)",
++	TP_printk("slot=%d npages=%lu dbm_clr=%llu ns total=%llu ns",
 +		__entry->slot, __entry->npages,
-+		__entry->dbm_ns, __entry->total_ns,
-+		(double)__entry->dbm_ns * 100 / (__entry->total_ns ?: 1))
++		__entry->dbm_ns, __entry->total_ns)
 +);
 +
  #endif /* _TRACE_KVM_MAIN_H */
