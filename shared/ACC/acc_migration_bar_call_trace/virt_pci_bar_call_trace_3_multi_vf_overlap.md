@@ -67,7 +67,8 @@ end = ALIGN(end, PAGE_SIZE);                     // 修复: 64KB
 if (req_start + req_len > end)                   // 0+64KB > 64KB → pass
 ```
 
-→ mmap 成功 → ram_device MR = **64KB** ✅
+→ mmap 成功 → ram_device MR 创建 (初始 size = `mmaps[0].size` = 32KB)
+→ 后续 `vfio_sub_page_bar_update_mapping` 将 MR size 扩到 **64KB** ✅
 
 ### 2.3 两个路径的值不同
 
@@ -231,6 +232,206 @@ static void vfio_sub_page_bar_update_mapping(PCIDevice *pdev, int bar)
 ```
 
 **对比**：原始 BAR 注册 (`pci_update_mappings`, 第1篇 8.1) 用 priority=1。
+
+### 4.2.1 MR 数据结构层级：ram_device MR 存在哪里？
+
+三层 MR 是**嵌套的父子关系**，每层对应一个数据结构字段：
+
+```
+VFIOBAR (hw/vfio/pci.h:50)
+├─ MemoryRegion *mr;              ← 第0层: base BAR container (IO 类型)
+├─ size_t size;                   ← VFIOBAR.size = 32KB (不改!)
+└─ VFIORegion region;             (include/hw/vfio/vfio-common.h:54)
+   ├─ MemoryRegion *mem;          ← 第1层: VFIO slow path MR (读写回调)
+   ├─ size_t size;                ← VFIORegion.size = 32KB (不改!)
+   └─ VFIOMmap *mmaps;            (include/hw/vfio/vfio-common.h:47)
+      └─ mmaps[0]
+         ├─ MemoryRegion mem;     ← 第2层: ram_device MR (嵌入式结构体, 不是指针!)
+         ├─ void *mmap;           ← mmap'd host 指针 (存入 ram_block->host)
+         └─ size_t size;          ← VFIOMmap.size = 32KB (不改!)
+```
+
+**ram_device MR 是 `bar->region.mmaps[0].mem`**——它是 `VFIOMmap` 结构体里**嵌入的** `MemoryRegion`（不是指针，是结构体的一部分），被持久化存储在堆内存中。
+
+创建位置在 `hw/vfio/helpers.c:469-472`：
+
+```c
+memory_region_init_ram_device_ptr(&region->mmaps[i].mem,   // ← ram_device MR
+                                  memory_region_owner(region->mem),
+                                  name, region->mmaps[i].size,  // ← 初始 32KB
+                                  region->mmaps[i].mmap);       // ← mmap 指针存入 ram_block->host
+```
+
+`memory_region_init_ram_device_ptr` (`system/memory.c:1703-1720`) 设置：
+
+```c
+mr->ram = true;
+mr->terminates = true;           // ← 终止节点: FlatView 渲染到这里生成 FlatRange
+mr->ram_device = true;           // ← KVM 通过此标志判断是否建 memslot
+mr->ram_block = qemu_ram_alloc_from_ptr(size, ptr, mr, ...);
+//                              ↑ size=32KB    ↑ ptr=mmap'd 指针
+//  ram_block->host = ptr (mmap'd 指针, 后续 KVM 用它取 HVA)
+//  ram_block->size = 32KB (不随 mr->size 变化而改变)
+```
+
+`MemoryRegion` 结构体关键字段 (`include/exec/memory.h:892-939`)：
+
+```c
+struct MemoryRegion {
+    ...
+    Int128 size;                  // ← 第917行: MR 的大小 (sub_page_bar 会改这个!)
+    hwaddr addr;                  // ← 在父地址空间中的偏移
+    bool ram;                     // ← true (是 RAM 类型)
+    bool terminates;              // ← true (终止节点, FlatView 到此为止)
+    bool ram_device;              // ← true (KVM 据此建 memslot)
+    RAMBlock *ram_block;          // ← 存储 mmap'd 指针和原始大小
+    int32_t priority;             // ← 在父的子链表中的优先级
+    QTAILQ_HEAD(, MemoryRegion) subregions;  // ← 子 MR 链表
+    ...
+};
+```
+
+### 4.2.2 memory_region_set_size：直接改 MemoryRegion.size 字段
+
+`memory_region_set_size` (`system/memory.c:2772-2786`) 的实现非常简单——**直接写 `mr->size` 字段**：
+
+```c
+void memory_region_set_size(MemoryRegion *mr, uint64_t size)
+{
+    Int128 s = int128_make64(size);
+    if (size == UINT64_MAX) {
+        s = int128_2_64();
+    }
+    if (int128_eq(s, mr->size)) {
+        return;                   // 大小没变, 跳过
+    }
+    memory_region_transaction_begin();
+    mr->size = s;                 // ★ 直接写 MemoryRegion.size 字段! 持久化!
+    memory_region_update_pending = true;
+    memory_region_transaction_commit();
+}
+```
+
+**是的，扩展到 64KB 的修改会持久化在 `MemoryRegion` 结构体中。** `mr->size` 从 `int128_make64(0x8000)` 变成 `int128_make64(0x10000)`，后续所有读取 `mr->size` 的代码（包括 FlatView 渲染）都会看到 64KB。
+
+### 4.2.3 vfio_sub_page_bar_update_mapping 改了什么、没改什么
+
+`vfio_sub_page_bar_update_mapping` (`hw/vfio/pci.c:1198-1223`) 获取三个 MR 指针并调用 `memory_region_set_size`：
+
+```c
+base_mr   = vdev->bars[bar].mr;           // bar->mr (第0层)
+region_mr = region->mem;                   // bar->region.mem (第1层)
+mmap_mr   = &region->mmaps[0].mem;         // bar->region.mmaps[0].mem (第2层, ram_device)
+
+// 改 MemoryRegion.size (Int128):
+if (vdev->bars[bar].size < size)
+    memory_region_set_size(base_mr, size);     // bar->mr->size: 32KB → 64KB
+memory_region_set_size(region_mr, size);       // region->mem->size: 32KB → 64KB
+memory_region_set_size(mmap_mr, size);         // mmaps[0].mem.size: 32KB → 64KB
+
+// 从地址空间删除旧 MR, 以 priority=0 重新加回:
+memory_region_del_subregion(r->address_space, base_mr);
+memory_region_add_subregion_overlap(r->address_space, bar_addr, base_mr, 0);
+```
+
+**改的是 `MemoryRegion.size` 字段（`Int128`），不是指针。** 三个 MR 指针本身不变，指向的 `MemoryRegion` 结构体中的 `.size` 字段被修改。
+
+**完整对比：哪些字段改了、哪些没改**
+
+| 数据结构 | 字段 | 类型 | sub_page_bar 改? | 初始值 | 改后值 | 作用 |
+|---|---|---|---|---|---|---|
+| `bar->mr` | `.size` | `Int128` | **改** | 32KB | **64KB** | FlatView 渲染用此 size |
+| `region->mem` | `.size` | `Int128` | **改** | 32KB | **64KB** | FlatView 渲染用此 size |
+| `mmaps[0].mem` | `.size` | `Int128` | **改** | 32KB | **64KB** | FlatView 渲染用此 size (终止节点) |
+| `bar->mr` | `.priority` | `int32_t` | **改** | 1 | **0** | QTAILQ 排序用 |
+| `bar->mr` | `.addr` | `hwaddr` | 不改 | GPA | GPA | 在父地址空间中的偏移 |
+| `mmaps[0].mem` | `.ram_device` | `bool` | 不改 | true | true | KVM 判断是否建 memslot |
+| `mmaps[0].mem` | `.ram_block->host` | `void*` | 不改 | mmap指针 | mmap指针 | KVM 取 HVA 用 |
+| `mmaps[0].mem` | `.ram_block->size` | `ram_addr_t` | 不改 | 32KB | 32KB | RAMBlock 原始大小 (不随 MR.size 变) |
+| `bar->size` | (VFIOBAR.size) | `size_t` | **不改** | 32KB | 32KB | VFIO 层记录的 BAR 大小 |
+| `region->size` | (VFIORegion.size) | `size_t` | **不改** | 32KB | 32KB | sub_page_bar 触发条件检查用 |
+| `mmaps[0].size` | (VFIOMmap.size) | `size_t` | **不改** | 32KB | 32KB | mmap 信息记录 |
+| `r->size` | (PCIIORegion.size) | `pcibus_t` | **不改** | 32KB | 32KB | PCI 台账, Guest 通过 wmask 读到 |
+
+**关键区别**：
+- `MemoryRegion.size`（`Int128`）→ **被改**，FlatView 渲染时读这个 → 渲染出 64KB 的 FlatRange
+- `VFIOBAR.size` / `VFIORegion.size` / `VFIOMmap.size` / `PCIIORegion.size`（`size_t` / `pcibus_t`）→ **不被改**，仍是 32KB
+
+这就是为什么 sub_page_bar 触发条件 (`pci.c:1343` `vdev->bars[bar].region.size < qemu_real_host_page_size()`) 每次都成立——它检查的是 `VFIORegion.size`（不改），不是 `MemoryRegion.size`（已改）。
+
+### 4.2.4 各 size 变量的关系：它们不是同一个字段
+
+这些 size 分布在 **5 个不同的结构体** 中，类型也不同，只是初始值都来源于 ioctl 返回的 32KB。`memory_region_set_size` 只改 `MemoryRegion.size`，不会反向同步到其他结构体。
+
+**初始赋值链路**（QEMU 启动时，ioctl 返回 32KB 后一次性赋值）：
+
+```
+ioctl(VFIO_DEVICE_GET_REGION_INFO) → info.size = 32KB
+  │
+  │  vfio_region_setup (helpers.c:370)
+  ├─→ VFIORegion.size = info.size = 32KB           (size_t,      vfio-common.h:58)
+  │     │
+  │     │  vfio_bar_prepare (pci.c:1785)
+  │     ├─→ VFIOBAR.size = bar->region.size = 32KB  (size_t,      pci.h:53)
+  │     │
+  │     │  vfio_region_setup (helpers.c:388)
+  │     ├─→ VFIOMmap.size = region->size = 32KB     (size_t,      vfio-common.h:51)
+  │     │
+  │     │  vfio_bar_register (pci.c:1808)
+  │     ├─→ memory_region_init_io(bar->mr, ..., bar->size=32KB)
+  │     │     → bar->mr->size = 32KB                (Int128,      memory.h:917)  ← 被改!
+  │     │
+  │     │  vfio_region_setup (helpers.c, region->mem 创建)
+  │     ├─→ region->mem->size = 32KB                (Int128,      memory.h:917)  ← 被改!
+  │     │
+  │     │  vfio_region_mmap → memory_region_init_ram_device_ptr (helpers.c:469)
+  │     │     ├─→ mmaps[0].mem.size = mmaps[0].size = 32KB
+  │     │     │                                (Int128,      memory.h:917)  ← 被改!
+  │     │     │
+  │     │     └─→ ram_block = qemu_ram_alloc_from_ptr(size=32KB, ptr)
+  │     │           → ram_block->size = 32KB        (ram_addr_t,  RAMBlock)     ← 不改
+  │     │
+  │     │  pci_register_bar (pci.c:1298)
+  │     └─→ PCIIORegion.size = memory_region_size(bar->mr) = 32KB
+  │                                    (pcibus_t,   PCIIORegion)               ← 不改
+  │
+  └─ 以上赋值都是 QEMU 启动时一次性完成, 之后各字段独立存在, 无同步机制
+```
+
+**sub_page_bar 触发后**（Guest 写 BAR 寄存器时）：
+
+```
+memory_region_set_size(bar->mr,       64KB)  → 只改 MemoryRegion.size  ✓
+memory_region_set_size(region->mem,   64KB)  → 只改 MemoryRegion.size  ✓
+memory_region_set_size(mmaps[0].mem,  64KB)  → 只改 MemoryRegion.size  ✓
+
+不触及:
+  VFIOBAR.size         (size_t)    仍 32KB  ✗
+  VFIORegion.size      (size_t)    仍 32KB  ✗
+  VFIOMmap.size        (size_t)    仍 32KB  ✗
+  PCIIORegion.size     (pcibus_t)  仍 32KB  ✗
+  ram_block->size      (ram_addr_t)仍 32KB  ✗
+```
+
+**它们不是同一个变量。** 每个结构体有自己的 size 字段，类型也不同（`Int128` vs `size_t` vs `pcibus_t` vs `ram_addr_t`）。`memory_region_set_size` 只写 `MemoryRegion.size`，其他结构体的 size 字段不会被自动同步。
+
+| 结构体 | size 字段 | 类型 | 定义位置 | sub_page_bar 改? | 初始来源 |
+|---|---|---|---|---|---|
+| `MemoryRegion` (bar->mr) | `.size` | `Int128` | `memory.h:917` | **改 → 64KB** | `memory_region_init_io(..., bar->size)` |
+| `MemoryRegion` (region->mem) | `.size` | `Int128` | `memory.h:917` | **改 → 64KB** | region setup 时设 |
+| `MemoryRegion` (mmaps[0].mem) | `.size` | `Int128` | `memory.h:917` | **改 → 64KB** | `memory_region_init_ram_device_ptr(..., mmaps[0].size)` |
+| `RAMBlock` | `.size` | `ram_addr_t` | `RAMBlock` | 不改 (32KB) | `qemu_ram_alloc_from_ptr(size=32KB)` |
+| `VFIOBAR` | `.size` | `size_t` | `pci.h:53` | 不改 (32KB) | `bar->size = bar->region.size` |
+| `VFIORegion` | `.size` | `size_t` | `vfio-common.h:58` | 不改 (32KB) | `region->size = info->size` |
+| `VFIOMmap` | `.size` | `size_t` | `vfio-common.h:51` | 不改 (32KB) | `mmaps[0].size = region->size` |
+| `PCIIORegion` | `.size` | `pcibus_t` | `PCIIORegion` | 不改 (32KB) | `r->size = memory_region_size(bar->mr)` |
+
+**为什么这很重要**：
+
+1. **FlatView 渲染**读的是 `MemoryRegion.size`（已改 64KB）→ 渲染出 64KB 的区间
+2. **sub_page_bar 触发条件** (`pci.c:1343`) 读的是 `VFIORegion.size`（不改 32KB）→ `32KB < 64KB` 永远成立
+3. **PCI 台账** (`PCIIORegion.size`) 不改 32KB → Guest 通过 BAR wmask 永远看到 32KB → Guest 按 32KB 间隔分配 GPA
+4. **ram_block->size** 不改 32KB → KVM 取 HVA 时 `memory_region_get_ram_ptr` 返回的是原始 mmap 指针（实际 mmap 了 64KB，但 ram_block 记录 32KB）
 
 ### 4.3 FlatView 渲染机制：为什么高 priority 会截断低 priority
 
@@ -437,7 +638,165 @@ Guest 访问 Dev1 BAR2 → S2 fault → ISV=0 → SEA
 
 **为什么不会死循环**: sub_page_bar 只在 `old_addr ≠ r->addr` 时触发（Guest 写 BAR 寄存器）。FlatView 截断改变的是 FlatView section 的大小，不会改变 `r->addr` 的值。两个 VF 的 BAR 各被 Guest 写一次后就稳定了——FlatView 不管重建多少次，QTAILQ 顺序不变，输出结果不变。
 
+### 4.5 FlatView 截断后传给 KVM 的数据结构
 
+**FlatView 渲染时按 64KB 注册**——因为 `vfio_sub_page_bar_update_mapping` 已经把三层 `MemoryRegion.size` 都改成了 64KB。`render_memory_region` (`system/memory.c:645`) 递归遍历子 MR，读到的是改后的 `mr->size = 64KB`。
+
+但渲染时遇到重叠，先渲染的 MR 占据 GPA，后渲染的 MR 只能填空隙 → 被截断。
+
+**截断发生在 FlatView 层面，不是 MR 层面。** MR 本身仍然是 64KB，但 FlatView 输出的 `FlatRange` 被截断为 32KB：
+
+`FlatRange` 结构体 (`system/memory.c:222-231`)：
+
+```c
+struct FlatRange {
+    MemoryRegion *mr;              // ← 指向 mmaps[0].mem (ram_device MR, 64KB)
+    hwaddr offset_in_region;       // ← 在 MR 内的偏移 (0)
+    AddrRange addr;                // ← .start = GPA, .size = 被截断的大小!
+    ...
+};
+```
+
+以 Dev1 为例，FlatView 最终输出的 FlatRange：
+
+```
+FlatRange {
+    .mr   = &Dev1->bar->region.mmaps[0].mem,   // ram_device MR (mr->size=64KB)
+    .addr = { .start = 0x8000_200000, .size = 0x8000 }  // ← 32KB! 被 Dev2 截断!
+}
+```
+
+**MR 是 64KB，但 FlatRange 的 `.addr.size` 是 32KB。** FlatRange 记录的是"这个 MR 在 GPA 空间中实际可用的区间"。
+
+**FlatRange → MemoryRegionSection → kvm_set_phys_mem**
+
+`section_from_flat_range` (`system/memory.c:236-249`) 把 FlatRange 转成 `MemoryRegionSection`：
+
+```c
+static inline MemoryRegionSection
+section_from_flat_range(FlatRange *fr, FlatView *fv)
+{
+    return (MemoryRegionSection) {
+        .mr = fr->mr,                                    // ram_device MR (64KB)
+        .size = fr->addr.size,                           // ← 32KB! (截断后的大小)
+        .offset_within_address_space = GPA,              // 0x8000_200000
+        .offset_within_region = 0,
+        ...
+    };
+}
+```
+
+`MemoryRegionSection` (`include/exec/memory.h:99-121`) 就是**传给 KVM 的数据结构**：
+
+```c
+struct MemoryRegionSection {
+    Int128 size;                                        // ← 32KB (来自被截断的 FlatRange)
+    MemoryRegion *mr;                                   // ← ram_device MR
+    hwaddr offset_within_address_space;                 // ← GPA (Guest 物理地址)
+    hwaddr offset_within_region;                        // ← 在 MR 内的偏移
+    bool readonly;
+    ...
+};
+```
+
+传递路径：
+
+```
+FlatView 重建
+  → listener 通知 (system/memory.c)
+    → kvm_region_add (accel/kvm/kvm-all.c:1584)
+      → 拷贝 section 到 KVMMemoryUpdate.section, 入队
+    → kvm_region_commit (kvm-all.c:1692)
+      → kvm_set_phys_mem(kml, &section, true)           ← section.size = 32KB
+```
+
+`kvm_set_phys_mem` (`accel/kvm/kvm-all.c:1338-1471`) 从 section 中提取信息：
+
+```c
+static void kvm_set_phys_mem(KVMMemoryListener *kml,
+                             MemoryRegionSection *section, bool add)
+{
+    MemoryRegion *mr = section->mr;                     // ram_device MR
+
+    if (!memory_region_is_ram(mr))                      // mr->ram=true → 不跳过
+        return;
+
+    size = kvm_align_section(section, &start_addr);     // ← 32KB section 传进去
+    if (!size) {                                        // ← 返回 0 → 跳过!
+        return;                                         //   不建 memslot!
+    }
+
+    // 正常路径 (64KB section 才走到这里):
+    mr_offset = section->offset_within_region + start_addr
+                - section->offset_within_address_space;
+    ram = memory_region_get_ram_ptr(mr) + mr_offset;   // ← 从 ram_block->host 取 HVA
+
+    // 组装 KVMSlot:
+    mem->start_addr = start_addr;                       // GPA
+    mem->memory_size = slot_size;                       // 64KB (页对齐后)
+    mem->ram = ram;                                     // HVA (mmap'd 指针)
+    kvm_set_user_memory_region(kml, mem, true);         // ioctl → KVM 内核建 S2 页表
+}
+```
+
+正常情况下（64KB section），KVM 组装的 `KVMSlot` (`include/sysemu/kvm_int.h:18-33`)：
+
+```c
+typedef struct KVMSlot {
+    hwaddr start_addr;            // GPA (Guest 物理地址) → S2 页表的输入
+    ram_addr_t memory_size;       // 大小 (页对齐) → S2 页表覆盖范围
+    void *ram;                    // HVA (mmap'd host 指针) → S2 页表的输出 (转 HPA)
+    int slot;
+    int flags;
+    ...
+};
+```
+
+`KVM_SET_USER_MEMORY_REGION` ioctl 把 `(GPA, HVA, size)` 传给 KVM 内核，KVM 据此建立 S2 页表映射：`GPA → HPA`。
+
+**但在 32KB section 的情况下，`kvm_align_section` 返回 0，走不到组装 KVMSlot 这一步。**
+
+### 4.6 根因定位：不是 FlatView 建不了，是 KVM 拒绝 32KB
+
+```
+问题: Dev1 的 ram_device MR 在 FlatView 中变成什么样了?
+
+回答: MR 本身仍是 64KB (mr->size=64KB, 被 memory_region_set_size 改了)。
+      但 FlatView 输出的 FlatRange 被截断为 32KB (因为 Dev2 的 MR 占了重叠区)。
+      FlatRange.mr 仍指向 64KB 的 ram_device MR,
+      但 FlatRange.addr.size = 32KB (实际可用区间)。
+
+问题: 传给 KVM 的是什么?
+
+回答: MemoryRegionSection {
+          .mr   = ram_device MR (64KB),
+          .size = 32KB (来自被截断的 FlatRange),
+          .offset_within_address_space = GPA
+      }
+      通过 kvm_region_add → kvm_region_commit → kvm_set_phys_mem 传递。
+
+问题: 根因是 FlatView 建不了还是 KVM 拒绝?
+
+回答: KVM 拒绝。FlatView 成功建立了 Dev1 的 section (32KB), 成功传递给 KVM listener。
+      但 kvm_align_section 把 32KB AND 64KB page mask → 得到 0 → 认为大小为 0 → 跳过。
+      不建 memslot → S2 无映射 → Guest 访问 → S2 fault → SEA。
+```
+
+数据流全景：
+
+```
+MemoryRegion (mr->size = 64KB)         ← sub_page_bar 改了
+    ↓ render_memory_region
+FlatRange (.mr = MR, .addr.size = 32KB)  ← FlatView 渲染时被截断
+    ↓ section_from_flat_range
+MemoryRegionSection (.mr = MR, .size = 32KB)  ← 传给 KVM listener
+    ↓ kvm_region_add → kvm_region_commit → kvm_set_phys_mem
+kvm_align_section(32KB)
+    ↓ 0x8000 & qemu_real_host_page_mask() = 0x8000 & 0xFFFF0000 = 0
+返回 0 → kvm_set_phys_mem return → 不建 memslot
+    ↓
+S2 页表: Dev1 BAR2 无映射 → Guest ldp → S2 fault → ISV=0 → SEA
+```
 
 ---
 
@@ -503,12 +862,15 @@ QEMU [EL0]:
   vfio_bar_prepare (pci.c:1785):
     bar->size = region.size = 32KB
   vfio_bar_register (pci.c:1797):
-    memory_region_init_io(bar->mr, ..., bar->size = 32KB)
+    memory_region_init_io(bar->mr, ..., bar->size = 32KB)     ← MR.size = 32KB
     vfio_region_mmap → mmap check:
       end = ALIGN(hisi_acc_get_resource_len(), PAGE_SIZE) = 64KB
-      → 通过 → ram_device MR = 64KB ← 修复的效果!
+      → 通过 → mmap 成功
+      → memory_region_init_ram_device_ptr(mmaps[0].mem, size=32KB, ptr)
+        ← ram_device MR 创建, mr->size = 32KB (不是 64KB!)
+        ← mr->ram_block->host = mmap 指针, ram_block->size = 32KB
     pci_register_bar (pci.c:1298):
-      r->size = memory_region_size(bar->mr) = 32KB
+      r->size = memory_region_size(bar->mr) = 32KB            ← PCI 台账 = 32KB
       wmask = ~(32KB-1) → Guest 看到 BAR2=32KB
 
 ═══════════════════════════════════════════════════════════════════
@@ -532,7 +894,11 @@ QEMU [EL0]:
     → r->addr = GPA (Dev1: 0x8000_200000, Dev2: 0x8000_208000)
     → memory_region_add_subregion_overlap(priority=1)
     → vfio_sub_page_bar_update_mapping (region.size=32KB < PAGE_SIZE)
-      → 扩展 MR 到 64KB, 重新注册 priority=0
+      → memory_region_set_size(bar->mr, 64KB)         ← mr->size: 32KB→64KB
+      → memory_region_set_size(region->mem, 64KB)      ← mr->size: 32KB→64KB
+      → memory_region_set_size(mmaps[0].mem, 64KB)     ← mr->size: 32KB→64KB
+      → 重新注册 priority=0
+      注意: VFIOBAR.size/VFIORegion.size/VFIOMmap.size/PCIIORegion.size 不改, 仍 32KB
 
 ═══════════════════════════════════════════════════════════════════
 第4步：FlatView 重叠 → 截断
@@ -601,10 +967,28 @@ static size_t hisi_acc_get_resource_len(...)
 | `hisi_acc_vfio_pci.c` | 1335 | `hisi_acc_get_resource_len` — `bar_len>>1`=32KB |
 | `hisi_acc_vfio_pci.c` | 1448 | ioctl 使用此返回值 → `info.size=32KB` |
 | `hisi_acc_vfio_pci.c` | 1382 | mmap 使用此返回值 (已 ALIGN 修复) |
+| `hw/vfio/pci.h` | 50-58 | `VFIOBAR` 结构体: `region`, `mr`, `size` |
+| `include/hw/vfio/vfio-common.h` | 47-52 | `VFIOMmap`: `mem` (ram_device MR), `mmap`, `size` |
+| `include/hw/vfio/vfio-common.h` | 54-63 | `VFIORegion`: `mem`, `size`, `mmaps` |
+| `include/exec/memory.h` | 892-939 | `MemoryRegion`: `size`(Int128), `ram_device`, `ram_block`, `priority` |
+| `include/exec/memory.h` | 99-121 | `MemoryRegionSection`: `size`, `mr`, `offset_within_address_space` |
+| `include/sysemu/kvm_int.h` | 18-33 | `KVMSlot`: `start_addr`(GPA), `ram`(HVA), `memory_size` |
+| `hw/vfio/helpers.c` | 388 | `mmaps[0].size = region->size` = 32KB |
+| `hw/vfio/helpers.c` | 469-472 | `memory_region_init_ram_device_ptr` 创建 ram_device MR (初始 32KB) |
 | `hw/pci/pci.c` | 1323 | `r->size = size` — 台账 32KB 固化 |
 | `hw/pci/pci.c` | 1330 | `wmask = ~(size-1)` — Guest 通过它读 BAR 大小 |
-| `hw/vfio/pci.c` | 1341-1346 | sub_page_bar 触发条件 |
-| `hw/vfio/pci.c` | 1212-1223 | sub_page_bar 内部: 扩 MR + 降 priority=0 |
+| `hw/vfio/pci.c` | 1198-1202 | sub_page_bar 获取三层 MR 指针: `base_mr`, `region_mr`, `mmap_mr` |
+| `hw/vfio/pci.c` | 1212-1216 | `memory_region_set_size` 改三层 MR.size → 64KB |
+| `hw/vfio/pci.c` | 1217-1221 | del+add priority=0 重新注册 |
+| `hw/vfio/pci.c` | 1341-1346 | sub_page_bar 触发条件 (检查 VFIORegion.size, 不改) |
 | `hw/pci/pci.c` | 1547 | 原始注册 priority=1 |
-| `accel/kvm/kvm-all.c` | 266-280 | `kvm_align_section` — 32KB 返回 0 |
-| `accel/kvm/kvm-all.c` | 1338 | `kvm_set_phys_mem` — IO MR 跳过 |
+| `system/memory.c` | 2772-2786 | `memory_region_set_size` — 直接写 `mr->size` |
+| `system/memory.c` | 1703-1720 | `memory_region_init_ram_device_ptr` — 设 `ram_device=true` |
+| `system/memory.c` | 222-231 | `FlatRange`: `.mr`, `.addr.size` (被截断后的大小) |
+| `system/memory.c` | 236-249 | `section_from_flat_range` — FlatRange → MemoryRegionSection |
+| `system/memory.c` | 645-693 | `render_memory_region` — 按 mr->size 渲染 FlatView |
+| `accel/kvm/kvm-all.c` | 1584-1606 | `kvm_region_add` — section 入队 |
+| `accel/kvm/kvm-all.c` | 1692 | `kvm_region_commit` — 调用 `kvm_set_phys_mem` |
+| `accel/kvm/kvm-all.c` | 1338-1471 | `kvm_set_phys_mem` — section → KVMSlot → ioctl |
+| `accel/kvm/kvm-all.c` | 266-295 | `kvm_align_section` — 32KB & page_mask = 0 → 拒绝 |
+| `accel/kvm/kvm-all.c` | 1394 | `memory_region_get_ram_ptr(mr)` — 从 ram_block->host 取 HVA |
