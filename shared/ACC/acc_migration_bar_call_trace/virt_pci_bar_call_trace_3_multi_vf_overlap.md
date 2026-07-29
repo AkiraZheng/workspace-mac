@@ -285,111 +285,159 @@ if (remain > 0) {
 
 **直译**: 遍历已经渲染好的 FlatView 区间。如果在当前区间前面有空洞 → 填入。如果当前区间已经覆盖了要渲染的范围 → 那块不填（"消耗掉"）。所以**先渲染的 MR 占据 GPA，后渲染的 MR 只能填补空隙。**
 
-### 4.4 截断的逐步演示
+### 4.4 完整流程模拟：从两个 VF 注册到最终稳定
 
-以 Dev1 BAR2 @ GPA 0x8000_200000 和 Dev2 BAR2 @ GPA 0x8000_208000 为例。
+以 Dev1 BAR2 @ GPA 0x8000_200000、Dev2 BAR2 @ GPA 0x8000_208000 为例。
 
-**初始状态** — 两个 BAR 都刚通过 `pci_update_mappings` 注册（priority=1，32KB）：
+#### Step 1 — 初始状态
 
-```
-GPEX io_mmio.subregions (QTAILQ):
-  Dev1: priority=1, offset=0x200000, size=32KB
-  Dev2: priority=1, offset=0x208000, size=32KB
+Guest PCI 枚举前，BAR 尚未映射到 GPA。GPEX io_mmio 的子 MR 链表为空。
 
-FlatView 渲染 (两者同 priority, Dev1 offset 小→先渲染):
-  [0x8000_200000, 0x8000_207fff] → Dev1 BAR2 (IO, 32KB)
-  [0x8000_208000, 0x8000_20ffff] → Dev2 BAR2 (IO, 32KB)
-```
+#### Step 2 — Guest 枚举 Dev1，写 BAR2 = 0x8000_200000
 
-**Round 1: Dev1 触发 sub_page_bar** → Dev1 priority=0, size=64KB, 插入到 Dev2 前面：
+**2a) `pci_default_write_config` → `pci_update_mappings`**（`hw/pci/pci.c:1511`）
 
 ```
-QTAILQ:
-  Dev1: priority=0, offset=0x200000, 64KB  ← 后插入, 排前面!
-  Dev2: priority=1, offset=0x208000, 32KB
+Dev1 r->addr 从 PCI_BAR_UNMAPPED → GPA 0x8000_200000
+memory_region_add_subregion_overlap(GPEX io_mmio, offset=0x200000,
+                                     bar->mr, priority=1)
+```
 
-FlatView 渲染:
-  1) Dev1 (priority=0, 64KB) 先渲染 → 因为 FlatView 为空 → 填满64KB
-     FlatView: [0x8000_200000, 0x8000_20ffff] Dev1
-  2) Dev2 (priority=1, 32KB) 后渲染 → 因为 Dev1 已占满 0x200000~0x20ffff
-     → Dev2 的 [0x208000, 0x20ffff] 完全被覆盖 → 只能等待空隙
-     → 但在 0x8000_208000 处没有空隙 → Dev2 什么也插入不了!
+QTAILQ 此时:
+```
+[Dev1: priority=1, offset=0x200000, 32KB, ram_device 64KB]
+```
+
+**2b) `vfio_sub_page_bar_update_mapping` 触发**（`hw/vfio/pci.c:1341-1346`）
+
+条件: `old_addr(UNMAPPED) ≠ new_addr(GPA) && region.size(32KB) < PAGE_SIZE(64KB)` → 触发!
+
+```
+memory_region_del_subregion(bus, Dev1 base_mr)
+memory_region_add_subregion_overlap(bus, offset=0x200000,
+                                     base_mr, priority=0, size=64KB)
+```
+
+QTAILQ 此时:
+```
+[Dev1: priority=0, offset=0x200000, 64KB]
+```
+
+**2c) FlatView 渲染 + KVM listener**
+
+```
+FlatView:
+  [0] Dev1 ram_device [0x8000_200000, 0x8000_20ffff] 64KB, mr->ram=true
+
+KVM: kvm_set_phys_mem ADD → section 64KB → ioctl → memslot 创建 ✅
+   Dev1 S2 PTE 建立: GPA 0x8000_200000 → HPA
+```
+
+#### Step 3 — Guest 枚举 Dev2，写 BAR2 = 0x8000_208000
+
+**3a) `pci_update_mappings`**
+
+```
+Dev2 r->addr 从 PCI_BAR_UNMAPPED → GPA 0x8000_208000
+memory_region_add_subregion_overlap(GPEX io_mmio, offset=0x208000,
+                                     bar->mr, priority=1)
+```
+
+QTAILQ 此时（Dev2 priority=1 排在 Dev1 priority=0 前面）:
+```
+[Dev2: priority=1, offset=0x208000, 32KB, ram_device 64KB]
+[Dev1: priority=0, offset=0x200000, 64KB]
+```
+
+**3b) FlatView 重建 — 3a 的 `memory_region_add_subregion_overlap` 触发**
+
+```
+FlatView 渲染 (Dev2 priority=1 → 先渲染, Dev1 priority=0 → 后渲染):
+
+  1) Dev2 (priority=1, 32KB) 先渲染:
+     FlatView: [0x208000, 0x20ffff] Dev2 (IO, 32KB)
+
+  2) Dev1 (priority=0, 64KB) 后渲染 → 填空隙:
+     base=0x200000, 空洞 0x200000~0x208000 → 插入 32KB
+     0x208000~0x20ffff 已被 Dev2 占 → 消耗掉 → 32KB 没了!
 
   FlatView 最终:
-    [0x8000_200000, 0x8000_20ffff] Dev1 BAR2 (64KB)
-    (Dev2 BAR2 被完全覆盖, 不出现!)                               ← 不是截断, 是完全消失!
+    [0] Dev1 ram_device [0x200000, 0x208000) 32KB     ← 被截!
+    [1] Dev2 (IO)       [0x208000, 0x20ffff] 32KB
+
+KVM listener:
+  旧: Dev1 [0x200000, 0x20ffff] 64KB (Step 2c 建的)
+  新: Dev1 [0x200000, 0x208000) 32KB (被截!)
+  → DEL Dev1 64KB section → kvm_set_phys_mem DEL → Dev1 memslot 删除!
+  → ADD Dev1 32KB section → kvm_align_section → 返回0 → SKIP → Dev1 无 memslot!
+  (Dev2 是 IO → mr->ram=false → kvm_set_phys_mem 跳过)
 ```
 
-**Round 2: Dev2 触发 sub_page_bar** → Dev2 priority=0, size=64KB, 插入到 Dev1 前面：
+**3c) `vfio_sub_page_bar_update_mapping` 触发**
+
+条件: `old_addr(UNMAPPED) ≠ new_addr(GPA) && region.size(32KB) < PAGE_SIZE(64KB)` → 触发!
 
 ```
-QTAILQ:
-  Dev2: priority=0, offset=0x208000, 64KB  ← 后插入, 排前面!
-  Dev1: priority=0, offset=0x200000, 64KB
+memory_region_del_subregion(bus, Dev2 base_mr)
+memory_region_add_subregion_overlap(bus, offset=0x208000,
+                                     base_mr, priority=0, size=64KB)
 ```
 
-**`render_memory_region` 逐步模拟**（内核地址用 pcie-mmio alias 前的 offset, base_mmio=0x8000_000000）:
-
+QTAILQ 此时（两个 priority=0, Dev2 后插入排前面）:
 ```
-初始 FlatView: 空 (view->nr=0)
-
-Step A — 渲染 Dev2 (priority=0, offset=0x208000, size=0x10000=64KB):
-────────────────────────────────────────────────────────
-  base = 0x208000, remain = 0x10000
-  view->nr=0 → for 循环跳过
-  remain>0 → flatview_insert(view, 0, Dev2_fr):
-    view->ranges[0] = {start=0x208000, size=0x10000, mr=Dev2}
-  FlatView 暂态: [0] Dev2 [0x208000 ── 0x218000) 64KB
-
-Step B — 渲染 Dev1 (priority=0, offset=0x200000, size=0x10000=64KB):
-────────────────────────────────────────────────────────
-  base = 0x200000, remain = 0x10000
-  i=0 → view->ranges[0] = {start=0x208000, end=0x218000}
-
-  ★ 空洞判定（`system/memory.c:671` — `int128_lt`）:
-    int128_lt(0x200000, 0x208000)? → Yes! 0x200000 在 0x208000 前面 → 有空洞!
-    now = int128_min(remain, int128_sub(ranges[0].start, base))
-        = min(0x10000, 0x208000 - 0x200000)
-        = 0x8000 (32KB)
-
-    flatview_insert(view, 0, Dev1_hole_fr):
-      → memmove → 原 ranges[0](Dev2) 右移一格
-      → view->ranges[0] = {start=0x200000, size=0x8000, mr=Dev1}  ← 空洞部分插入!
-
-    base   = 0x200000 + 0x8000 = 0x208000   (推进到空洞末尾)
-    remain = 0x10000 - 0x8000 = 0x8000      (还剩 32KB)
-    ++i → i=1
-
-  FlatView 暂态: [0] Dev1 hole [0x200000 ── 0x208000) 32KB
-                 [1] Dev2      [0x208000 ── 0x218000) 64KB
-
-  i=1 → view->ranges[1] = {start=0x208000, end=0x218000}
-    没有空洞需要插入。
-    ★ 覆盖消耗（`system/memory.c:682-687` — `int128_sub` + `int128_min`）:
-    now = int128_sub(
-              int128_min(int128_add(base, remain),
-                         addrrange_end(ranges[1].addr)),
-              base)
-        = min(0x208000+0x8000=0x210000, 0x218000) - 0x208000
-        = 0x210000 - 0x208000 = 0x8000 (32KB)
-    base   = 0x208000 + 0x8000 = 0x210000   (跳过被 Dev2 覆盖的区域)
-    remain = 0x8000 - 0x8000 = 0            (刚好消耗完!)
-    ++i → i=2 → 循环结束
-
-  remain==0 → 不走到 `flatview_insert` (line 689)
-
-最终 FlatView:
-  [0] Dev1 [0x200000, 0x208000) 32KB!!   ← 只有空洞部分留下了, 被截断!
-  [1] Dev2 [0x208000, 0x218000) 64KB     ← 后注册, 占满 64KB
+[Dev2: priority=0, offset=0x208000, 64KB]  ← 后插入, 排第一!
+[Dev1: priority=0, offset=0x200000, 64KB]
 ```
 
-Dev1 的 64KB MR 在渲染时，前 32KB（0x200000~0x208000）插入为空洞，后 32KB（0x208000~0x20ffff）被 Dev2 的已渲染区间覆盖 → 消耗掉不插入 → **Dev1 在 FlatView 中只剩 32KB。这就是截断发生的精确机制。**
+**3d) FlatView 重建 — 3c 的 del+add 触发**
 
-**Round 3: Dev1 被截断为 32KB** → VFIO listener 再次触发 sub_page_bar → 循环往复。
+```
+FlatView 渲染 (Dev2 priority=0 → 排前面, Dev1 priority=0 → 后排):
 
-### 4.5 截断的本质
+  1) Dev2 (priority=0, 64KB) 先渲染 → FlatView 为空 → 填满:
+     [0x208000, 0x218000) Dev2 ram_device 64KB
 
-FlatView 的 `render_memory_region` 逻辑保证了 "高 priority 先占，同 priority 后注册先占，低 priority / 先注册者只能填空隙"。sub_page_bar 把 priority 降到 0 后，两个 64KB BAR 在同一 GPA 区域竞争——后渲染的那个填满 64KB，先渲染的那个被截断为 32KB。被截断的又触发新一轮 sub_page_bar → 乒乓。
+  2) Dev1 (priority=0, 64KB) 后渲染 → 填空隙:
+     base=0x200000, 空洞 0x200000~0x208000 → 插入 32KB ← int128_lt (system/memory.c:671)
+     0x208000~0x20ffff 被 Dev2 覆盖 → 消耗掉               ← int128_sub (system/memory.c:682)
+     remain=0 → 不走到 flatview_insert (line 689)
+
+  FlatView 最终:
+    [0] Dev1 ram_device [0x200000, 0x208000) 32KB
+    [1] Dev2 ram_device [0x208000, 0x218000) 64KB
+
+KVM listener:
+  旧: Dev1 [0x200000, 0x208000) 32KB (IO, mr->ram=false — 因为 3b 的截断把它从 ram_device 切成了 IO? 不, 仍然是 ram_device)
+       Dev2 [0x208000, 0x20ffff] 32KB (IO, mr->ram=false)
+  新: Dev1 [0x200000, 0x208000) 32KB (ram_device)
+       Dev2 [0x208000, 0x218000) 64KB (ram_device)
+
+  → DEL Dev2 32KB IO section       (无 memslot, 不操作)
+  → ADD Dev2 64KB ram_device section → memslot 创建 ✅
+  → Dev1 32KB section 不变         (kvm_align → 0 → SKIP)
+```
+
+#### 最终稳定状态
+
+```
+QTAILQ (不再变化, 因为两个 VF 的 BAR 不会再被 Guest 写入):
+  [Dev2: priority=0, offset=0x208000, 64KB]
+  [Dev1: priority=0, offset=0x200000, 64KB]
+
+FlatView (每次重建结果相同, 不再变化):
+  [0] Dev1 [0x8000_200000, 0x8000_208000) 32KB
+  [1] Dev2 [0x8000_208000, 0x8000_218000) 64KB
+
+KVM memslots:
+  Dev2: memslot [0x8000_208000, 64KB] → S2 ✅
+  Dev1: 无 memslot → S2 ❌
+
+Guest 访问 Dev1 BAR2 → S2 fault → ISV=0 → SEA
+```
+
+**为什么不会死循环**: sub_page_bar 只在 `old_addr ≠ r->addr` 时触发（Guest 写 BAR 寄存器）。FlatView 截断改变的是 FlatView section 的大小，不会改变 `r->addr` 的值。两个 VF 的 BAR 各被 Guest 写一次后就稳定了——FlatView 不管重建多少次，QTAILQ 顺序不变，输出结果不变。
+
+
 
 ---
 
