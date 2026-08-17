@@ -52,6 +52,16 @@ ddr,
                 return ret;
 ```
 
+解答:这里只能在完全去掉ioctl后才能支持这种方式,而且,由于在s2 pgtable一开始就支持了添加了flag,就会导致所有可写页都加上DBM,但是实际上,我们如果HDBSS还没支持dirty ring的话,热迁移就会有问题,所以这里在 stage2_set_prot_attr() 中加一行过滤,既要过滤device页,又要过滤hdbss没有enable的场景：                                                                     
+                                                                                        
+```c
+     if (prot & KVM_PGTABLE_PROT_W) {                                                   
+         attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;                                        
+         if ((pgt->flags & KVM_PGTABLE_S2_DBM) &&                                       
+             !(prot & KVM_PGTABLE_PROT_DEVICE))       // ← 加这一行                     
+             attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;                                       
+     }    
+```
 ## 改成现在软件vma init的时候添加DBM flags
 
 ```diff

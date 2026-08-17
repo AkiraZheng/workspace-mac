@@ -1,0 +1,10 @@
+QEMU HDBSS reverted commits (old implementation using SZ encoding 0-9)
+
+These 4 commits were reverted in QEMU patch 0001 as part of HDBSS v5
+Phase 7, replaced by the new KVM_CAP_ARM_HDBSS_BUFFER_SIZE (250)
+interface using bytes.
+
+1. e549f32b1a — hw/arm/virt: support the HDBSS feature
+2. e8587f657f — hw/arm/virt: only support the HDBSS feature in aarch64
+3. d13e44fe04 — hw/arm/virt: decouple migrate_hdbss_buffer_size() with kvm_update_hdbss_cap()
+4. ff64aed3c8 — hw/arm/virt: HDBSS: fix arm-softmmu build on x86 platform

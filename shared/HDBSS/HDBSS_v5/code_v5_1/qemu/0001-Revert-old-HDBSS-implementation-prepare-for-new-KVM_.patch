@@ -1,0 +1,322 @@
+From 44642a9fa8e45fb57f306598b150009037fe04e0 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sun, 16 Aug 2026 08:48:05 +0800
+Subject: [PATCH 1/2] Revert old HDBSS implementation, prepare for new
+ KVM_CAP_ARM_HDBSS_BUFFER_SIZE interface
+
+Remove the old HDBSS implementation that used SZ encoding (0-9) and
+KVM_CAP_ARM_HW_DIRTY_STATE_TRACK (502). The new design uses bytes
+and KVM_CAP_ARM_HDBSS_BUFFER_SIZE (250), consistent with
+KVM_CAP_DIRTY_LOG_RING.
+
+Reverted changes:
+- linux-headers/linux/kvm.h: remove KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 502,
+  add KVM_CAP_ARM_HDBSS_BUFFER_SIZE 250
+- include/sysemu/kvm.h: remove DEFAULT_HDBSS_BUFFER_SIZE,
+  MAX_HDBSS_BUFFER_SIZE, kvm_update_hdbss_cap() declaration
+- accel/kvm/kvm-all.c: remove kvm_update_hdbss_cap() implementation
+- accel/stubs/kvm-stub.c: remove stub
+- migration/options.c: remove hdbss_buffer_size migration parameter
+- migration/options.h: remove migrate_hdbss_buffer_size() declaration
+- migration/migration-hmp-cmds.c: remove HMP command
+- migration/ram.c: remove kvm_update_hdbss_cap() calls during migration
+- qapi/migration.json: remove hdbss-buffer-size parameter
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ accel/kvm/kvm-all.c            | 25 -------------------------
+ accel/stubs/kvm-stub.c         |  5 -----
+ include/sysemu/kvm.h           |  9 ---------
+ linux-headers/linux/kvm.h      |  2 +-
+ migration/migration-hmp-cmds.c |  9 ---------
+ migration/options.c            | 21 ---------------------
+ migration/options.h            |  1 -
+ migration/ram.c                | 10 ----------
+ qapi/migration.json            | 17 +++--------------
+ 9 files changed, 4 insertions(+), 95 deletions(-)
+
+diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
+index e2807157cb..8323a91e83 100644
+--- a/accel/kvm/kvm-all.c
++++ b/accel/kvm/kvm-all.c
+@@ -3380,31 +3380,6 @@ hwaddr __attribute__((weak)) rme_mask_share_bit(hwaddr addr)
+     return addr;
+ }
+ 
+-void kvm_update_hdbss_cap(bool enable, int hdbss_buffer_size)
+-{
+-    KVMState *s = kvm_state;
+-    int size, ret;
+-
+-    if (s == NULL || !kvm_check_extension(s, KVM_CAP_ARM_HW_DIRTY_STATE_TRACK)) {
+-        return;
+-    }
+-
+-    size = hdbss_buffer_size;
+-    if (size < 0 || size > MAX_HDBSS_BUFFER_SIZE) {
+-        fprintf(stderr, "Invalid hdbss buffer size: %d\n", size);
+-        return;
+-    }
+-
+-    ret = kvm_vm_enable_cap(s, KVM_CAP_ARM_HW_DIRTY_STATE_TRACK, 0,
+-                            enable ? size : 0);
+-    if (ret) {
+-        fprintf(stderr, "Could not %s KVM_CAP_ARM_HW_DIRTY_STATE_TRACK: %d\n",
+-                        enable ? "enable" : "disable", ret);
+-    }
+-
+-    return;
+-}
+-
+ #ifdef KVM_CAP_SET_GUEST_DEBUG
+ struct kvm_sw_breakpoint *kvm_find_sw_breakpoint(CPUState *cpu, vaddr pc)
+ {
+diff --git a/accel/stubs/kvm-stub.c b/accel/stubs/kvm-stub.c
+index c6f878526b..8120c56aa4 100644
+--- a/accel/stubs/kvm-stub.c
++++ b/accel/stubs/kvm-stub.c
+@@ -131,11 +131,6 @@ hwaddr rme_mask_share_bit(hwaddr addr)
+     return addr;
+ }
+ 
+-void kvm_update_hdbss_cap(bool enable, int hdbss_buffer_size)
+-{
+-    g_assert_not_reached();
+-}
+-
+ bool kvm_dirty_ring_enabled(void)
+ {
+     return false;
+diff --git a/include/sysemu/kvm.h b/include/sysemu/kvm.h
+index 824dec718e..f6258d9fcc 100644
+--- a/include/sysemu/kvm.h
++++ b/include/sysemu/kvm.h
+@@ -251,15 +251,6 @@ int kvm_has_gsi_routing(void);
+  */
+ bool kvm_arm_supports_user_irq(void);
+ 
+-/*
+- * The default HDBSS size. The value ranges [0, 9].
+- * Set to 0 to disable the HDBSS feature.
+- */
+-#define DEFAULT_HDBSS_BUFFER_SIZE          0
+-#define MAX_HDBSS_BUFFER_SIZE              9
+-
+-void kvm_update_hdbss_cap(bool enable, int hdbss_buffer_size);
+-
+ int kvm_on_sigbus_vcpu(CPUState *cpu, int code, void *addr);
+ int kvm_on_sigbus(int code, void *addr);
+ 
+diff --git a/linux-headers/linux/kvm.h b/linux-headers/linux/kvm.h
+index 3e33779d82..b3916dc37b 100644
+--- a/linux-headers/linux/kvm.h
++++ b/linux-headers/linux/kvm.h
+@@ -1244,7 +1244,7 @@ struct kvm_ppc_resize_hpt {
+ /* support userspace to request management of CSV3 shared pages */
+ #define KVM_CAP_HYGON_COCO_EXT_CSV3_SP_MGR        (1 << 4)
+ 
+-#define KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 502
++#define KVM_CAP_ARM_HDBSS_BUFFER_SIZE 250
+ 
+ #define KVM_CAP_ARM_HISI_IPIV 798
+ #define KVM_CAP_ARM_VIRT_MSI_BYPASS 799
+diff --git a/migration/migration-hmp-cmds.c b/migration/migration-hmp-cmds.c
+index 35e7b9ed62..b66d410520 100644
+--- a/migration/migration-hmp-cmds.c
++++ b/migration/migration-hmp-cmds.c
+@@ -429,11 +429,6 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
+         monitor_printf(mon, "%s: %s\n",
+             MigrationParameter_str(MIGRATION_PARAMETER_SEV_AMD_CERT),
+             params->sev_amd_cert);
+-
+-        assert(params->has_hdbss_buffer_size);
+-        monitor_printf(mon, "%s: %u\n",
+-            MigrationParameter_str(MIGRATION_PARAMETER_HDBSS_BUFFER_SIZE),
+-            params->hdbss_buffer_size);
+     }
+ 
+     qapi_free_MigrationParameters(params);
+@@ -762,10 +757,6 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
+         p->sev_amd_cert->type = QTYPE_QSTRING;
+         visit_type_str(v, param, &p->sev_amd_cert->u.s, &err);
+         break;
+-    case MIGRATION_PARAMETER_HDBSS_BUFFER_SIZE:
+-        p->has_hdbss_buffer_size = true;
+-        visit_type_uint8(v, param, &p->hdbss_buffer_size, &err);
+-        break;
+     default:
+         assert(0);
+     }
+diff --git a/migration/options.c b/migration/options.c
+index a234ba72b7..d133e3d3c9 100644
+--- a/migration/options.c
++++ b/migration/options.c
+@@ -199,9 +199,6 @@ Property migration_properties[] = {
+     DEFINE_PROP_STRING("sev-pdh", MigrationState, parameters.sev_pdh),
+     DEFINE_PROP_STRING("sev-plat-cert", MigrationState, parameters.sev_plat_cert),
+     DEFINE_PROP_STRING("sev-amd-cert", MigrationState, parameters.sev_amd_cert),
+-    DEFINE_PROP_UINT8("hdbss-buffer-size", MigrationState,
+-                      parameters.hdbss_buffer_size,
+-                      DEFAULT_HDBSS_BUFFER_SIZE),
+ 
+     /* Migration capabilities */
+     DEFINE_PROP_MIG_CAP("x-xbzrle", MIGRATION_CAPABILITY_XBZRLE),
+@@ -912,13 +909,6 @@ MigMode migrate_mode(void)
+     return mode;
+ }
+ 
+-int migrate_hdbss_buffer_size(void)
+-{
+-    MigrationState *s = migrate_get_current();
+-
+-    return s->parameters.hdbss_buffer_size;
+-}
+-
+ int migrate_multifd_channels(void)
+ {
+     MigrationState *s = migrate_get_current();
+@@ -1116,8 +1106,6 @@ MigrationParameters *qmp_query_migrate_parameters(Error **errp)
+     params->mode = s->parameters.mode;
+     params->has_zero_page_detection = true;
+     params->zero_page_detection = s->parameters.zero_page_detection;
+-    params->has_hdbss_buffer_size = true;
+-    params->hdbss_buffer_size = s->parameters.hdbss_buffer_size;
+ 
+     return params;
+ }
+@@ -1157,7 +1145,6 @@ void migrate_params_init(MigrationParameters *params)
+     params->has_vcpu_dirty_limit = true;
+     params->has_mode = true;
+     params->has_zero_page_detection = true;
+-    params->has_hdbss_buffer_size = true;
+ 
+     params->sev_pdh = g_strdup("");
+     params->sev_plat_cert = g_strdup("");
+@@ -1525,10 +1512,6 @@ static void migrate_params_test_apply(MigrateSetParameters *params,
+         assert(params->sev_amd_cert->type == QTYPE_QSTRING);
+         dest->sev_amd_cert = params->sev_amd_cert->u.s;
+     }
+-
+-    if (params->has_hdbss_buffer_size) {
+-        dest->hdbss_buffer_size = params->hdbss_buffer_size;
+-    }
+ }
+ 
+ static void migrate_params_apply(MigrateSetParameters *params, Error **errp)
+@@ -1706,10 +1689,6 @@ static void migrate_params_apply(MigrateSetParameters *params, Error **errp)
+         assert(params->sev_amd_cert->type == QTYPE_QSTRING);
+         s->parameters.sev_amd_cert = g_strdup(params->sev_amd_cert->u.s);
+     }
+-
+-    if (params->has_hdbss_buffer_size) {
+-        s->parameters.hdbss_buffer_size = params->hdbss_buffer_size;
+-    }
+ }
+ 
+ void qmp_migrate_set_parameters(MigrateSetParameters *params, Error **errp)
+diff --git a/migration/options.h b/migration/options.h
+index 3dcfde3031..06cbc6dce5 100644
+--- a/migration/options.h
++++ b/migration/options.h
+@@ -91,7 +91,6 @@ uint64_t migrate_max_bandwidth(void);
+ uint64_t migrate_avail_switchover_bandwidth(void);
+ uint64_t migrate_max_postcopy_bandwidth(void);
+ MigMode migrate_mode(void);
+-int migrate_hdbss_buffer_size(void);
+ int migrate_multifd_channels(void);
+ MultiFDCompression migrate_multifd_compression(void);
+ int migrate_multifd_zlib_level(void);
+diff --git a/migration/ram.c b/migration/ram.c
+index 5ea2445fdc..4da9df0883 100644
+--- a/migration/ram.c
++++ b/migration/ram.c
+@@ -3137,11 +3137,6 @@ static void ram_save_cleanup(void *opaque)
+              * memory_global_dirty_log_stop will assert that
+              * memory_global_dirty_log_start/stop used in pairs
+              */
+-#ifdef TARGET_AARCH64
+-            if (kvm_enabled()) {
+-                kvm_update_hdbss_cap(false, 0);
+-            }
+-#endif
+             memory_global_dirty_log_stop(GLOBAL_DIRTY_MIGRATION);
+         }
+     }
+@@ -3550,11 +3545,6 @@ static void ram_init_bitmaps(RAMState *rs)
+         ram_list_init_bitmaps();
+         /* We don't use dirty log with background snapshots */
+         if (!migrate_background_snapshot()) {
+-#ifdef TARGET_AARCH64
+-            if (kvm_enabled()) {
+-                kvm_update_hdbss_cap(true, migrate_hdbss_buffer_size());
+-            }
+-#endif
+             memory_global_dirty_log_start(GLOBAL_DIRTY_MIGRATION);
+             migration_bitmap_sync_precopy(rs, false);
+         }
+diff --git a/qapi/migration.json b/qapi/migration.json
+index b5c66f22b9..8b56c61b8a 100644
+--- a/qapi/migration.json
++++ b/qapi/migration.json
+@@ -955,9 +955,6 @@
+ # @sev-amd-cert: AMD certificate chain which include ASK and OCA encoded in
+ #                base64, or vendor cert filename for hygon (Since 4.2)
+ #
+-# @hdbss-buffer-size: Size of the HDBSS(Hardware Dirty state tracking Structure).
+-#     Defaults to 0.  (Since 8.6)
+-#
+ # Features:
+ #
+ # @deprecated: Member @block-incremental is deprecated.  Use
+@@ -995,7 +992,7 @@
+            'vcpu-dirty-limit',
+            'mode',
+            'zero-page-detection',
+-           'sev-pdh', 'sev-plat-cert', 'sev-amd-cert', 'hdbss-buffer-size'] }
++           'sev-pdh', 'sev-plat-cert', 'sev-amd-cert'] }
+ 
+ ##
+ # @MigrateSetParameters:
+@@ -1173,9 +1170,6 @@
+ # @sev-amd-cert: AMD certificate chain which include ASK and OCA encoded in
+ #                base64, or vendor cert filename for hygon (Since 4.2)
+ #
+-# @hdbss-buffer-size: Size of the HDBSS(Hardware Dirty state tracking Structure).
+-#     Defaults to 0.  (Since 8.6)
+-#
+ # Features:
+ #
+ # @deprecated: Member @block-incremental is deprecated.  Use
+@@ -1237,8 +1231,7 @@
+             '*zero-page-detection': 'ZeroPageDetection',
+             '*sev-pdh': 'StrOrNull',
+             '*sev-plat-cert': 'StrOrNull',
+-            '*sev-amd-cert' : 'StrOrNull',
+-            '*hdbss-buffer-size': 'uint8'} }
++            '*sev-amd-cert' : 'StrOrNull'} }
+ 
+ ##
+ # @migrate-set-parameters:
+@@ -1436,9 +1429,6 @@
+ # @sev-amd-cert: AMD certificate chain which include ASK and OCA encoded in
+ #                base64, or vendor cert filename for hygon (Since 4.2)
+ #
+-# @hdbss-buffer-size: Size of the HDBSS(Hardware Dirty state tracking Structure).
+-#     Defaults to 0.  (Since 8.6)
+-#
+ # Features:
+ #
+ # @deprecated: Member @block-incremental is deprecated.  Use
+@@ -1496,8 +1486,7 @@
+             '*zero-page-detection': 'ZeroPageDetection',
+             '*sev-pdh': 'str',
+             '*sev-plat-cert': 'str',
+-            '*sev-amd-cert' : 'str',
+-            '*hdbss-buffer-size': 'uint8'} }
++            '*sev-amd-cert' : 'str'} }
+ 
+ ##
+ # @query-migrate-parameters:
+-- 
+2.43.0
+

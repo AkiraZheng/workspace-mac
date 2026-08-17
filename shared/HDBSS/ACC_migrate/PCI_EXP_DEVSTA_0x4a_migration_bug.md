@@ -119,14 +119,14 @@ graph TD
         D[VF2 硬件配置空间<br/>0x4a = 0x08 URD=1] -->|① vfio_realize时<br/>pread读取| E[VF2 s->config<br/>0x4a = 0x08]
         E -->|② 阶段二迁移开始| F[get_pci_config_device]
         C -->|qemu_get_buffer<br/>从迁移流读取| F
-
+        
         F -->|③ 逐字节校验| G{校验逻辑<br/>(config[i] ^ s->config[i]) &<br/>cmask & ~wmask & ~w1cmask}
-
+        
         G -->|0x4a偏移处| H[config[0x4a] = 0x00<br/>s->config[0x4a] = 0x08<br/>cmask[0x4a] = 0xFF<br/>wmask[0x4a] = 0x00<br/>w1cmask[0x4a] = 0x00]
-
+        
         H --> I[校验计算:<br/>(0x00 ^ 0x08) & 0xFF & ~0x00 & ~0x00<br/>= 0x08 ≠ 0]
         I -->|校验失败| J[返回 -EINVAL<br/>打印错误信息<br/>虚机挂死]
-
+        
         I -->|如果校验通过<br/>(修复后)| K[memcpy覆盖<br/>s->config = config<br/>0x4a变为0x00]
     end
 
@@ -317,6 +317,70 @@ VF 的 PCIe capability 通常是截断的（部分寄存器不实现）。以下
 - **FLR 行为差异**: 部分硬件在 FLR 过程中自身可能产生短暂的 unsupported request
 
 **源端为什么是 0:** 源端设备上有 guest 驱动正常运行，DEVSTA 的 W1C 位早已被驱动通过 AER 处理或 FLR 清理过。目的端是全新 open，还没人清理。两端值天然不同是正常现象，不表示任何一端硬件有故障。
+
+### 5.5 新发现: VF 创建时 URD 已为 1
+
+通过 host 侧 `sriov_numvfs` 创建 VF 时，直接 `devmem` 读 ECAM 空间发现 **URD 在 VF 刚刚创建时就已经是 1**，无需 guest 或 QEMU 介入。
+
+#### 写入 sriov_numvfs 后的完整时序
+
+```
+echo N > sriov_numvfs
+  └─ sriov_numvfs_store()                         [iov.c:424]
+       └─ driver->sriov_configure(pdev, N)          // e.g. hisi_qm_sriov_configure
+            └─ pci_enable_sriov()                   [iov.c:1074]
+                 └─ sriov_enable()                  [iov.c:606]
+                      ├─ pci_enable_resources()      // 使能 IOV BAR
+                      ├─ pcibios_sriov_enable()      // 架构级回调
+                      ├─ pci_iov_set_numvfs()        // 写 NUM_VF 寄存器
+                      ├─ ★ 写 PCI_SRIOV_CTRL: VFE|MSE
+                      │    pci_cfg_access_lock()
+                      │    pci_write_config_word()   // VFE + MSE 位置位
+                      │    msleep(100)               // 等待硬件稳定
+                      │    pci_cfg_access_unlock()
+                      └─ sriov_add_vfs() → pci_iov_add_virtfn()
+                           ├─ pci_setup_device()     // 探测 VF 的 cfg_size
+                           ├─ pci_device_add()       // 初始化 capability (AER/ATS...)
+                           └─ pci_bus_add_device()   // 触发 VF 驱动绑定
+```
+
+#### URD=1 的触发窗口
+
+VF 的 PCIe config space 在 `pci_write_config_word(dev, iov->pos + PCI_SRIOV_CTRL, VFE|MSE)` 之后、`msleep(100)` 期间即已在硬件层面使能。URD 可能在此窗口内被置位:
+
+| 时机 | 事件 | URD 状态 |
+|------|------|----------|
+| VF 硬件上电 | VFE 置位 → VF 逻辑开始初始化 | 硬件初始化过程中可能产生内部 unsupported request |
+| `msleep(100)` | 等待硬件稳定 | 若硬件在此阶段有内部探测行为，URD 被置 1 |
+| `pci_setup_device()` | 内核枚举 VF 配置空间 | 内核访问了 VF 未实现的 capability 偏移 → URD 置 1 |
+| `pci_device_add()` | AER/ATS 等子系统初始化 | 进一步读取可能触发更多 URD |
+
+#### 与 SEC/HRPE 对比
+
+SEC 和 HRPE 没有此问题，推测原因:
+
+- **不同 PCIe  topology**: SEC/HRPE 的 VF 内部逻辑在 VFE 使能后不会产生 URD
+- **内部实现差异**: 本节点的 SRIOV VF 实现可能在某些只读寄存器上返回 Unsupported Request，而 SEC/HRPE 的实现更完整
+- **驱动初始化顺序**: 可能是 PF 驱动在 `sriov_configure` 中做的准备操作不同
+
+#### 影响分析
+
+这意味着 URD=1 的问题在 **host 内核侧 VF 创建时就已经固化**（写入硬件寄存器），不是 guest 行为导致，也不是 QEMU 引入：
+
+```
+sriov_numvfs 创建 VF
+    │  URD 在 msleep(100) 或 pci_setup_device 阶段被硬件置 1
+    ▼
+host 侧 VF 的 DEVSTA.URD = 1     ← ★ 源头在这里
+    │
+    ▼
+QEMU vfio_realize() pread() → s->config[0x4a] = 0x08  ★ 只是把硬件值读入缓存
+    │
+    ▼
+目的端 pread 的旧值 0x08 与源端迁移流 0x00 不匹配 → 校验失败
+```
+
+即使 `vfio_pci_post_reset()` 刷新了缓存（假设修复），也只是从软件缓存层面掩盖问题——**硬件 DEVSTA 的 URD 位在 VF 创建之初就已经是 1**。真正彻底解决需要硬件团队确认 VF 创建过程中触发 URD 的根因。
 
 ## 6. 涉及的关键文件
 

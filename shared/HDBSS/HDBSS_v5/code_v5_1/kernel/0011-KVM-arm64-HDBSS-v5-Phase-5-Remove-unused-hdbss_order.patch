@@ -1,0 +1,60 @@
+From d7f007d6771c1c0be0c65971a643a7005604e714 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sun, 16 Aug 2026 04:40:50 +0800
+Subject: [PATCH 11/14] KVM: arm64: HDBSS v5 Phase 5: Remove unused hdbss_order
+ and HDBSS_MAX_ORDER
+
+Phase 3.1 refactored HDBSS buffer management to the PML-style
+pattern (alloc_page at vCPU create, free at vCPU destroy), which
+eliminated all uses of:
+
+- kvm->arch.hdbss_order: previously stored the HDBSSBR_EL2 SZ
+  encoding for buffer size.  Now the buffer is always PAGE_SIZE
+  (one page), and the SZ encoding is computed inline as
+  PAGE_SHIFT - 12 in kvm_arm_vcpu_alloc_hdbss().
+
+- HDBSS_MAX_ORDER (alias for HDBSSBR_EL2_SZ_2MB): previously used
+  as the maximum buffer size cap in hdbss_auto_select_order(),
+  which was also removed in Phase 3.1.
+
+Phase 5.1 (enable_hdbss field removal) and Phase 5.3 (buffer size
+strategy refactor) were already completed in Phase 3.1.
+
+Base commit: 0e35b9b6ec0f
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/include/asm/kvm_host.h | 3 ---
+ arch/arm64/include/asm/sysreg.h   | 2 --
+ 2 files changed, 5 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 6e3ff2132585..166688ec29d3 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -421,9 +421,6 @@ struct kvm_arch {
+ 	 */
+ 	struct kvm_protected_vm pkvm;
+ 
+-	/* HDBSS: per-VM dirty tracking state */
+-	unsigned int hdbss_order;
+-
+ #ifdef CONFIG_PTDUMP_STAGE2_DEBUGFS
+ 	/* Nested virtualization info */
+ 	struct dentry *debugfs_nv_dentry;
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 1354a58c3316..7c71560b57e4 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1043,8 +1043,6 @@
+ /*
+  * Definitions for the HDBSS feature
+  */
+-#define HDBSS_MAX_ORDER		HDBSSBR_EL2_SZ_2MB
+-
+ #define HDBSSBR_EL2(baddr, sz)	(((baddr) & HDBSSBR_EL2_BADDR_MASK) | \
+ 				 FIELD_PREP(HDBSSBR_EL2_SZ_MASK, sz))
+ 
+-- 
+2.43.0
+

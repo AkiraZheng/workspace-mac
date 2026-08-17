@@ -1,0 +1,281 @@
+From 6a321511645db3ed9e78b29afdfda534e31e8c1f Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sat, 15 Aug 2026 06:02:46 +0800
+Subject: [PATCH 08/14] KVM: arm64: HDBSS v5 Phase 3: Medium correctness fixes
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+3.1 vCPU create error path cleanup (S7/S20):
+  - Return immediately on kvm_share_hyp() failure instead of
+    falling through to HDBSS allocation which overwrites err
+  - Call kvm_unshare_hyp() when HDBSS alloc fails after
+    successful kvm_share_hyp() to avoid pKVM trust violation
+
+3.2 Separate order semantics (S9):
+  - Remove order parameter from kvm_arm_vcpu_alloc_hdbss()
+  - Use alloc_page() (buddy order 0) instead of alloc_pages()
+  - Compute HDBSSBR_EL2 SZ encoding from PAGE_SHIFT - 12
+  - Remove hdbss_auto_select_order() (deprecated in v5)
+  - Fix uninitialized hdbss_order usage in vcpu_create path
+
+3.3 Force eager split under KVM_DIRTY_LOG_INITIALLY_SET:
+  - When HDBSS is enabled and INITIALLY_SET is used, still call
+    kvm_mmu_split_memory_region() to avoid operating on block
+    mappings instead of page granularity
+
+3.4 nVHE guard for EL2 register access (S16):
+  - Add WARN_ON_ONCE(!system_supports_hdbss()) in
+    kvm_handle_hdbss_fault() to prevent UNDEFINED exception
+
+3.5 Global enable/disable lock race (S19):
+  - Use smp_store_release() for enable_hdbss in enable path
+  - Use smp_load_acquire() for enable_hdbss reads in
+    __load_hdbss() and kvm_vcpu_put_vhe()
+  - Ensures vCPU sees fully updated hdbss state before use
+
+Note: S14 (sync_dirty_log missing non-guest vCPUs) is not a real
+issue — vcpu_put() already flushes the HDBSS buffer before a vCPU
+exits to userspace, so KVM_REQUEST_WAIT is sufficient.
+
+Based on community_conversion.md Phase 3 tasks.
+Base commit: 0e35b9b6ec0f
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h |  2 +-
+ arch/arm64/include/asm/kvm_host.h      |  2 +-
+ arch/arm64/kvm/arm.c                   | 13 +++--
+ arch/arm64/kvm/dirty_bit.c             | 66 ++++++++------------------
+ arch/arm64/kvm/hyp/vhe/switch.c        |  4 +-
+ 5 files changed, 33 insertions(+), 54 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index 08c67e7a17ac..16035b27fa5c 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -19,7 +19,7 @@
+ #define HDBSS_ENTRY_TTWL_RESV HDBSS_ENTRY_TTWL(-4)
+ #define HDBSS_ENTRY_IPA	GENMASK_ULL(55, 12)
+ 
+-int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu, unsigned int order);
++int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index cecfb884a64f..fc1175cae7ff 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -844,7 +844,7 @@ struct vcpu_reset_state {
+ };
+ 
+ struct vcpu_hdbss_state {
+-	phys_addr_t base_phys;   /* for memory free */
++	struct page *hdbss_pg;   /* HDBSS buffer page */
+ 	u64 hdbssbr_el2;         /* load directly */
+ 	u64 hdbssprod_el2;       /* save directly */
+ };
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index b905755eb29f..a68f729fef39 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -584,16 +584,21 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
+ 	}
+ 
+ 	err = kvm_share_hyp(vcpu, vcpu + 1);
+-	if (err)
++	if (err) {
+ 		kvm_vgic_vcpu_destroy(vcpu);
++		return err;
++	}
+ 
+ 	if (vcpu->kvm->arch.enable_hdbss) {
+-		err = kvm_arm_vcpu_alloc_hdbss(vcpu, vcpu->kvm->arch.hdbss_order);
+-		if (err)
++		err = kvm_arm_vcpu_alloc_hdbss(vcpu);
++		if (err) {
++			kvm_unshare_hyp(vcpu, vcpu + 1);
+ 			kvm_vgic_vcpu_destroy(vcpu);
++			return err;
++		}
+ 	}
+ 
+-	return err;
++	return 0;
+ }
+ 
+ void kvm_arch_vcpu_postcreate(struct kvm_vcpu *vcpu)
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 076391743ad7..8a627e6c5126 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -11,23 +11,20 @@
+ #include <linux/kconfig.h>
+ #include <linux/mm.h>
+ 
+-int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu, unsigned int order)
++int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu)
+ {
+-	struct page *hdbss_pg = NULL;
++	struct page *hdbss_pg;
+ 
+-	if (vcpu->arch.hdbss.base_phys || !system_supports_hdbss())
++	if (vcpu->arch.hdbss.hdbss_pg || !system_supports_hdbss())
+ 		return 0;
+ 
+-	if (order > HDBSS_MAX_ORDER)
+-		return -EINVAL;
+-
+-	hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT, order);
++	hdbss_pg = alloc_page(GFP_KERNEL_ACCOUNT);
+ 	if (!hdbss_pg)
+ 		return -ENOMEM;
+ 
+ 	vcpu->arch.hdbss = (struct vcpu_hdbss_state) {
+-		.base_phys = page_to_phys(hdbss_pg),
+-		.hdbssbr_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), order),
++		.hdbss_pg = hdbss_pg,
++		.hdbssbr_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), PAGE_SHIFT - 12),
+ 		.hdbssprod_el2 = 0,
+ 	};
+ 
+@@ -36,19 +33,14 @@ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu, unsigned int order)
+ 
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ {
+-	struct page *hdbss_pg;
+-
+-	if (!vcpu->arch.hdbss.base_phys) {
++	if (!vcpu->arch.hdbss.hdbss_pg)
+ 		return;
+-	}
+ 
+-	hdbss_pg = phys_to_page(vcpu->arch.hdbss.base_phys);
+-	if (hdbss_pg)
+-		__free_pages(hdbss_pg,
++	__free_pages(vcpu->arch.hdbss.hdbss_pg,
+ 		     FIELD_GET(HDBSSBR_EL2_SZ_MASK,
+ 			       vcpu->arch.hdbss.hdbssbr_el2));
+ 
+-	vcpu->arch.hdbss.base_phys = 0;
++	vcpu->arch.hdbss.hdbss_pg = NULL;
+ 	vcpu->arch.hdbss.hdbssbr_el2 = 0;
+ }
+ 
+@@ -63,11 +55,11 @@ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ 
+ 	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
+ 
+-	/* Do nothing if HDBSS buffer is empty or br_el2 is NULL */
+-	if (curr_idx == 0 || vcpu->arch.hdbss.hdbssbr_el2 == 0)
++	/* Do nothing if HDBSS buffer is empty or not allocated */
++	if (curr_idx == 0 || !vcpu->arch.hdbss.hdbss_pg)
+ 		return;
+ 
+-	hdbss_buf = page_address(phys_to_page(vcpu->arch.hdbss.base_phys));
++	hdbss_buf = page_address(vcpu->arch.hdbss.hdbss_pg);
+ 	if (!hdbss_buf)
+ 		return;
+ 
+@@ -94,6 +86,9 @@ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 	u64 prod;
+ 	u64 fsc;
+ 
++	if (WARN_ON_ONCE(!system_supports_hdbss()))
++		return -EFAULT;
++
+ 	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
+ 	fsc = FIELD_GET(HDBSSPROD_EL2_FSC_MASK, prod);
+ 
+@@ -114,25 +109,6 @@ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 	}
+ }
+ 
+-static unsigned int hdbss_auto_select_order(struct kvm *kvm)
+-{
+-	unsigned long npages = 0;
+-	struct kvm_memory_slot *memslot;
+-	int bkt;
+-
+-	kvm_for_each_memslot(memslot, bkt, kvm_memslots(kvm))
+-		npages += memslot->npages;
+-
+-	if (npages <= 16384)
+-		return 0;
+-	else if (npages <= 262144)
+-		return 3;
+-	else if (npages <= 4194304)
+-		return 6;
+-	else
+-		return 9;
+-}
+-
+ /*
+  * Enable HDBSS for all vCPUs in the VM.
+  *
+@@ -148,7 +124,6 @@ static int kvm_arm_enable_hdbss_global(struct kvm *kvm)
+ {
+ 	int err;
+ 	unsigned long i;
+-	unsigned int order;
+ 	struct kvm_vcpu *vcpu;
+ 
+ 	if (!system_supports_hdbss())
+@@ -161,14 +136,13 @@ static int kvm_arm_enable_hdbss_global(struct kvm *kvm)
+ 		return 0;
+ 
+ 	/* Turn it on */
+-	order = hdbss_auto_select_order(kvm);
+ 	kvm_for_each_vcpu(i, vcpu, kvm) {
+-		err = kvm_arm_vcpu_alloc_hdbss(vcpu, order);
++		err = kvm_arm_vcpu_alloc_hdbss(vcpu);
+ 		if (err)
+ 			goto error_alloc;
+ 	}
+ 
+-	kvm->arch.enable_hdbss = true;
++	smp_store_release(&kvm->arch.enable_hdbss, true);
+ 	kvm->arch.mmu.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA;
+ 
+ 	/*
+@@ -182,11 +156,11 @@ static int kvm_arm_enable_hdbss_global(struct kvm *kvm)
+ 
+ error_alloc:
+ 	kvm_for_each_vcpu(i, vcpu, kvm)
+-		if (vcpu->arch.hdbss.base_phys)
++		if (vcpu->arch.hdbss.hdbss_pg)
+ 			kvm_arm_vcpu_free_hdbss(vcpu);
+ 
+-	pr_warn_once("kvm: failed to allocate HDBSS buffers (order=%u), "
+-		     "falling back to software dirty tracking\n", order);
++	pr_warn_once("kvm: failed to allocate HDBSS buffers, "
++		     "falling back to software dirty tracking\n");
+ 	return -ENOMEM;
+ }
+ 
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index f6d0e9e3c694..5575a2ae29c8 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -218,7 +218,7 @@ static void __load_hdbss(struct kvm_vcpu *vcpu)
+ {
+ 	struct kvm *kvm = vcpu->kvm;
+ 
+-	if (!kvm->arch.enable_hdbss)
++	if (!smp_load_acquire(&kvm->arch.enable_hdbss))
+ 		return;
+ 
+ 	write_sysreg_s(vcpu->arch.hdbss.hdbssbr_el2, SYS_HDBSSBR_EL2);
+@@ -239,7 +239,7 @@ void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu)
+ 
+ void kvm_vcpu_put_vhe(struct kvm_vcpu *vcpu)
+ {
+-	if (vcpu->kvm->arch.enable_hdbss)
++	if (smp_load_acquire(&vcpu->kvm->arch.enable_hdbss))
+ 		vcpu->arch.hdbss.hdbssprod_el2 = read_sysreg_s(SYS_HDBSSPROD_EL2);
+ 
+ 	__vcpu_put_deactivate_traps(vcpu);
+-- 
+2.43.0
+

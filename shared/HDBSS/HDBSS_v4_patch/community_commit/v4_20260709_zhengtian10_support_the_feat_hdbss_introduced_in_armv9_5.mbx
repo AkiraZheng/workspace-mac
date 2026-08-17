@@ -1,0 +1,996 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 1/6] KVM: arm64: Enable eager hugepage splitting if
+ HDBSS is available
+From: Leonardo Bras <leo.bras@arm.com>
+Date: Thu, 09 Jul 2026 18:40:21 +0800
+Message-Id: <20260709104026.2612599-2-zhengtian10@huawei.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+FEAT_HDBSS speeds up guest memory dirty tracking by avoiding a page fault
+and saving the entry in a tracking structure.
+
+That may be a problem when we have guest memory backed by hugepages or
+transparent huge pages, as it's not possible to do on-demand hugepage
+splitting, relying only on eager hugepage splitting.
+
+So, at stage2 initialization, enable eager hugepage splitting with
+chunk = 256K * PAGE_SIZE if the system supports HDBSS.
+
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 6c941aaa10c6..e086c01a9325 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1027,8 +1027,12 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long t
+ 	for_each_possible_cpu(cpu)
+ 		*per_cpu_ptr(mmu->last_vcpu_ran, cpu) = -1;
+
+-	 /* The eager page splitting is disabled by default */
+-	mmu->split_page_chunk_size = KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT;
++	 /* The eager page splitting is disabled by default if system has no HDBSS */
++	if (system_supports_hdbss())
++		mmu->split_page_chunk_size = 256 * 1024 * PAGE_SIZE;
++	else
++		mmu->split_page_chunk_size = KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT;
++
+ 	mmu->split_page_cache.gfp_zero = __GFP_ZERO;
+
+ 	mmu->pgd_phys = __pa(pgt->pgd);
+--
+2.33.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 2/6] KVM: arm64: Add support for FEAT_HDBSS
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Thu, 09 Jul 2026 18:40:22 +0800
+Message-Id: <20260709104026.2612599-3-zhengtian10@huawei.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Armv9.5 introduces the Hardware Dirty Bit State Structure (HDBSS)
+feature, indicated by ID_AA64MMFR1_EL1.HAFDBS == 0b0100.
+
+Add CPU capability detection for HDBSS. The feature requires VHE mode
+and is detected via ID_AA64MMFR1_EL1.HAFDBS.HDBSS field. A helper
+function system_supports_hdbss() is provided to check hardware support.
+
+Suggested-by: Zhou Wang <wangzhou1@hisilicon.com>
+Co-developed-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/cpufeature.h |  5 +++++
+ arch/arm64/kernel/cpufeature.c      | 12 ++++++++++++
+ arch/arm64/tools/cpucaps            |  1 +
+ 3 files changed, 18 insertions(+)
+
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index a57870fa96db..bdfab086fd94 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -863,6 +863,11 @@ static inline bool system_supports_haft(void)
+ 	return cpus_have_final_cap(ARM64_HAFT);
+ }
+
++static inline bool system_supports_hdbss(void)
++{
++	return cpus_have_final_cap(ARM64_HAS_HDBSS);
++}
++
+ static __always_inline bool system_supports_mpam(void)
+ {
+ 	return alternative_has_cap_unlikely(ARM64_MPAM);
+diff --git a/arch/arm64/kernel/cpufeature.c b/arch/arm64/kernel/cpufeature.c
+index 9a22df0c5120..aa327eebaf1c 100644
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@ -2131,6 +2131,11 @@ static bool hvhe_possible(const struct arm64_cpu_capabilities *entry,
+ 	return arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_HVHE);
+ }
+
++static bool has_vhe_hdbss(const struct arm64_cpu_capabilities *entry, int cope)
++{
++	return is_kernel_in_hyp_mode() && has_cpuid_feature(entry, cope);
++}
++
+ bool cpu_supports_bbml2_noabort(void)
+ {
+ 	/*
+@@ -2781,6 +2786,13 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
+ 		ARM64_CPUID_FIELDS(ID_AA64MMFR1_EL1, HAFDBS, HAFT)
+ 	},
+ #endif
++	{
++		.desc = "Hardware Dirty state tracking structure (HDBSS)",
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.capability = ARM64_HAS_HDBSS,
++		.matches = has_vhe_hdbss,
++		ARM64_CPUID_FIELDS(ID_AA64MMFR1_EL1, HAFDBS, HDBSS)
++	},
+ 	{
+ 		.desc = "CRC32 instructions",
+ 		.capability = ARM64_HAS_CRC32,
+diff --git a/arch/arm64/tools/cpucaps b/arch/arm64/tools/cpucaps
+index 9b85a84f6fd4..a87706c9d160 100644
+--- a/arch/arm64/tools/cpucaps
++++ b/arch/arm64/tools/cpucaps
+@@ -69,6 +69,7 @@ HAS_VA52
+ HAS_VIRT_HOST_EXTN
+ HAS_WFXT
+ HAS_XNX
++HAS_HDBSS
+ HAFT
+ HW_DBM
+ KVM_HVHE
+--
+2.33.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 3/6] KVM: arm64: Add auto DBM support for hardware dirty
+ tracking
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Thu, 09 Jul 2026 18:40:23 +0800
+Message-Id: <20260709104026.2612599-4-zhengtian10@huawei.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+The DBM (Dirty Bit Modifier) attribute, introduced in ARMv8.1, enables
+hardware to automatically promote write-clean pages to write-dirty. This
+prevents the guest from being trapped in EL2 due to missing write
+permissions.
+
+In this design, DBM is controlled by the page-table level flag
+KVM_PGTABLE_S2_DBM rather than per-PTE software flags. DBM is
+automatically set for writable non-device pages when the page-table has
+KVM_PGTABLE_S2_DBM flag, which is determined at MMU init time based on
+hardware capability.
+
+The DBM bit is set in stage2_set_prot_attr() for initial mappings and
+hugepage splitting, and directly manipulated in
+kvm_pgtable_stage2_relax_perms() when removing write-protection. On
+W->RO downgrade, DBM is cleared to prevent hardware from silently
+upgrading RO+DBM back to W+dirty, which would bypass KVM's write
+tracking.
+
+kvm_pgtable_stage2_pte_prot() does not extract the DBM bit back into
+enum kvm_pgtable_prot because DBM is a page-table policy determined by
+pgt->flags, not a per-PTE property. Callers should check
+pgt->flags & KVM_PGTABLE_S2_DBM instead.
+
+This ensures DBM is consistently applied across all PTEs, including
+during hugepage splitting where child PTEs inherit DBM from the parent
+block entry via the pgt->flags mechanism.
+
+Safety: DBM bit is only interpreted by hardware when VTCR_EL2.HD=1.
+When HDBSS is not enabled (HD=0), ARM architecture guarantees hardware
+completely ignores DBM bit in PTEs.
+
+Co-developed-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Co-developed-by: Leonardo Bras <leo.bras@arm.com>
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h |  4 ++++
+ arch/arm64/kvm/hyp/pgtable.c         | 35 ++++++++++++++++++++++++++--
+ arch/arm64/kvm/mmu.c                 |  3 +++
+ 3 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 41a8687938eb..5e0fac4bfa53 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -93,6 +93,8 @@ typedef u64 kvm_pte_t;
+
+ #define KVM_PTE_LEAF_ATTR_HI_S2_XN	GENMASK(54, 53)
+
++#define KVM_PTE_LEAF_ATTR_HI_S2_DBM	BIT(51)
++
+ #define KVM_PTE_LEAF_ATTR_HI_S1_GP	BIT(50)
+
+ #define KVM_PTE_LEAF_ATTR_S2_PERMS	(KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R | \
+@@ -249,10 +251,12 @@ struct kvm_pgtable_mm_ops {
+  * enum kvm_pgtable_stage2_flags - Stage-2 page-table flags.
+  * @KVM_PGTABLE_S2_IDMAP:	Only use identity mappings.
+  * @KVM_PGTABLE_S2_AS_S1:	Final memory attributes are that of Stage-1.
++ * @KVM_PGTABLE_S2_DBM:	Hardware-managed DBM for writable pages.
+  */
+ enum kvm_pgtable_stage2_flags {
+ 	KVM_PGTABLE_S2_IDMAP			= BIT(0),
+ 	KVM_PGTABLE_S2_AS_S1			= BIT(1),
++	KVM_PGTABLE_S2_DBM			= BIT(2),
+ };
+
+ /**
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 91a7dfad6686..21ec456ecc41 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -731,9 +731,23 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 	if (prot & KVM_PGTABLE_PROT_R)
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+
+-	if (prot & KVM_PGTABLE_PROT_W)
++	if (prot & KVM_PGTABLE_PROT_W) {
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+
++		/*
++		 * Set DBM bit for writable non-device pages if the page-table
++		 * has KVM_PGTABLE_S2_DBM flag (system supports HDBSS).
++		 *
++		 * For stage 2 translations using Indirect permissions, if the
++		 * Effective value of VTCR_EL2.HD is 0, then dirty state is
++		 * managed by software. Hardware only updates the dirty state
++		 * when VTCR_EL2.HD=1 (HDBSS enabled).
++		 */
++		if ((pgt->flags & KVM_PGTABLE_S2_DBM) &&
++		    !(prot & KVM_PGTABLE_PROT_DEVICE))
++			attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++	}
++
+ 	if (!kvm_lpa2_is_enabled())
+ 		attr |= FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S2_SH, sh);
+
+@@ -1367,9 +1381,26 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 	if (prot & KVM_PGTABLE_PROT_R)
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+
+-	if (prot & KVM_PGTABLE_PROT_W)
++	if (prot & KVM_PGTABLE_PROT_W) {
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+
++		/*
++		 * No DEVICE filter needed here: relax_perms is only called
++		 * on FSC_PERM faults. Device pages always get full RW from
++		 * initial mapping and are never write-protected during
++		 * migration, so they never trigger a permission fault.
++		 */
++		if (pgt->flags & KVM_PGTABLE_S2_DBM)
++			set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++	} else {
++		/*
++		 * Clear DBM on W→RO downgrade to prevent hardware from
++		 * silently upgrading RO+DBM back to W+dirty, which would
++		 * bypass KVM's write tracking and cause data corruption.
++		 */
++		clr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++	}
++
+ 	ret = stage2_set_xn_attr(prot, &xn);
+ 	if (ret)
+ 		return ret;
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index e086c01a9325..346efed6e605 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1014,6 +1014,9 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long t
+ 	if (err)
+ 		goto out_free_pgtable;
+
++	if (system_supports_hdbss())
++		pgt->flags |= KVM_PGTABLE_S2_DBM;
++
+ 	mmu->pgt = pgt;
+ 	if (is_protected_kvm_enabled())
+ 		return 0;
+--
+2.33.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 4/6] KVM: arm64: Add HDBSS per-vCPU buffer management
+From: eillon <yezhenyu2@huawei.com>
+Date: Thu, 09 Jul 2026 18:40:24 +0800
+Message-Id: <20260709104026.2612599-5-zhengtian10@huawei.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Add HDBSS (Hardware Dirty Bit State Structure) per-vCPU buffer
+management including allocation, freeing, and loading of HDBSS
+registers during vCPU load.
+
+This patch creates the foundational infrastructure:
+- struct vcpu_hdbss_state and enable_hdbss/hdbss_order in kvm_arch
+- kvm_dirty_bit.h header with alloc/free declarations
+- dirty_bit.c with alloc/free helpers
+- __load_hdbss() in VHE switch for register loading
+- vCPU create/destroy hooks for buffer lifecycle
+- sysreg definitions for HDBSS register manipulation
+- Makefile update for dirty_bit.o
+
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h | 16 ++++++++
+ arch/arm64/include/asm/kvm_host.h      | 13 +++++++
+ arch/arm64/include/asm/sysreg.h        | 11 ++++++
+ arch/arm64/kvm/Makefile                |  1 +
+ arch/arm64/kvm/arm.c                   |  7 ++++
+ arch/arm64/kvm/dirty_bit.c             | 52 ++++++++++++++++++++++++++
+ arch/arm64/kvm/hyp/vhe/switch.c        | 15 ++++++++
+ arch/arm64/kvm/mmu.c                   |  1 +
+ arch/arm64/kvm/reset.c                 |  4 ++
+ 9 files changed, 120 insertions(+)
+ create mode 100644 arch/arm64/include/asm/kvm_dirty_bit.h
+ create mode 100644 arch/arm64/kvm/dirty_bit.c
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+new file mode 100644
+index 000000000000..84b12f0a10af
+--- /dev/null
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Copyright (C) 2026 ARM Ltd.
++ * Author: Leonardo Bras <leo.bras@arm.com>
++ */
++
++#ifndef __ARM64_KVM_DIRTY_BIT_H__
++#define __ARM64_KVM_DIRTY_BIT_H__
++
++#include <asm/kvm_pgtable.h>
++#include <asm/sysreg.h>
++
++int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu, unsigned int order);
++void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
++
++#endif /* __ARM64_KVM_DIRTY_BIT_H__ */
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index bae2c4f92ef5..c41ec6d9c45a 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -420,6 +420,10 @@ struct kvm_arch {
+ 	 */
+ 	struct kvm_protected_vm pkvm;
+
++	/* HDBSS: per-VM dirty tracking state */
++	bool enable_hdbss;
++	unsigned int hdbss_order;
++
+ #ifdef CONFIG_PTDUMP_STAGE2_DEBUGFS
+ 	/* Nested virtualization info */
+ 	struct dentry *debugfs_nv_dentry;
+@@ -838,6 +842,12 @@ struct vcpu_reset_state {
+ 	bool		reset;
+ };
+
++struct vcpu_hdbss_state {
++	phys_addr_t base_phys;   /* for memory free */
++	u64 hdbssbr_el2;         /* load directly */
++	u64 hdbssprod_el2;       /* save directly */
++};
++
+ struct vncr_tlb;
+
+ struct kvm_vcpu_arch {
+@@ -945,6 +955,9 @@ struct kvm_vcpu_arch {
+
+ 	/* Hyp-readable copy of kvm_vcpu::pid */
+ 	pid_t pid;
++
++	/* HDBSS registers info */
++	struct vcpu_hdbss_state hdbss;
+ };
+
+ /*
+diff --git a/arch/arm64/include/asm/sysreg.h b/arch/arm64/include/asm/sysreg.h
+index 7aa08d59d494..1354a58c3316 100644
+--- a/arch/arm64/include/asm/sysreg.h
++++ b/arch/arm64/include/asm/sysreg.h
+@@ -1039,6 +1039,17 @@
+
+ #define GCS_CAP(x)	((((unsigned long)x) & GCS_CAP_ADDR_MASK) | \
+ 					       GCS_CAP_VALID_TOKEN)
++
++/*
++ * Definitions for the HDBSS feature
++ */
++#define HDBSS_MAX_ORDER		HDBSSBR_EL2_SZ_2MB
++
++#define HDBSSBR_EL2(baddr, sz)	(((baddr) & HDBSSBR_EL2_BADDR_MASK) | \
++				 FIELD_PREP(HDBSSBR_EL2_SZ_MASK, sz))
++
++#define HDBSSPROD_IDX(prod)	FIELD_GET(HDBSSPROD_EL2_INDEX_MASK, prod)
++
+ /*
+  * Definitions for GICv5 instructions
+  */
+diff --git a/arch/arm64/kvm/Makefile b/arch/arm64/kvm/Makefile
+index 59612d2f277c..ec2749af64fa 100644
+--- a/arch/arm64/kvm/Makefile
++++ b/arch/arm64/kvm/Makefile
+@@ -18,6 +18,7 @@ kvm-y += arm.o mmu.o mmio.o psci.o hypercalls.o pvtime.o \
+ 	 guest.o debug.o reset.o sys_regs.o stacktrace.o \
+ 	 vgic-sys-reg-v3.o fpsimd.o pkvm.o \
+ 	 arch_timer.o trng.o vmid.o emulate-nested.o nested.o at.o \
++	 dirty_bit.o \
+ 	 vgic/vgic.o vgic/vgic-init.o \
+ 	 vgic/vgic-irqfd.o vgic/vgic-v2.o \
+ 	 vgic/vgic-v3.o vgic/vgic-v4.o \
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 50adfff75be8..bf6688245d83 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -38,6 +38,7 @@
+ #include <asm/kvm_asm.h>
+ #include <asm/kvm_emulate.h>
+ #include <asm/kvm_hyp.h>
++#include <asm/kvm_dirty_bit.h>
+ #include <asm/kvm_mmu.h>
+ #include <asm/kvm_nested.h>
+ #include <asm/kvm_pkvm.h>
+@@ -565,6 +566,12 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
+ 	if (err)
+ 		kvm_vgic_vcpu_destroy(vcpu);
+
++	if (vcpu->kvm->arch.enable_hdbss) {
++		err = kvm_arm_vcpu_alloc_hdbss(vcpu, vcpu->kvm->arch.hdbss_order);
++		if (err)
++			kvm_vgic_vcpu_destroy(vcpu);
++	}
++
+ 	return err;
+ }
+
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+new file mode 100644
+index 000000000000..6c7a6ef66b5a
+--- /dev/null
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (C) 2026 ARM Ltd.
++ * Author: Leonardo Bras <leo.bras@arm.com>
++ */
++
++#include <asm/kvm_dirty_bit.h>
++#include <asm/kvm_mmu.h>
++#include <asm/sysreg.h>
++#include <linux/gfp.h>
++#include <linux/kconfig.h>
++#include <linux/mm.h>
++
++int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu, unsigned int order)
++{
++	struct page *hdbss_pg = NULL;
++
++	if (vcpu->arch.hdbss.hdbssbr_el2 || !system_supports_hdbss())
++		return 0;
++
++	if (order > HDBSS_MAX_ORDER)
++		return -EINVAL;
++
++	hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT, order);
++	if (!hdbss_pg)
++		return -ENOMEM;
++
++	vcpu->arch.hdbss = (struct vcpu_hdbss_state) {
++		.base_phys = page_to_phys(hdbss_pg),
++		.hdbssbr_el2 = HDBSSBR_EL2(page_to_phys(hdbss_pg), order),
++		.hdbssprod_el2 = 0,
++	};
++
++	return 0;
++}
++
++void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
++{
++	struct page *hdbss_pg;
++
++	if (!vcpu->arch.hdbss.hdbssbr_el2) {
++		return;
++	}
++
++	hdbss_pg = phys_to_page(vcpu->arch.hdbss.base_phys);
++	if (hdbss_pg)
++		__free_pages(hdbss_pg,
++		     FIELD_GET(HDBSSBR_EL2_SZ_MASK,
++			       vcpu->arch.hdbss.hdbssbr_el2));
++
++	vcpu->arch.hdbss.hdbssbr_el2 = 0;
++}
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index bbe9cebd3d9d..fe72944bfd3d 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -22,6 +22,7 @@
+ #include <asm/kvm_emulate.h>
+ #include <asm/kvm_hyp.h>
+ #include <asm/kvm_mmu.h>
++#include <asm/kvm_dirty_bit.h>
+ #include <asm/fpsimd.h>
+ #include <asm/debug-monitors.h>
+ #include <asm/processor.h>
+@@ -213,6 +214,19 @@ static void __vcpu_put_deactivate_traps(struct kvm_vcpu *vcpu)
+ 	local_irq_restore(flags);
+ }
+
++static void __load_hdbss(struct kvm_vcpu *vcpu)
++{
++	struct kvm *kvm = vcpu->kvm;
++
++	if (!kvm->arch.enable_hdbss)
++		return;
++
++	write_sysreg_s(vcpu->arch.hdbss.hdbssbr_el2, SYS_HDBSSBR_EL2);
++	write_sysreg_s(vcpu->arch.hdbss.hdbssprod_el2, SYS_HDBSSPROD_EL2);
++
++	isb();
++}
++
+ void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu)
+ {
+ 	host_data_ptr(host_ctxt)->__hyp_running_vcpu = vcpu;
+@@ -220,6 +234,7 @@ void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu)
+ 	__vcpu_load_switch_sysregs(vcpu);
+ 	__vcpu_load_activate_traps(vcpu);
+ 	__load_stage2(vcpu->arch.hw_mmu);
++	__load_hdbss(vcpu);
+ }
+
+ void kvm_vcpu_put_vhe(struct kvm_vcpu *vcpu)
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 346efed6e605..83251d95bf3f 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -16,6 +16,7 @@
+ #include <asm/cacheflush.h>
+ #include <asm/kvm_arm.h>
+ #include <asm/kvm_mmu.h>
++#include <asm/kvm_dirty_bit.h>
+ #include <asm/kvm_pgtable.h>
+ #include <asm/kvm_pkvm.h>
+ #include <asm/kvm_asm.h>
+diff --git a/arch/arm64/kvm/reset.c b/arch/arm64/kvm/reset.c
+index b963fd975aac..d8104bcbd9ff 100644
+--- a/arch/arm64/kvm/reset.c
++++ b/arch/arm64/kvm/reset.c
+@@ -27,6 +27,7 @@
+ #include <asm/kvm_asm.h>
+ #include <asm/kvm_emulate.h>
+ #include <asm/kvm_mmu.h>
++#include <asm/kvm_dirty_bit.h>
+ #include <asm/kvm_nested.h>
+ #include <asm/virt.h>
+
+@@ -161,6 +162,9 @@ void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu)
+ 	free_page((unsigned long)vcpu->arch.ctxt.vncr_array);
+ 	kfree(vcpu->arch.vncr_tlb);
+ 	kfree(vcpu->arch.ccsidr);
++
++	if (vcpu->kvm->arch.enable_hdbss)
++		kvm_arm_vcpu_free_hdbss(vcpu);
+ }
+
+ static void kvm_vcpu_reset_sve(struct kvm_vcpu *vcpu)
+--
+2.33.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 5/6] KVM: arm64: Add HDBSS fault handling and buffer
+ flush
+From: eillon <yezhenyu2@huawei.com>
+Date: Thu, 09 Jul 2026 18:40:25 +0800
+Message-Id: <20260709104026.2612599-6-zhengtian10@huawei.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Add HDBSS fault handling for buffer full, external abort, and general
+protection fault (GPF) events. When the HDBSS buffer becomes full,
+the hardware traps to EL2 with an HDBSSF event, which is handled by
+setting a flush request.
+
+Add kvm_flush_hdbss_buffer() to consume HDBSS buffer entries and
+propagate dirty information into the userspace-visible dirty bitmap.
+Flush is triggered on vcpu_put, check_vcpu_requests, and
+sync_dirty_log.
+
+Add esr_iss2_is_hdbssf() helper for HDBSS fault detection in guest
+abort handling.
+
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/esr.h           |  5 +++
+ arch/arm64/include/asm/kvm_dirty_bit.h | 11 +++++
+ arch/arm64/include/asm/kvm_host.h      |  1 +
+ arch/arm64/kvm/arm.c                   | 14 ++++++
+ arch/arm64/kvm/dirty_bit.c             | 62 ++++++++++++++++++++++++++
+ arch/arm64/kvm/mmu.c                   |  4 ++
+ 6 files changed, 97 insertions(+)
+
+diff --git a/arch/arm64/include/asm/esr.h b/arch/arm64/include/asm/esr.h
+index 81c17320a588..2e6b679b5908 100644
+--- a/arch/arm64/include/asm/esr.h
++++ b/arch/arm64/include/asm/esr.h
+@@ -437,6 +437,11 @@
+ #ifndef __ASSEMBLER__
+ #include <asm/types.h>
+
++static inline bool esr_iss2_is_hdbssf(unsigned long esr)
++{
++	return ESR_ELx_ISS2(esr) & ESR_ELx_HDBSSF;
++}
++
+ static inline unsigned long esr_brk_comment(unsigned long esr)
+ {
+ 	return esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index 84b12f0a10af..4b28000e972f 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -10,7 +10,18 @@
+ #include <asm/kvm_pgtable.h>
+ #include <asm/sysreg.h>
+
++/* HDBSS entry field definitions */
++#define HDBSS_ENTRY_VALID	BIT(0)
++#define HDBSS_ENTRY_TTWL_SHIFT (1)
++#define HDBSS_ENTRY_TTWL_MASK (GENMASK(3, 1))
++#define HDBSS_ENTRY_TTWL(x) \
++	(((x) << HDBSS_ENTRY_TTWL_SHIFT) & HDBSS_ENTRY_TTWL_MASK)
++#define HDBSS_ENTRY_TTWL_RESV HDBSS_ENTRY_TTWL(-4)
++#define HDBSS_ENTRY_IPA	GENMASK_ULL(55, 12)
++
+ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu, unsigned int order);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
++int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
+
+ #endif /* __ARM64_KVM_DIRTY_BIT_H__ */
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index c41ec6d9c45a..cecfb884a64f 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -55,6 +55,7 @@
+ #define KVM_REQ_GUEST_HYP_IRQ_PENDING	KVM_ARCH_REQ(9)
+ #define KVM_REQ_MAP_L1_VNCR_EL2		KVM_ARCH_REQ(10)
+ #define KVM_REQ_VGIC_PROCESS_UPDATE	KVM_ARCH_REQ(11)
++#define KVM_REQ_FLUSH_HDBSS			KVM_ARCH_REQ(12)
+
+ #define KVM_DIRTY_LOG_MANUAL_CAPS   (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE | \
+ 				     KVM_DIRTY_LOG_INITIALLY_SET)
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index bf6688245d83..566953a4e23a 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -755,6 +755,9 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ 		kvm_vcpu_put_hw_mmu(vcpu);
+ 	kvm_arm_vmid_clear_active();
+
++	if (vcpu->kvm->arch.enable_hdbss)
++		kvm_flush_hdbss_buffer(vcpu);
++
+ 	vcpu_clear_on_unsupported_cpu(vcpu);
+ 	vcpu->cpu = -1;
+ }
+@@ -1157,6 +1160,9 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
+ 		if (kvm_dirty_ring_check_request(vcpu))
+ 			return 0;
+
++		if (kvm_check_request(KVM_REQ_FLUSH_HDBSS, vcpu))
++			kvm_flush_hdbss_buffer(vcpu);
++
+ 		check_nested_vcpu_requests(vcpu);
+ 	}
+
+@@ -1971,7 +1977,15 @@ long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
+
+ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ {
++	/*
++	 * Flush all CPUs' dirty log buffers to the dirty_bitmap.  Called
++	 * before reporting dirty_bitmap to userspace. Send a request with
++	 * KVM_REQUEST_WAIT to flush buffer synchronously.
++	 */
++	if (!kvm->arch.enable_hdbss)
++		return;
+
++	kvm_make_all_cpus_request(kvm, KVM_REQ_FLUSH_HDBSS | KVM_REQUEST_WAIT);
+ }
+
+ static int kvm_vm_ioctl_set_device_addr(struct kvm *kvm,
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 6c7a6ef66b5a..002366337637 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -50,3 +50,65 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+
+ 	vcpu->arch.hdbss.hdbssbr_el2 = 0;
+ }
++
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
++{
++	int idx, curr_idx;
++	u64 *hdbss_buf;
++	struct kvm *kvm = vcpu->kvm;
++
++	if (!kvm->arch.enable_hdbss)
++		return;
++
++	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
++
++	/* Do nothing if HDBSS buffer is empty or br_el2 is NULL */
++	if (curr_idx == 0 || vcpu->arch.hdbss.hdbssbr_el2 == 0)
++		return;
++
++	hdbss_buf = page_address(phys_to_page(vcpu->arch.hdbss.base_phys));
++	if (!hdbss_buf)
++		return;
++
++	guard(write_lock_irqsave)(&vcpu->kvm->mmu_lock);
++	for (idx = 0; idx < curr_idx; idx++) {
++		u64 gpa;
++
++		gpa = hdbss_buf[idx];
++		if (!(gpa & HDBSS_ENTRY_VALID))
++			continue;
++
++		gpa &= HDBSS_ENTRY_IPA;
++		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
++	}
++
++	/* reset HDBSS index */
++	write_sysreg_s(0, SYS_HDBSSPROD_EL2);
++	vcpu->arch.hdbss.hdbssprod_el2 = 0;
++	isb();
++}
++
++int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
++{
++	u64 prod;
++	u64 fsc;
++
++	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
++	fsc = FIELD_GET(HDBSSPROD_EL2_FSC_MASK, prod);
++
++	switch (fsc) {
++	case HDBSSPROD_EL2_FSC_OK:
++		/* Buffer full, set request to flush on next vcpu exit */
++		kvm_make_request(KVM_REQ_FLUSH_HDBSS, vcpu);
++		return 1;
++	case HDBSSPROD_EL2_FSC_ExternalAbort:
++	case HDBSSPROD_EL2_FSC_GPF:
++		return -EFAULT;
++	default:
++		/* Unknown fault. */
++		WARN_ONCE(1,
++			  "Unexpected HDBSS fault type, FSC: 0x%llx (prod=0x%llx, vcpu=%d)\n",
++			  fsc, prod, vcpu->vcpu_id);
++		return -EFAULT;
++	}
++}
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 83251d95bf3f..949fb895add6 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2242,6 +2242,7 @@ int kvm_handle_guest_sea(struct kvm_vcpu *vcpu)
+ }
+
+ /**
++
+  * kvm_handle_guest_abort - handles all 2nd stage aborts
+  * @vcpu:	the VCPU pointer
+  *
+@@ -2279,6 +2280,9 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+
+ 	is_iabt = kvm_vcpu_trap_is_iabt(vcpu);
+
++	if (esr_iss2_is_hdbssf(esr))
++		return kvm_handle_hdbss_fault(vcpu);
++
+ 	if (esr_fsc_is_translation_fault(esr)) {
+ 		/* Beyond sanitised PARange (which is the IPA limit) */
+ 		if (fault_ipa >= BIT_ULL(get_kvm_ipa_limit())) {
+--
+2.33.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 6/6] KVM: arm64: Add auto HDBSS enable/disable on dirty
+ logging change
+From: eillon <yezhenyu2@huawei.com>
+Date: Thu, 09 Jul 2026 18:40:26 +0800
+Message-Id: <20260709104026.2612599-7-zhengtian10@huawei.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+HDBSS buffers store per-page dirty state after the stage-2 page tables
+have been split down to page granularity (chunk_size == PAGE_SIZE).
+When chunk_size == 0 the kernel may lazily skip splitting block mappings,
+leaving the page table coarser than what HDBSS expects. Therefore,
+enabling HDBSS requires disabling lazy split so that all block mappings
+are eagerly broken down before the buffer starts recording.
+
+Add VM-level HDBSS enable/disable support. When dirty logging is
+enabled on any memslot, HDBSS is automatically enabled. When dirty
+logging is disabled on all memslots, HDBSS is automatically disabled.
+
+This includes:
+- kvm_arm_enable_hdbss_global() to enable HDBSS for all vCPUs
+- kvm_arm_disable_hdbss_global() to disable and free HDBSS buffers
+- kvm_arm_hdbss_on_dirty_logging_change() for auto enable/disable
+- kvm_arch_destroy_vm() cleanup path
+- kvm_arch_commit_memory_region() integration
+
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h |   2 +
+ arch/arm64/kvm/arm.c                   |   8 ++
+ arch/arm64/kvm/dirty_bit.c             | 105 +++++++++++++++++++++++++
+ arch/arm64/kvm/mmu.c                   |   3 +
+ 4 files changed, 118 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index 4b28000e972f..a4cda8cdab24 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -23,5 +23,7 @@ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu, unsigned int order);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
++void kvm_arm_hdbss_on_dirty_logging_change(struct kvm *kvm, int nr_memslots_logging);
++void kvm_arm_disable_hdbss_global(struct kvm *kvm);
+
+ #endif /* __ARM64_KVM_DIRTY_BIT_H__ */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 566953a4e23a..536d94799ba8 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -317,6 +317,14 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
+ 	if (is_protected_kvm_enabled())
+ 		pkvm_destroy_hyp_vm(kvm);
+
++	/*
++	 * Userspace may destroy the VM without disabling dirty logging,
++	 * so the auto-disable path is never reached. Force disable HDBSS
++	 * here to ensure vCPU buffers are freed and prevent memory leaks.
++	 */
++	if (kvm->arch.enable_hdbss)
++		kvm_arm_disable_hdbss_global(kvm);
++
+ 	kvm_uninit_stage2_mmu(kvm);
+ 	kvm_destroy_mpidr_data(kvm);
+
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 002366337637..c5bf866c23ef 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -112,3 +112,108 @@ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 		return -EFAULT;
+ 	}
+ }
++
++static unsigned int hdbss_auto_select_order(struct kvm *kvm)
++{
++	unsigned long npages = 0;
++	struct kvm_memory_slot *memslot;
++	int bkt;
++
++	kvm_for_each_memslot(memslot, bkt, kvm_memslots(kvm))
++		npages += memslot->npages;
++
++	if (npages <= 16384)
++		return 0;
++	else if (npages <= 262144)
++		return 3;
++	else if (npages <= 4194304)
++		return 6;
++	else
++		return 9;
++}
++
++/*
++ * Enable HDBSS for all vCPUs in the VM.
++ *
++ * Called from kvm_arm_hdbss_on_dirty_logging_change() which is invoked
++ * by kvm_arch_commit_memory_region() under kvm->slots_lock.
++ *
++ * If buffer allocation fails, HDBSS remains disabled and dirty tracking
++ * falls back to the traditional software-based approach (PTE write-protect
++ * + software dirty marking). This does not affect correctness; dirty
++ * logging remains functional without HDBSS.
++ */
++static int kvm_arm_enable_hdbss_global(struct kvm *kvm)
++{
++	int err;
++	unsigned long i;
++	unsigned int order;
++	struct kvm_vcpu *vcpu;
++
++	if (!system_supports_hdbss())
++		return 0;
++
++	if (kvm->dirty_ring_size) /* Don't support HDBSS in dirty ring mode */
++		return 0;
++
++	if (kvm->arch.enable_hdbss) /* Already On */
++		return 0;
++
++	/* Turn it on */
++	order = hdbss_auto_select_order(kvm);
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		err = kvm_arm_vcpu_alloc_hdbss(vcpu, order);
++		if (err)
++			goto error_alloc;
++	}
++
++	kvm->arch.enable_hdbss = true;
++	kvm->arch.mmu.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA;
++
++	/*
++	 * We should kick vcpus out of guest mode here to load new
++	 * vtcr value to vtcr_el2 register when re-enter guest mode.
++	 */
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_vcpu_kick(vcpu);
++
++	return 0;
++
++error_alloc:
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		if (vcpu->arch.hdbss.base_phys)
++			kvm_arm_vcpu_free_hdbss(vcpu);
++
++	pr_warn_once("kvm: failed to allocate HDBSS buffers (order=%u), "
++		     "falling back to software dirty tracking\n", order);
++	return -ENOMEM;
++}
++
++void kvm_arm_disable_hdbss_global(struct kvm *kvm)
++{
++	unsigned long i;
++	struct kvm_vcpu *vcpu;
++
++	if (!kvm->arch.enable_hdbss) /* Already Off */
++		return;
++
++	/* Turn it off */
++	kvm->arch.mmu.vtcr &= ~(VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA);
++
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_arm_vcpu_free_hdbss(vcpu);
++
++	kvm->arch.enable_hdbss = false;
++}
++
++void kvm_arm_hdbss_on_dirty_logging_change(struct kvm *kvm, int nr_memslots_logging)
++{
++	/*
++	 * Called from kvm_arch_commit_memory_region() under kvm->slots_lock.
++	 * All state transitions are serialized by slots_lock.
++	 */
++	if (nr_memslots_logging > 0 && !kvm->arch.enable_hdbss)
++		kvm_arm_enable_hdbss_global(kvm);
++	else if (nr_memslots_logging == 0 && kvm->arch.enable_hdbss)
++		kvm_arm_disable_hdbss_global(kvm);
++}
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 949fb895add6..484f48dae000 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2588,6 +2588,9 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ {
+ 	bool log_dirty_pages = new && new->flags & KVM_MEM_LOG_DIRTY_PAGES;
+
++	kvm_arm_hdbss_on_dirty_logging_change(kvm,
++		atomic_read(&kvm->nr_memslots_dirty_logging));
++
+ 	/*
+ 	 * At this point memslot has been committed and there is an
+ 	 * allocated dirty_bitmap[], dirty pages will be tracked while the
+--
+2.33.0
+

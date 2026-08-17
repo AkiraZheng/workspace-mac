@@ -1,0 +1,208 @@
+From c7a8250b52cac883240a70621f8b662aa13485e9 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sun, 16 Aug 2026 00:10:08 +0800
+Subject: [PATCH 10/14] KVM: arm64: HDBSS v5 Phase 3.2: Guard against nested
+ virtualization
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+All per-vCPU HDBSS code paths were checking vcpu->kvm->arch.mmu.vtcr
+(the L1 VM's VTCR) instead of vcpu->arch.hw_mmu->vtcr (the actual S2
+MMU's VTCR).  When running L2 (nested), the shadow S2 MMU's VTCR does
+not have HDBSS bits, but the code would still load/save/flush HDBSS
+registers based on the L1 VTCR check.
+
+Introduce vcpu_hdbss_enabled() helper that checks the vCPU's current
+hw_mmu->vtcr, and use it in all per-vCPU HDBSS paths:
+- __load_hdbss(): skip loading HDBSS regs when shadow S2 has no HDBSS
+- kvm_vcpu_put_vhe(): skip saving HDBSSPROD_EL2 when shadow S2 has no
+  HDBSS
+- kvm_flush_hdbss_buffer(): skip flushing when shadow S2 has no HDBSS
+- kvm_handle_hdbss_fault(): WARN if HDBSS fault arrives while shadow
+  S2 has no HDBSS (should never happen)
+- kvm_arch_vcpu_put(): move flush before kvm_vcpu_put_hw_mmu() so
+  hw_mmu is still valid
+
+VM-level checks (kvm_arm_enable/disable_hdbss_global,
+kvm_arch_sync_dirty_log, kvm_arch_destroy_vm) keep using
+kvm->arch.mmu.vtcr — these operate on the L1 VM's VTCR to enable/
+disable HDBSS globally and send flush requests.  The actual per-vCPU
+flush in kvm_flush_hdbss_buffer() now correctly uses hw_mmu->vtcr.
+
+Base commit: 0e35b9b6ec0f
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h | 33 ++++++++++++++++++++++++++
+ arch/arm64/kvm/arm.c                   | 11 +++++----
+ arch/arm64/kvm/dirty_bit.c             | 13 ++++++----
+ arch/arm64/kvm/hyp/vhe/switch.c        |  6 ++---
+ 4 files changed, 49 insertions(+), 14 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index 16035b27fa5c..c7b9e7f52fba 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -19,6 +19,39 @@
+ #define HDBSS_ENTRY_TTWL_RESV HDBSS_ENTRY_TTWL(-4)
+ #define HDBSS_ENTRY_IPA	GENMASK_ULL(55, 12)
+ 
++/*
++ * VM-level HDBSS check — L1 only, does not filter nested (L2).
++ *
++ * Tests kvm->arch.mmu.vtcr, which always reflects the L1 VM's HDBSS
++ * state regardless of whether a vCPU is currently running L2.
++ *
++ * Use in VM-level control paths (enable/disable/destroy/sync_dirty_log)
++ * that never touch HDBSS registers directly — they only send requests,
++ * and per-vCPU handlers re-check with vcpu_hdbss_enabled() which does
++ * filter L2.
++ */
++static inline bool kvm_hdbss_enabled(struct kvm *kvm)
++{
++	return kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS;
++}
++
++/*
++ * vCPU-level HDBSS check — filters both L1 and L2.
++ *
++ * Tests hw_mmu->vtcr, the S2 MMU actually in use for this vCPU's
++ * current execution context.  When running L1, hw_mmu points to
++ * kvm->arch.mmu (HDBSS bits present).  When running L2, hw_mmu points
++ * to a shadow S2 MMU (HDBSS bits absent).
++ *
++ * Use in all per-vCPU paths that directly touch HDBSS registers or
++ * buffer (load, put, flush, fault handler).
++ */
++static inline bool vcpu_hdbss_enabled(struct kvm_vcpu *vcpu)
++{
++	return vcpu->arch.hw_mmu &&
++		(vcpu->arch.hw_mmu->vtcr & VTCR_EL2_HDBSS);
++}
++
+ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 32ca0202943b..cf29c9f7eace 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -336,7 +336,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
+ 	 * here to kick all vCPUs out of guest mode before kvm_destroy_vcpus
+ 	 * frees their buffers, preventing hardware UAF.
+ 	 */
+-	if (kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS)
++	if (kvm_hdbss_enabled(kvm))
+ 		kvm_arm_disable_hdbss_global(kvm);
+ 
+ 	kvm_uninit_stage2_mmu(kvm);
+@@ -773,6 +773,10 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ 	kvm_arch_vcpu_put_fp(vcpu);
+ 	if (has_vhe())
+ 		kvm_vcpu_put_vhe(vcpu);
++
++	if (vcpu_hdbss_enabled(vcpu))
++		kvm_flush_hdbss_buffer(vcpu);
++
+ 	kvm_timer_vcpu_put(vcpu);
+ 	kvm_vgic_put(vcpu);
+ 	kvm_vcpu_pmu_restore_host(vcpu);
+@@ -780,9 +784,6 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ 		kvm_vcpu_put_hw_mmu(vcpu);
+ 	kvm_arm_vmid_clear_active();
+ 
+-	if (vcpu->kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS)
+-		kvm_flush_hdbss_buffer(vcpu);
+-
+ 	vcpu_clear_on_unsupported_cpu(vcpu);
+ 	vcpu->cpu = -1;
+ }
+@@ -2007,7 +2008,7 @@ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ 	 * before reporting dirty_bitmap to userspace.  Send a request with
+ 	 * KVM_REQUEST_WAIT to flush buffer synchronously.
+ 	 */
+-	if (!(kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS))
++	if (!kvm_hdbss_enabled(kvm))
+ 		return;
+ 
+ 	kvm_make_all_cpus_request(kvm, KVM_REQ_FLUSH_HDBSS | KVM_REQUEST_WAIT);
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index ef3c54f9d7d0..4024c234c63d 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -52,7 +52,7 @@ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ 	struct kvm *kvm = vcpu->kvm;
+ 	int srcu_idx;
+ 
+-	if (!(kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS))
++	if (!vcpu_hdbss_enabled(vcpu))
+ 		return;
+ 
+ 	curr_idx = HDBSSPROD_IDX(read_sysreg_s(SYS_HDBSSPROD_EL2));
+@@ -92,6 +92,9 @@ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 	if (WARN_ON_ONCE(!system_supports_hdbss()))
+ 		return -EFAULT;
+ 
++	if (WARN_ON_ONCE(!vcpu_hdbss_enabled(vcpu)))
++		return -EFAULT;
++
+ 	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
+ 	fsc = FIELD_GET(HDBSSPROD_EL2_FSC_MASK, prod);
+ 
+@@ -131,7 +134,7 @@ static void kvm_arm_enable_hdbss_global(struct kvm *kvm)
+ 	if (kvm->dirty_ring_size) /* Don't support HDBSS in dirty ring mode */
+ 		return;
+ 
+-	if (kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS) /* Already On */
++	if (kvm_hdbss_enabled(kvm)) /* Already On */
+ 		return;
+ 
+ 	/* Turn it on */
+@@ -146,7 +149,7 @@ static void kvm_arm_enable_hdbss_global(struct kvm *kvm)
+ 
+ void kvm_arm_disable_hdbss_global(struct kvm *kvm)
+ {
+-	if (!(kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS)) /* Already Off */
++	if (!kvm_hdbss_enabled(kvm)) /* Already Off */
+ 		return;
+ 
+ 	/* Turn it off */
+@@ -162,8 +165,8 @@ void kvm_arm_disable_hdbss_global(struct kvm *kvm)
+ 
+ void kvm_arm_hdbss_on_dirty_logging_change(struct kvm *kvm, int nr_memslots_logging)
+ {
+-	if (nr_memslots_logging > 0 && !(kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS))
++	if (nr_memslots_logging > 0 && !kvm_hdbss_enabled(kvm))
+ 		kvm_arm_enable_hdbss_global(kvm);
+-	else if (nr_memslots_logging == 0 && (kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS))
++	else if (nr_memslots_logging == 0 && kvm_hdbss_enabled(kvm))
+ 		kvm_arm_disable_hdbss_global(kvm);
+ }
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index a0e8f4cd1812..c28c1e380127 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -216,9 +216,7 @@ static void __vcpu_put_deactivate_traps(struct kvm_vcpu *vcpu)
+ 
+ static void __load_hdbss(struct kvm_vcpu *vcpu)
+ {
+-	struct kvm *kvm = vcpu->kvm;
+-
+-	if (!(kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS))
++	if (!vcpu_hdbss_enabled(vcpu))
+ 		return;
+ 
+ 	write_sysreg_s(vcpu->arch.hdbss.hdbssbr_el2, SYS_HDBSSBR_EL2);
+@@ -239,7 +237,7 @@ void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu)
+ 
+ void kvm_vcpu_put_vhe(struct kvm_vcpu *vcpu)
+ {
+-	if (vcpu->kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS)
++	if (vcpu_hdbss_enabled(vcpu))
+ 		vcpu->arch.hdbss.hdbssprod_el2 = read_sysreg_s(SYS_HDBSSPROD_EL2);
+ 
+ 	__vcpu_put_deactivate_traps(vcpu);
+-- 
+2.43.0
+

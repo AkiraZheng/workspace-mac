@@ -1,0 +1,174 @@
+From 466d893bc18471d7575252632a764e80e36d996b Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sun, 16 Aug 2026 05:58:49 +0800
+Subject: [PATCH 12/14] KVM: arm64: HDBSS v5 Phase 6: DBM three-state model and
+ block/page wrprotect
+
+Phase 6.1: Remove KVM_PGTABLE_S2_DBM, unconditional DBM
+
+Remove the KVM_PGTABLE_S2_DBM page-table flag and make DBM
+unconditional on writable pages, implementing Oliver Upton's
+three-state dirty tracking model:
+
+  State      DBM  S2AP[1]  Meaning
+  ---------  ----  -------  ------------------------------------
+  N (None)    0      0     Non-writable, write -> fault
+  C (Clean)   1      0     Writable-clean, write -> hw C->D
+  D (Dirty)   1      1     Writable-dirty, no fault
+
+Changes:
+- Remove KVM_PGTABLE_S2_DBM from enum kvm_pgtable_stage2_flags
+- stage2_set_prot_attr(): set DBM on all writable pages
+  unconditionally, no longer gated by pgt->flags or DEVICE filter.
+  Device page writes recorded by HDBSS are naturally dropped during
+  flush because mark_page_dirty_in_slot() filters non-dirty-tracking
+  memslots.
+- kvm_pgtable_stage2_relax_perms(): set DBM unconditionally on
+  W-relax; remove the else branch that cleared DBM on W->RO
+  (RO+DBM = WC is a valid state in the three-state model)
+- kvm_init_stage2_mmu(): remove pgt->flags |= KVM_PGTABLE_S2_DBM
+
+When VTCR_EL2.HD=0 (no HDBSS), DBM has no hardware effect and
+dirty state is managed by software.  When HD=1 (HDBSS enabled),
+hardware manages dirty state transitions automatically.
+
+Phase 6.2: wrprotect distinguishes block/page
+
+In stage2_attr_walker(), strip DBM from block entries (level <
+KVM_PGTABLE_LAST_LEVEL) after applying attr_clr/attr_set:
+
+- Block entry: DBM=0, S2AP_W=0 -> RO, forces fault on first
+  write to trigger split (eager or lazy)
+- Level-3 page: DBM=1, S2AP_W=0 -> WC, HDBSS re-arms on next
+  write to record dirty page
+
+This ensures wrprotect correctly transitions block entries to RO
+(removing DBM to prevent hardware from silently upgrading), while
+leaving page-level entries in WC state for HDBSS to track.
+
+Phase 6.3: No code change needed
+
+The wrprotect-before-split ordering in kvm_arch_commit_memory_region
+and kvm_arch_mmu_enable_log_dirty_pt_masked is already correct.
+Phase 4.4 removed the forced eager split default, so both lazy and
+eager split modes are supported.  The wrprotect block/page behavior
+from 6.2 works correctly in both modes.
+
+Base commit: 0e35b9b6ec0f
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h |  2 --
+ arch/arm64/kvm/hyp/pgtable.c         | 48 +++++++++++++---------------
+ arch/arm64/kvm/mmu.c                 |  3 --
+ 3 files changed, 22 insertions(+), 31 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 5e0fac4bfa53..6d751f23b23a 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -251,12 +251,10 @@ struct kvm_pgtable_mm_ops {
+  * enum kvm_pgtable_stage2_flags - Stage-2 page-table flags.
+  * @KVM_PGTABLE_S2_IDMAP:	Only use identity mappings.
+  * @KVM_PGTABLE_S2_AS_S1:	Final memory attributes are that of Stage-1.
+- * @KVM_PGTABLE_S2_DBM:	Hardware-managed DBM for writable pages.
+  */
+ enum kvm_pgtable_stage2_flags {
+ 	KVM_PGTABLE_S2_IDMAP			= BIT(0),
+ 	KVM_PGTABLE_S2_AS_S1			= BIT(1),
+-	KVM_PGTABLE_S2_DBM			= BIT(2),
+ };
+ 
+ /**
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index d2fd841f8fd1..d730ab08dd39 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -735,17 +735,18 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+ 
+ 		/*
+-		 * Set DBM bit for writable non-device pages if the page-table
+-		 * has KVM_PGTABLE_S2_DBM flag (system supports HDBSS).
++		 * Set DBM bit for all writable pages.
+ 		 *
+-		 * For stage 2 translations using Indirect permissions, if the
+-		 * Effective value of VTCR_EL2.HD is 0, then dirty state is
+-		 * managed by software. Hardware only updates the dirty state
+-		 * when VTCR_EL2.HD=1 (HDBSS enabled).
++		 * DBM is unconditionally set as part of the three-state
++		 * dirty tracking model. When VTCR_EL2.HD=1 (HDBSS enabled),
++		 * hardware manages the dirty state. When HD=0, DBM has no
++		 * hardware effect and is managed by software.
++		 *
++		 * No DEVICE filter needed: mark_page_dirty_in_slot() already
++		 * filters non-dirty-tracking memslots, so device page writes
++		 * recorded by HDBSS are naturally dropped during flush.
+ 		 */
+-		if ((pgt->flags & KVM_PGTABLE_S2_DBM) &&
+-		    !(prot & KVM_PGTABLE_PROT_DEVICE))
+-			attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++		attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+ 	}
+ 
+ 	if (!kvm_lpa2_is_enabled())
+@@ -1248,6 +1249,16 @@ static int stage2_attr_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 	pte &= ~data->attr_clr;
+ 	pte |= data->attr_set;
+ 
++	/*
++	 * Strip DBM from block entries (level < LAST_LEVEL) so that
++	 * write-protect leaves blocks in RO state (DBM=0, S2AP_W=0),
++	 * forcing a fault on first write to trigger split.  Level-3
++	 * pages keep DBM to stay in WC state (DBM=1, S2AP_W=0), allowing
++	 * HDBSS to re-arm on next write.
++	 */
++	if (ctx->level < KVM_PGTABLE_LAST_LEVEL)
++		pte &= ~KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++
+ 	/*
+ 	 * We may race with the CPU trying to set the access flag here,
+ 	 * but worst-case the access flag update gets lost and will be
+@@ -1383,23 +1394,8 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 
+ 	if (prot & KVM_PGTABLE_PROT_W) {
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+-
+-               /*
+-                * No DEVICE filter needed here: relax_perms is only called
+-                * on FSC_PERM faults. Device pages always get full RW from
+-                * initial mapping and are never write-protected during
+-                * migration, so they never trigger a permission fault.
+-                */
+-               if (pgt->flags & KVM_PGTABLE_S2_DBM)
+-                       set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+-       } else {
+-               /*
+-                * Clear DBM on W→RO downgrade to prevent hardware from
+-                * silently upgrading RO+DBM back to W+dirty, which would
+-                * bypass KVM's write tracking and cause data corruption.
+-                */
+-               clr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+-       }
++		set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++	}
+ 
+ 	if (prot & KVM_PGTABLE_PROT_X) {
+ 		ret = stage2_set_xn_attr(prot, &xn);
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 8a7640fa59c8..6d3ba225b686 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1015,9 +1015,6 @@ int kvm_init_stage2_mmu(struct kvm *kvm, struct kvm_s2_mmu *mmu, unsigned long t
+ 	if (err)
+ 		goto out_free_pgtable;
+ 
+-	if (system_supports_hdbss())
+-		pgt->flags |= KVM_PGTABLE_S2_DBM;
+-
+ 	mmu->pgt = pgt;
+ 	if (is_protected_kvm_enabled())
+ 		return 0;
+-- 
+2.43.0
+

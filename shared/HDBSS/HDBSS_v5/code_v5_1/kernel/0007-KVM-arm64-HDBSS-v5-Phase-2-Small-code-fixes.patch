@@ -1,0 +1,96 @@
+From b8eb7f3c5f6eaa511b6b4a40477216f554cdad24 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sat, 15 Aug 2026 04:33:14 +0800
+Subject: [PATCH 07/14] KVM: arm64: HDBSS v5 Phase 2: Small code fixes
+
+Fix several correctness issues within single functions:
+
+2.1 ISB placement (S10/S17/S24):
+  - __load_hdbss(): add ISB between the two sysreg writes
+  - kvm_flush_hdbss_buffer(): move ISB before memory store
+
+2.2 Physical address 0 memory leak (S11):
+  - Use base_phys instead of hdbssbr_el2 to track allocation status,
+    since HDBSSBR_EL2(0, 0) == 0 causes false negative on free
+
+2.3 Save HDBSSPROD_EL2 on vCPU put (S5):
+  - kvm_vcpu_put_vhe(): save hardware producer index back to
+    vcpu->arch.hdbss.hdbssprod_el2 before exiting guest mode
+
+2.4 Add system_supports_hdbss() check in __load_hdbss() (S8):
+  - Prevent UNDEFINED exception if enable_hdbss is set but
+    hardware does not support HDBSS
+
+2.5 Unconditional buffer free in kvm_arm_vcpu_destroy() (S23):
+  - Remove enable_hdbss conditional; kvm_arm_vcpu_free_hdbss()
+    internally checks if buffer is allocated
+
+Based on community_conversion.md Phase 2 tasks.
+Base commit: 0e35b9b6ec0f
+---
+ arch/arm64/kvm/dirty_bit.c      | 5 +++--
+ arch/arm64/kvm/hyp/vhe/switch.c | 3 +++
+ arch/arm64/kvm/reset.c          | 3 +--
+ 3 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 5e30c5267f6d..076391743ad7 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -15,7 +15,7 @@ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu, unsigned int order)
+ {
+ 	struct page *hdbss_pg = NULL;
+ 
+-	if (vcpu->arch.hdbss.hdbssbr_el2 || !system_supports_hdbss())
++	if (vcpu->arch.hdbss.base_phys || !system_supports_hdbss())
+ 		return 0;
+ 
+ 	if (order > HDBSS_MAX_ORDER)
+@@ -38,7 +38,7 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ {
+ 	struct page *hdbss_pg;
+ 
+-	if (!vcpu->arch.hdbss.hdbssbr_el2) {
++	if (!vcpu->arch.hdbss.base_phys) {
+ 		return;
+ 	}
+ 
+@@ -48,6 +48,7 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ 		     FIELD_GET(HDBSSBR_EL2_SZ_MASK,
+ 			       vcpu->arch.hdbss.hdbssbr_el2));
+ 
++	vcpu->arch.hdbss.base_phys = 0;
+ 	vcpu->arch.hdbss.hdbssbr_el2 = 0;
+ }
+ 
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index fe72944bfd3d..f6d0e9e3c694 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -239,6 +239,9 @@ void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu)
+ 
+ void kvm_vcpu_put_vhe(struct kvm_vcpu *vcpu)
+ {
++	if (vcpu->kvm->arch.enable_hdbss)
++		vcpu->arch.hdbss.hdbssprod_el2 = read_sysreg_s(SYS_HDBSSPROD_EL2);
++
+ 	__vcpu_put_deactivate_traps(vcpu);
+ 	__vcpu_put_switch_sysregs(vcpu);
+ 
+diff --git a/arch/arm64/kvm/reset.c b/arch/arm64/kvm/reset.c
+index d8104bcbd9ff..76088b77cbf8 100644
+--- a/arch/arm64/kvm/reset.c
++++ b/arch/arm64/kvm/reset.c
+@@ -163,8 +163,7 @@ void kvm_arm_vcpu_destroy(struct kvm_vcpu *vcpu)
+ 	kfree(vcpu->arch.vncr_tlb);
+ 	kfree(vcpu->arch.ccsidr);
+ 
+-	if (vcpu->kvm->arch.enable_hdbss)
+-		kvm_arm_vcpu_free_hdbss(vcpu);
++	kvm_arm_vcpu_free_hdbss(vcpu);
+ }
+ 
+ static void kvm_vcpu_reset_sve(struct kvm_vcpu *vcpu)
+-- 
+2.43.0
+

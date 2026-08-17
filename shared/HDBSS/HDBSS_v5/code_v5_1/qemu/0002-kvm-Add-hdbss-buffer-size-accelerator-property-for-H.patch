@@ -1,0 +1,144 @@
+From 142ac17a6e972d1820ee32b96c89fca3ca3fa3bb Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sun, 16 Aug 2026 08:51:04 +0800
+Subject: [PATCH 2/2] kvm: Add hdbss-buffer-size accelerator property for HDBSS
+ buffer configuration
+
+Add a new KVM accelerator property 'hdbss-buffer-size' that allows
+userspace to configure the HDBSS (Hardware Dirty Bit State Structure)
+buffer size per-VM before vCPUs are created.
+
+The property accepts a size in bytes (power of 2, range PAGE_SIZE to
+SZ_2M). When set, QEMU calls KVM_ENABLE_CAP with
+KVM_CAP_ARM_HDBSS_BUFFER_SIZE during VM initialization, before any
+vCPUs are created. This is consistent with the dirty-ring-size and
+eager-split-size properties.
+
+Usage: -accel kvm,hdbss-buffer-size=4096
+
+When set to 0 (default), the kernel uses its default buffer size
+(PAGE_SIZE per vCPU).
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ accel/kvm/kvm-all.c      |  1 +
+ include/sysemu/kvm_int.h |  1 +
+ qemu-options.hx          |  1 +
+ target/arm/kvm.c         | 51 ++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 54 insertions(+)
+
+diff --git a/accel/kvm/kvm-all.c b/accel/kvm/kvm-all.c
+index 8323a91e83..522e86ff2f 100644
+--- a/accel/kvm/kvm-all.c
++++ b/accel/kvm/kvm-all.c
+@@ -3864,6 +3864,7 @@ static void kvm_accel_instance_init(Object *obj)
+     s->kvm_dirty_ring_with_bitmap = false;
+     s->kvm_smccc_filter_enabled = false;
+     s->kvm_eager_split_size = 0;
++    s->kvm_hdbss_buffer_size = 0;
+     s->notify_vmexit = NOTIFY_VMEXIT_OPTION_RUN;
+     s->notify_window = 0;
+     s->xen_version = 0;
+diff --git a/include/sysemu/kvm_int.h b/include/sysemu/kvm_int.h
+index 7b90117a86..68e9d21652 100644
+--- a/include/sysemu/kvm_int.h
++++ b/include/sysemu/kvm_int.h
+@@ -115,6 +115,7 @@ struct KVMState
+     bool kvm_dirty_ring_with_bitmap;
+     bool kvm_smccc_filter_enabled;
+     uint64_t kvm_eager_split_size;  /* Eager Page Splitting chunk size */
++    uint32_t kvm_hdbss_buffer_size; /* HDBSS buffer size in entries per vCPU */
+     struct KVMDirtyRingReaper reaper;
+     NotifyVmexitOption notify_vmexit;
+     uint32_t notify_window;
+diff --git a/qemu-options.hx b/qemu-options.hx
+index 24563e51da..5579ea19b7 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -215,6 +215,7 @@ DEF("accel", HAS_ARG, QEMU_OPTION_accel,
+     "                tb-size=n (TCG translation block cache size)\n"
+     "                dirty-ring-size=n (KVM dirty ring GFN count, default 0)\n"
+     "                eager-split-size=n (KVM Eager Page Split chunk size, default 0, disabled. ARM only)\n"
++    "                hdbss-buffer-size=n (KVM HDBSS buffer size in bytes, default 0, kernel default. ARM only)\n"
+     "                notify-vmexit=run|internal-error|disable,notify-window=n (enable notify VM exit and set notify window, x86 only)\n"
+     "                thread=single|multi (enable multi-threaded TCG)\n", QEMU_ARCH_ALL)
+ SRST
+diff --git a/target/arm/kvm.c b/target/arm/kvm.c
+index 09f01827b8..7ede6d5a9b 100644
+--- a/target/arm/kvm.c
++++ b/target/arm/kvm.c
+@@ -435,6 +435,16 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
+         }
+     }
+ 
++    if (s->kvm_hdbss_buffer_size) {
++        ret = kvm_vm_enable_cap(s, KVM_CAP_ARM_HDBSS_BUFFER_SIZE, 0,
++                                s->kvm_hdbss_buffer_size);
++        if (ret < 0) {
++            error_report("Enabling of HDBSS buffer size failed: %s",
++                         strerror(-ret));
++            return ret;
++        }
++    }
++
+     /*
+      * To be able to handle PSCI CPU ON calls in QEMU, we need to install SMCCC
+      * filter in the Host KVM. This is required to support features like
+@@ -1613,6 +1623,40 @@ static void kvm_arch_set_eager_split_size(Object *obj, Visitor *v,
+     s->kvm_eager_split_size = value;
+ }
+ 
++static void kvm_arch_get_hdbss_buffer_size(Object *obj, Visitor *v,
++                                           const char *name, void *opaque,
++                                           Error **errp)
++{
++    KVMState *s = KVM_STATE(obj);
++    uint64_t value = s->kvm_hdbss_buffer_size;
++
++    visit_type_size(v, name, &value, errp);
++}
++
++static void kvm_arch_set_hdbss_buffer_size(Object *obj, Visitor *v,
++                                           const char *name, void *opaque,
++                                           Error **errp)
++{
++    KVMState *s = KVM_STATE(obj);
++    uint64_t value;
++
++    if (s->fd != -1) {
++        error_setg(errp, "Unable to set hdbss-buffer-size after KVM has been initialized");
++        return;
++    }
++
++    if (!visit_type_size(v, name, &value, errp)) {
++        return;
++    }
++
++    if (value && !is_power_of_2(value)) {
++        error_setg(errp, "hdbss-buffer-size must be a power of two");
++        return;
++    }
++
++    s->kvm_hdbss_buffer_size = value;
++}
++
+ static bool virt_get_ipiv(Object *obj, Error **errp)
+ {
+     KVMState *s = KVM_STATE(obj);
+@@ -1636,6 +1680,13 @@ void kvm_arch_accel_class_init(ObjectClass *oc)
+     object_class_property_set_description(oc, "eager-split-size",
+         "Eager Page Split chunk size for hugepages. (default: 0, disabled)");
+ 
++    object_class_property_add(oc, "hdbss-buffer-size", "size",
++                              kvm_arch_get_hdbss_buffer_size,
++                              kvm_arch_set_hdbss_buffer_size, NULL, NULL);
++
++    object_class_property_set_description(oc, "hdbss-buffer-size",
++        "HDBSS buffer size in bytes for hardware dirty page tracking. (default: 0, use kernel default)");
++
+     object_class_property_add_bool(oc, "ipiv",
+                                   virt_get_ipiv,
+                                   virt_set_ipiv);
+-- 
+2.43.0
+
