@@ -1,0 +1,145 @@
+Subject: [PATCH v3 0/11] KVM Dirty-bit cleaning hw accelerator (HACDBS)
+From: Leonardo Bras <leo.bras@arm.com>
+Date: Wed, 29 Jul 2026 11:45:35 +0100
+Message-Id: <20260729104548.3439958-1-leo.bras@arm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Disclaimer: While this patchset is buildable and testable on it's own,
+it is not ready to be merged, as it depends on bits from another
+patchset that will superseed the one in [1], and will enable HDBSS.
+See note below on patch 1.
+
+My expectation on sharing this earlier is to gather feedback on
+implementation and testing methods, to make sure it's sure it's ready
+when [1] becomes ready. It should work for both lazy-splitting 
+and eager-splitting scenarios.
+
+===
+
+Create an arch-generic dirty-bit cleaning acceleration interface, which
+compiles-out if the arch does not implement it, and creates no new API.
+Using that, implement an arm64 accelerator based on HACDBS.
+
+This implementation is able to accelerate the cleaning on both
+dirty-bitmap and dirty-ring tracking mechanisms on KVM.
+
+Patch 1 is here just to make this testable, as this patchset
+depends on bits from HDBSS that are not upstream yet. It is composed
+of a bunch of bits that I collected across HDBSS patches so this can
+work, so few free to ignore it on review. Patch 1 enables eager-splitting
+by default, but that's for testing purposes only, this should work with 
+both eager and lazy splitting, as both mark the page to be clean with
+the DBM bit. 
+
+This version relies on polling HACDBS registers to verify if the processing
+is done, an thus HACDBSIRQ is not enabled/used.
+
+Kernel v7.2-rc5 + this patchset builds properly, passing both kvm selftests
+for dirty-bit tracking[2] and a qemu live migration test, with both
+HW HACDBS enabled or disabled.
+
+On terms of performance improvement, tests were done using
+dirty_log_perf_test[3] to measure the time spent on the following ioctl:
+a - KVM_GET_DIRTY_LOG,     using dirty-bitmap without manual protect
+    command:    ./dirty_log_perf_test -m 3 -m 6 -m 12 -g
+b - KVM_CLEAR_DIRTY_LOG,   using dirty-bitmap with manual protect
+    command:    ./dirty_log_perf_test -m 3 -m 6 -m 12
+c - KVM_RESET_DIRTY_RINGS, using dirty-ring, using 4096 entries/vcpu.
+    command:    ./dirty_log_perf_test -m 3 -m 6 -m 12 -d 4096
+
+Tests ran in the model show that runtime was reduced by:
+-(a) 87.36% (0.08% stdev) for 1GB memory, and
+     87.22% (0.01% stdev) for 3GB memory
+-(b) 85.72% (0.08% stdev) for 1GB memory, and
+     86.10% (0.04% stdev) for 3GB memory
+-(b) 70.08% (0.24% stdev) for 1GB memory, and
+     69.99% (0.03% stdev) for 3GB memory
+
+Which means those syscalls are from 3.3x to 8x faster.
+Above numbers already take into account the improvements in S2
+hugepage-splitting that is implemented by [4].
+
+Please let me know of any question :)
+
+Thanks for reviewing!
+Leo
+
+
+Changes since v2:
+- HACDBS completion is detected by polling registers instead of HACDBSIRQ
+  - No need for ACPI enablement any longer
+  - Fixes issue with possibly waiting forever on wfi()
+- Cleaning routine now protected by preempt_notifiers,
+  - Save reg status on preemption, and restore when it's back.
+  - Was preempt_disable(), which was not good in case of long buffers
+- Improved error paths in case of invalid memslot/range on dirty_ring
+- Added dsb() barrier to make sure the cpu finishes writting to array
+  before HACDBS starts.
+- Fixed page-splitting skipping ranges for dirty-bit.
+- Patches 1 & 2 from v2 merged into patch 1 of v3, as it's only about 
+  setting enough bits to test it. 
+v2 Link: https://lore.kernel.org/all/20260629111820.1873540-1-leo.bras@arm.com/
+
+Changes since v1:
+- Improvements on splitting with manual protect, skipping when cleaning
+  pages from the same level-2 entry. (new patch)
+- Got the correct concept of chunk_size and thus:
+  - Corrected it to a reasonable chunk to do page splitting before
+    rescheduling, considering new improvements from [4].
+  - TTWL is not based in chunk size, so fix it in LAST_LEVEL
+- Minor fixes, removing debugging traces
+v1 Link: https://lore.kernel.org/all/20260430111424.3479613-2-leo.bras@arm.com/
+
+
+[1]: https://lore.kernel.org/all/20260709104026.2612599-1-zhengtian10@huawei.com/
+[2]: dirty_log_test && dirty_log_perf_test
+[3]: using this patchset to enable dirty-ring on dirty_log_perf_test:
+     https://lore.kernel.org/all/20260629105950.1790259-1-leo.bras@arm.com/
+[4]: https://lore.kernel.org/all/20260618131447.764085-1-leo.bras@arm.com/
+
+Leonardo Bras (11):
+  KVM: arm64: HDBSS bits
+  arm64/cpufeature: Add system-wide FEAT_HACDBS detection
+  arm64/sysreg: Add HACDBS consumer and base registers
+  KVM: arm64: dirty_bit: Add base FEAT_HACDBS cleaning routine
+  kvm: Add arch-generic interface for hw-accelerated dirty-bitmap
+    cleaning
+  KVM: arm64: Add hardware-accelerated dirty-bitmap cleaning routine
+  KVM: arm64: Dirty-bitmap: avoid splitting previously split blocks
+  kvm/dirty_ring: Introduce get_memslot and move helpers to header
+  kvm/dirty_ring: Add arch-generic interface for hw-accelerated
+    dirty-ring cleaning
+  KVM: arm64: Add hardware-accelerated dirty-ring cleaning routine
+  KVM: arm64: Enable KVM_HW_DIRTY_BIT
+
+ arch/arm64/include/asm/cpufeature.h    |  10 +
+ arch/arm64/include/asm/kvm_dirty_bit.h |  49 +++
+ arch/arm64/include/asm/kvm_pgtable.h   |   3 +
+ include/linux/kvm_dirty_bit.h          |  34 ++
+ include/linux/kvm_dirty_ring.h         |  12 +
+ include/linux/kvm_host.h               |   3 +
+ arch/arm64/kernel/cpufeature.c         |  20 ++
+ arch/arm64/kvm/dirty_bit.c             | 438 +++++++++++++++++++++++++
+ arch/arm64/kvm/hyp/pgtable.c           |  15 +-
+ arch/arm64/kvm/mmu.c                   |  12 +-
+ virt/kvm/dirty_ring.c                  |  35 +-
+ virt/kvm/kvm_main.c                    |  13 +-
+ arch/arm64/kvm/Kconfig                 |   1 +
+ arch/arm64/kvm/Makefile                |   2 +-
+ arch/arm64/tools/cpucaps               |   2 +
+ arch/arm64/tools/sysreg                |  30 ++
+ virt/kvm/Kconfig                       |   3 +
+ 17 files changed, 660 insertions(+), 22 deletions(-)
+ create mode 100644 arch/arm64/include/asm/kvm_dirty_bit.h
+ create mode 100644 include/linux/kvm_dirty_bit.h
+ create mode 100644 arch/arm64/kvm/dirty_bit.c
+
+
+base-commit: f5098b6bae761e346ebcd9da7f95622c04733cff
+-- 
+2.55.0
+
+
+
