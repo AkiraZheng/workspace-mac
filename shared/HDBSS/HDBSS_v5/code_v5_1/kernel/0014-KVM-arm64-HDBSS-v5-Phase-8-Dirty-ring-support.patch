@@ -1,7 +1,7 @@
 From b34daa7c04fe29253e898aa3dbd42b438d874d9b Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Mon, 17 Aug 2026 03:55:15 +0800
-Subject: [PATCH 14/14] KVM: arm64: HDBSS v5 Phase 8: Dirty ring support
+Subject: [PATCH 14/15] KVM: arm64: HDBSS v5 Phase 8: Dirty ring support
 
 Enable HDBSS to coexist with dirty ring mode, following the x86 PML
 design pattern.  HDBSS buffer entries are flushed into the dirty ring

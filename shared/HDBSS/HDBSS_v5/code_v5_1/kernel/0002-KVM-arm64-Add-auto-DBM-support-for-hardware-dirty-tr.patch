@@ -1,7 +1,7 @@
 From daa5f960868e0bc96ecd1aa6f40a4ae096538421 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Thu, 9 Jul 2026 18:40:23 +0800
-Subject: [PATCH 02/14] KVM: arm64: Add auto DBM support for hardware dirty
+Subject: [PATCH 02/15] KVM: arm64: Add auto DBM support for hardware dirty
  tracking
 
 The DBM (Dirty Bit Modifier) attribute, introduced in ARMv8.1, enables
