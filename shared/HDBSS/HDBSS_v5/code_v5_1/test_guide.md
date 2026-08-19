@@ -32,15 +32,14 @@ make -j$(nproc)
 
 ## 2. 部署到单板
 
-```bash
-# 拷贝内核到单板
-scp arch/arm64/boot/Image <board>:/boot/
+单板需要运行编译好的带 HDBSS patch 的内核。selftests 二进制直接拷贝即可，不需要 guest kernel Image。
 
+```bash
 # 拷贝 selftests 到单板
 scp tools/testing/selftests/kvm/arm64/hdbss_test <board>:/tmp/
 scp tools/testing/selftests/kvm/dirty_log_test <board>:/tmp/
 
-# 拷贝 QEMU 到单板
+# 拷贝 QEMU 到单板（如需端到端测试）
 scp build/qemu-system-aarch64 <board>:/usr/local/bin/
 ```
 

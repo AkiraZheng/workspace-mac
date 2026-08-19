@@ -1,4 +1,4 @@
-From d5cfffac5c1465af77212d83d3e9c4b0645f42f1 Mon Sep 17 00:00:00 2001
+From 9a3eeab12d46ac0ee904e1449de6bb8d825baafd Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Wed, 19 Aug 2026 03:15:26 +0800
 Subject: [PATCH] kvm: Add hdbss-buffer-size accelerator property for HDBSS
@@ -69,14 +69,14 @@ index 7b90117a86..68e9d21652 100644
      NotifyVmexitOption notify_vmexit;
      uint32_t notify_window;
 diff --git a/linux-headers/linux/kvm.h b/linux-headers/linux/kvm.h
-index 3e33779d82..83bc78bb0f 100644
+index 3e33779d82..010a4a565d 100644
 --- a/linux-headers/linux/kvm.h
 +++ b/linux-headers/linux/kvm.h
 @@ -1246,6 +1246,8 @@ struct kvm_ppc_resize_hpt {
  
  #define KVM_CAP_ARM_HW_DIRTY_STATE_TRACK 502
  
-+#define KVM_CAP_ARM_HDBSS_BUFFER_SIZE 250
++#define KVM_CAP_ARM_HDBSS_BUFFER_SIZE 251
 +
  #define KVM_CAP_ARM_HISI_IPIV 798
  #define KVM_CAP_ARM_VIRT_MSI_BYPASS 799

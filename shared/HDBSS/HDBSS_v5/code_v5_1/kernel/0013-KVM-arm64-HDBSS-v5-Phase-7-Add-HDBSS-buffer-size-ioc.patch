@@ -1,10 +1,10 @@
-From ca5a7c4e726bbc1f9bab8b0fe06aec1a0c272630 Mon Sep 17 00:00:00 2001
+From e14f86a30044c23e860724b93a4f1a62f80c648b Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Sun, 16 Aug 2026 08:39:31 +0800
 Subject: [PATCH 13/15] KVM: arm64: HDBSS v5 Phase 7: Add HDBSS buffer size
  ioctl for dirty-bitmap mode
 
-Add KVM_CAP_ARM_HDBSS_BUFFER_SIZE (250) to allow userspace to
+Add KVM_CAP_ARM_HDBSS_BUFFER_SIZE (251) to allow userspace to
 configure the HDBSS buffer size per-VM before vCPUs are created.
 
 Interface (consistent with KVM_CAP_DIRTY_LOG_RING):
@@ -217,14 +217,14 @@ index 4024c234c63d..7fc41902b2ba 100644
  
  		gpa = hdbss_buf[idx];
 diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
-index 419011097fa8..91c8611b39d1 100644
+index 419011097fa8..56d1ee32059c 100644
 --- a/include/uapi/linux/kvm.h
 +++ b/include/uapi/linux/kvm.h
 @@ -997,6 +997,7 @@ struct kvm_enable_cap {
  #define KVM_CAP_S390_KEYOP 247
  #define KVM_CAP_S390_VSIE_ESAMODE 248
  #define KVM_CAP_S390_HPAGE_2G 249
-+#define KVM_CAP_ARM_HDBSS_BUFFER_SIZE 250
++#define KVM_CAP_ARM_HDBSS_BUFFER_SIZE 251
  
  struct kvm_irq_routing_irqchip {
  	__u32 irqchip;
