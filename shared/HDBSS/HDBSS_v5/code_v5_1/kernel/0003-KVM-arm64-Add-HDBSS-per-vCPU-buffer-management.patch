@@ -1,7 +1,7 @@
 From e428666332cd29f1ef1c3c964a805a0fa039a0d3 Mon Sep 17 00:00:00 2001
 From: eillon <yezhenyu2@huawei.com>
 Date: Thu, 9 Jul 2026 18:40:24 +0800
-Subject: [PATCH 03/15] KVM: arm64: Add HDBSS per-vCPU buffer management
+Subject: [PATCH 03/17] KVM: arm64: Add HDBSS per-vCPU buffer management
 
 Add HDBSS (Hardware Dirty Bit State Structure) per-vCPU buffer
 management including allocation, freeing, and loading of HDBSS

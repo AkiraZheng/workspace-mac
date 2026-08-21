@@ -1,7 +1,7 @@
 From 466d893bc18471d7575252632a764e80e36d996b Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Sun, 16 Aug 2026 05:58:49 +0800
-Subject: [PATCH 12/15] KVM: arm64: HDBSS v5 Phase 6: DBM three-state model and
+Subject: [PATCH 12/17] KVM: arm64: HDBSS v5 Phase 6: DBM three-state model and
  block/page wrprotect
 
 Phase 6.1: Remove KVM_PGTABLE_S2_DBM, unconditional DBM

@@ -1,0 +1,134 @@
+From dd2052350c0b0aba81eeff4315ccb1b47f98c5a5 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 21 Aug 2026 12:19:31 +0800
+Subject: [PATCH 16/17] KVM: arm64: HDBSS: Switch to single-path flush on every
+ VM exit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fix dirty ring overflow in HDBSS dirty ring mode by adopting x86 PML's
+single-flush-point design: flush the HDBSS buffer unconditionally on
+every VM exit, before handle_exit_early().
+
+Previously, HDBSS buffer was flushed in multiple paths:
+  1. vcpu_put() — outside the while loop, no dirty_ring_check after
+  2. check_vcpu_requests() via KVM_REQ_FLUSH_HDBSS
+  3. sync_dirty_log() via KVM_REQ_FLUSH_HDBSS | KVM_REQUEST_WAIT
+
+Path (1) was the overflow source: vcpu_put() flushes after the while
+loop exits, pushing potentially hundreds of entries into the dirty ring
+without any soft_limit check.  This caused WARN_ON_ONCE in
+kvm_dirty_ring_full() and data corruption during live migration with
+dirty ring + HDBSS.
+
+The new design mirrors x86 VMX PML (vmx_flush_pml_buffer at the top of
+__vmx_handle_exit):
+  - Single flush point: kvm_arch_vcpu_ioctl_run() while loop, after
+    guest exit and before handle_exit_early()
+  - check_vcpu_requests() on the next loop iteration sees the entries
+    pushed during flush and can exit to userspace if ring is soft-full
+  - kvm_arch_sync_dirty_log() uses KVM_REQ_OUTSIDE_GUEST_MODE to kick
+    vCPUs out; the exit path flushes automatically
+  - kvm_handle_hdbss_fault() no longer sets KVM_REQ_FLUSH_HDBSS; it
+    returns 1 and the exit path handles the flush
+
+This fixes the WARN_ON_ONCE(kvm_dirty_ring_full(ring)) crash reported
+during live migration with dirty ring size=4096 and HDBSS enabled.
+
+Base commit: 0e35b9b6ec0f
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/kvm/arm.c       | 32 +++++++++++++++++---------------
+ arch/arm64/kvm/dirty_bit.c |  6 ++++--
+ 2 files changed, 21 insertions(+), 17 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 75cc1ec56056..221369230e9b 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -848,9 +848,6 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
+ 	if (has_vhe())
+ 		kvm_vcpu_put_vhe(vcpu);
+ 
+-	if (vcpu_hdbss_enabled(vcpu))
+-		kvm_flush_hdbss_buffer(vcpu);
+-
+ 	kvm_timer_vcpu_put(vcpu);
+ 	kvm_vgic_put(vcpu);
+ 	kvm_vcpu_pmu_restore_host(vcpu);
+@@ -1257,14 +1254,6 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
+ 		if (kvm_check_request(KVM_REQ_SUSPEND, vcpu))
+ 			return kvm_vcpu_suspend(vcpu);
+ 
+-		/*
+-		 * Flush HDBSS buffer before checking dirty ring soft-full,
+-		 * so that entries pushed during flush are accounted for
+-		 * when the dirty ring check runs.
+-		 */
+-		if (kvm_check_request(KVM_REQ_FLUSH_HDBSS, vcpu))
+-			kvm_flush_hdbss_buffer(vcpu);
+-
+ 		if (kvm_dirty_ring_check_request(vcpu))
+ 			return 0;
+ 
+@@ -1505,6 +1494,18 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+ 
+ 		trace_kvm_exit(ret, kvm_vcpu_trap_get_class(vcpu), *vcpu_pc(vcpu));
+ 
++		/*
++		 * Flush HDBSS buffer on every VM exit, before handling the
++		 * exit reason.  This mirrors x86 PML's single-flush-point
++		 * design (vmx_flush_pml_buffer at the top of
++		 * __vmx_handle_exit).  Flushing here ensures that entries
++		 * pushed to the dirty ring are accounted for when
++		 * check_vcpu_requests() runs dirty_ring_check_request() on
++		 * the next loop iteration, preventing ring overflow.
++		 */
++		if (vcpu_hdbss_enabled(vcpu))
++			kvm_flush_hdbss_buffer(vcpu);
++
+ 		/* Exit types that need handling before we can be preempted */
+ 		handle_exit_early(vcpu, ret);
+ 
+@@ -2083,14 +2084,15 @@ long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
+ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ {
+ 	/*
+-	 * Flush all CPUs' dirty log buffers to the dirty_bitmap.  Called
+-	 * before reporting dirty_bitmap to userspace.  Send a request with
+-	 * KVM_REQUEST_WAIT to flush buffer synchronously.
++	 * Kick all vCPUs out of guest mode.  The HDBSS buffer is flushed
++	 * in the VM exit path (before handle_exit_early), so ensuring
++	 * vCPUs are in root mode guarantees all buffered dirty entries
++	 * have been pushed to the dirty bitmap or dirty ring.
+ 	 */
+ 	if (!kvm_hdbss_enabled(kvm))
+ 		return;
+ 
+-	kvm_make_all_cpus_request(kvm, KVM_REQ_FLUSH_HDBSS | KVM_REQUEST_WAIT);
++	kvm_make_all_cpus_request(kvm, KVM_REQ_OUTSIDE_GUEST_MODE);
+ }
+ 
+ static int kvm_vm_ioctl_set_device_addr(struct kvm *kvm,
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 18a21b20d114..4d31db8e3c40 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -111,8 +111,10 @@ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 
+ 	switch (fsc) {
+ 	case HDBSSPROD_EL2_FSC_OK:
+-		/* Buffer full, set request to flush on next vcpu exit */
+-		kvm_make_request(KVM_REQ_FLUSH_HDBSS, vcpu);
++		/*
++		 * Buffer full.  No need to set a flush request — the
++		 * exit path flushes unconditionally before handle_exit.
++		 */
+ 		return 1;
+ 	case HDBSSPROD_EL2_FSC_ExternalAbort:
+ 	case HDBSSPROD_EL2_FSC_GPF:
+-- 
+2.43.0
+

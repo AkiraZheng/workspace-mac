@@ -1,7 +1,7 @@
 From d7f007d6771c1c0be0c65971a643a7005604e714 Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Sun, 16 Aug 2026 04:40:50 +0800
-Subject: [PATCH 11/15] KVM: arm64: HDBSS v5 Phase 5: Remove unused hdbss_order
+Subject: [PATCH 11/17] KVM: arm64: HDBSS v5 Phase 5: Remove unused hdbss_order
  and HDBSS_MAX_ORDER
 
 Phase 3.1 refactored HDBSS buffer management to the PML-style

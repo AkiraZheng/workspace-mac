@@ -1,7 +1,7 @@
 From 7c9a92f5252e9bb3eabbe3bd44a9fe9981e169f2 Mon Sep 17 00:00:00 2001
 From: eillon <yezhenyu2@huawei.com>
 Date: Thu, 9 Jul 2026 18:40:25 +0800
-Subject: [PATCH 04/15] KVM: arm64: Add HDBSS fault handling and buffer flush
+Subject: [PATCH 04/17] KVM: arm64: Add HDBSS fault handling and buffer flush
 
 Add HDBSS fault handling for buffer full, external abort, and general
 protection fault (GPF) events. When the HDBSS buffer becomes full,
