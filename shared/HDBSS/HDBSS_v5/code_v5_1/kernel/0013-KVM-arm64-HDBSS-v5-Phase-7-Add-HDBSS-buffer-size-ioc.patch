@@ -1,7 +1,7 @@
 From e14f86a30044c23e860724b93a4f1a62f80c648b Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Sun, 16 Aug 2026 08:39:31 +0800
-Subject: [PATCH 13/17] KVM: arm64: HDBSS v5 Phase 7: Add HDBSS buffer size
+Subject: [PATCH 13/18] KVM: arm64: HDBSS v5 Phase 7: Add HDBSS buffer size
  ioctl for dirty-bitmap mode
 
 Add KVM_CAP_ARM_HDBSS_BUFFER_SIZE (251) to allow userspace to

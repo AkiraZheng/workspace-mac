@@ -1,7 +1,7 @@
 From a334a708f7b5a75fee2d7f468b48134cb381df0f Mon Sep 17 00:00:00 2001
 From: eillon <yezhenyu2@huawei.com>
 Date: Thu, 9 Jul 2026 18:40:26 +0800
-Subject: [PATCH 05/17] KVM: arm64: Add auto HDBSS enable/disable on dirty
+Subject: [PATCH 05/18] KVM: arm64: Add auto HDBSS enable/disable on dirty
  logging change
 
 HDBSS buffers store per-page dirty state after the stage-2 page tables

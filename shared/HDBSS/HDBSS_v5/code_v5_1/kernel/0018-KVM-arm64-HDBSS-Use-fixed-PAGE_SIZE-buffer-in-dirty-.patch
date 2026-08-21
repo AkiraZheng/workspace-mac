@@ -1,0 +1,100 @@
+From 45f4443ff9111a5390bae48d2ddb107615a27069 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sat, 22 Aug 2026 02:42:28 +0800
+Subject: [PATCH 18/18] KVM: arm64: HDBSS: Use fixed PAGE_SIZE buffer in
+ dirty-ring mode
+
+Fix HDBSS + dirty-ring performance regression by using a fixed
+PAGE_SIZE HDBSS buffer (512 entries on 4KB pages) in dirty-ring mode,
+instead of dynamically computing the largest possible buffer.
+
+The previous auto-config algorithm computed the largest power-of-2
+buffer that fits within the dirty ring's reservation budget.  However,
+a larger HDBSS buffer increases rsvd, which reduces the dirty ring's
+soft_limit and causes more frequent userspace drains.
+
+Analysis (see docs/hdbss_dirty_ring_analysis.md):
+
+  ring_entries=65536, hdbss=512:  rsvd=576,  soft_limit=64960, drain_interval=65024
+  ring_entries=65536, hdbss=32768(auto): rsvd=32832, soft_limit=32704, drain_interval=32768
+
+With the auto algorithm, the first HDBSS flush immediately triggers a
+dirty ring drain (flushes_to_drain=1).  With PAGE_SIZE, 127 flushes
+occur before a drain, and none of those flushes exit to userspace.
+
+This matches x86 PML's design, which uses a fixed 512-entry buffer
+regardless of dirty ring size.
+
+Measured impact (redis high-concurrency + live migration):
+  HDBSS + dirty-bitmap:    QPS 155000 -> 144000 (-7%)
+  HDBSS + dirty-ring (auto): QPS 155000 -> 127000 (-18%)
+  HDBSS + dirty-ring (fix):  expected to match or exceed dirty-bitmap
+
+Base commit: 0e35b9b6ec0f
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/kvm/arm.c | 34 +++++++++++++++++-----------------
+ 1 file changed, 17 insertions(+), 17 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index b25f4b4a67e6..8f2cb14549e6 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -252,14 +252,19 @@ static int kvm_arm_default_max_vcpus(void)
+ }
+ 
+ /*
+- * Called after kvm->dirty_ring_size is set, allowing arch to compute
+- * the largest HDBSS buffer size that fits within the ring's reservation
+- * budget.  In dirty-ring mode the buffer size is auto-configured by the
+- * kernel; the user cannot override it via KVM_CAP_ARM_HDBSS_BUFFER_SIZE.
++ * Called after kvm->dirty_ring_size is set, allowing arch to configure
++ * the HDBSS buffer size.  In dirty-ring mode, the buffer size is
++ * auto-configured by the kernel to PAGE_SIZE (minimum), matching x86
++ * PML's fixed 512-entry buffer.  The user cannot override it via
++ * KVM_CAP_ARM_HDBSS_BUFFER_SIZE.
++ *
++ * A larger buffer would increase rsvd, reducing the dirty ring's
++ * soft_limit and causing more frequent userspace drains.  See
++ * docs/hdbss_dirty_ring_analysis.md for the full analysis.
+  */
+ void kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
+ {
+-	u32 ring_entries, max_entries, max_bytes, hdbss_bytes;
++	u32 ring_entries;
+ 
+ 	if (!system_supports_hdbss())
+ 		return;
+@@ -269,21 +274,16 @@ void kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
+ 		return;
+ 
+ 	ring_entries = kvm->dirty_ring_size / sizeof(struct kvm_dirty_gfn);
+-	if (ring_entries <= KVM_DIRTY_RING_RSVD_ENTRIES)
+-		return;
+-
+-	max_entries = ring_entries - KVM_DIRTY_RING_RSVD_ENTRIES;
+-	max_bytes = max_entries * sizeof(u64);
+-	hdbss_bytes = rounddown_pow_of_two(max_bytes);
+-	hdbss_bytes = clamp(hdbss_bytes, KVM_ARM_HDBSS_DEFAULT_SIZE,
+-			    KVM_ARM_HDBSS_MAX_SIZE);
+ 
+-	kvm->arch.hdbss_buffer_size = hdbss_bytes;
++	kvm->arch.hdbss_buffer_size = KVM_ARM_HDBSS_DEFAULT_SIZE;
+ 
+ 	kvm_info("HDBSS auto-config: ring_entries=%u hdbss_bytes=%u hdbss_entries=%u rsvd=%u soft_limit=%u\n",
+-		 ring_entries, hdbss_bytes, hdbss_bytes / sizeof(u64),
+-		 KVM_DIRTY_RING_RSVD_ENTRIES + hdbss_bytes / sizeof(u64),
+-		 ring_entries - KVM_DIRTY_RING_RSVD_ENTRIES - hdbss_bytes / sizeof(u64));
++		 ring_entries, KVM_ARM_HDBSS_DEFAULT_SIZE,
++		 (u32)(KVM_ARM_HDBSS_DEFAULT_SIZE / sizeof(u64)),
++		 KVM_DIRTY_RING_RSVD_ENTRIES +
++		 (u32)(KVM_ARM_HDBSS_DEFAULT_SIZE / sizeof(u64)),
++		 ring_entries - KVM_DIRTY_RING_RSVD_ENTRIES -
++		 (u32)(KVM_ARM_HDBSS_DEFAULT_SIZE / sizeof(u64)));
+ }
+ 
+ /**
+-- 
+2.43.0
+

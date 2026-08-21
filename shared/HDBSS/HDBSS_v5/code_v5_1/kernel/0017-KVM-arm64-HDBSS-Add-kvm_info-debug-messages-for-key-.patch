@@ -1,7 +1,7 @@
 From f928b0b1695c1353a0134f9f89b5bd3667a89c9f Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Fri, 21 Aug 2026 12:22:22 +0800
-Subject: [PATCH 17/17] KVM: arm64: HDBSS: Add kvm_info debug messages for key
+Subject: [PATCH 17/18] KVM: arm64: HDBSS: Add kvm_info debug messages for key
  HDBSS events
 
 Add kvm_info() calls at low-frequency HDBSS state transitions to aid

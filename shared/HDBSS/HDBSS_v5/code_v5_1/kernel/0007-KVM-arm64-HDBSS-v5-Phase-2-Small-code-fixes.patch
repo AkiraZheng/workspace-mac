@@ -1,7 +1,7 @@
 From b8eb7f3c5f6eaa511b6b4a40477216f554cdad24 Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Sat, 15 Aug 2026 04:33:14 +0800
-Subject: [PATCH 07/17] KVM: arm64: HDBSS v5 Phase 2: Small code fixes
+Subject: [PATCH 07/18] KVM: arm64: HDBSS v5 Phase 2: Small code fixes
 
 Fix several correctness issues within single functions:
 
