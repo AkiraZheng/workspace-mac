@@ -1,0 +1,155 @@
+From 664e4a5c23db5cf0ad5963262ede43a4cf830121 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Thu, 27 Aug 2026 23:45:04 +0800
+Subject: [PATCH 19/19] KVM: arm64: HDBSS: Use kvm_vcpu_kick for all HDBSS kick
+ paths
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replace all KVM_REQ_OUTSIDE_GUEST_MODE and KVM_REQ_FLUSH_HDBSS usage
+with plain kvm_vcpu_kick(), matching x86 PML's design where:
+  - kvm_arch_sync_dirty_log() uses kvm_vcpu_kick()
+  - PML enable/disable uses a request handler (VMCS-specific)
+
+For arm64, VTCR_EL2 is loaded at vcpu_load time (kvm_vcpu_load_vhe),
+not per guest entry.  Using kvm_vcpu_kick for enable/disable means the
+new VTCR takes effect at the next vcpu_load (next KVM_RUN or CPU
+migration).  In the transitional window:
+  - Enable: software VTCR has HDBSS bits but hardware does not; WC
+    page writes generate permission faults handled by the existing
+    software dirty tracking path — correct, just without HDBSS benefit.
+  - Disable: hardware may still record entries until next vcpu_load,
+    but the standard migration flow (stop vCPUs -> final sync ->
+    disable) ensures buffers are flushed before disable.
+
+Also remove the now-unused KVM_REQ_FLUSH_HDBSS definition (KVM_ARCH_REQ(12))
+since the single-path flush on every VM exit (patch 0016) eliminated
+all its usage.
+
+This simplifies the code: no request infrastructure, no handler in
+check_vcpu_requests, just kvm_vcpu_kick for all three paths (enable,
+disable, sync_dirty_log).
+
+Base commit: 0e35b9b6ec0f
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/include/asm/kvm_host.h |  1 -
+ arch/arm64/kvm/arm.c              | 16 ++++++++++-----
+ arch/arm64/kvm/dirty_bit.c        | 33 ++++++++++++++++++++-----------
+ 3 files changed, 32 insertions(+), 18 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 02035fd913af..5a56ae49545e 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -55,7 +55,6 @@
+ #define KVM_REQ_GUEST_HYP_IRQ_PENDING	KVM_ARCH_REQ(9)
+ #define KVM_REQ_MAP_L1_VNCR_EL2		KVM_ARCH_REQ(10)
+ #define KVM_REQ_VGIC_PROCESS_UPDATE	KVM_ARCH_REQ(11)
+-#define KVM_REQ_FLUSH_HDBSS		KVM_ARCH_REQ(12)
+ 
+ #define KVM_DIRTY_LOG_MANUAL_CAPS   (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE | \
+ 				     KVM_DIRTY_LOG_INITIALLY_SET)
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 44755954727c..62a5bcb35985 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -2089,16 +2089,22 @@ long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
+ 
+ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ {
++	struct kvm_vcpu *vcpu;
++	unsigned long i;
++
+ 	/*
+-	 * Kick all vCPUs out of guest mode.  The HDBSS buffer is flushed
+-	 * in the VM exit path (before handle_exit_early), so ensuring
+-	 * vCPUs are in root mode guarantees all buffered dirty entries
+-	 * have been pushed to the dirty bitmap or dirty ring.
++	 * Kick running vCPUs out of guest mode.  The HDBSS buffer is
++	 * flushed on every VM exit (before handle_exit_early), so only
++	 * vCPUs currently in guest mode can hold unflushed entries.  The
++	 * dirty-log protocol (GET_DIRTY_LOG / CLEAR_DIRTY_LOG) tolerates
++	 * concurrent bitmap writes: bits set after the snapshot survive
++	 * the clear and are reported in the next iteration.
+ 	 */
+ 	if (!kvm_hdbss_enabled(kvm))
+ 		return;
+ 
+-	kvm_make_all_cpus_request(kvm, KVM_REQ_OUTSIDE_GUEST_MODE);
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_vcpu_kick(vcpu);
+ }
+ 
+ static int kvm_vm_ioctl_set_device_addr(struct kvm *kvm,
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 59ed944dd7e5..3bc9a7478eaf 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -140,12 +140,18 @@ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+  * by kvm_arch_commit_memory_region() under kvm->slots_lock.
+  *
+  * HDBSS buffers are pre-allocated at vCPU create time (PML-style), so
+- * this function only sets VTCR bits and kicks all vCPUs out of guest
+- * mode to reload the new VTCR value on next entry. No buffer allocation
+- * or deallocation happens here.
++ * this function only sets VTCR bits and kicks all vCPUs.  The new VTCR
++ * takes effect at the next vcpu_load (next KVM_RUN or CPU migration).
++ * Between the software VTCR update and the next vcpu_load, vCPUs still
++ * running with the old hardware VTCR fall back to the software dirty
++ * tracking path (permission faults on WC pages), which is correct.
++ * No buffer allocation or deallocation happens here.
+  */
+ static void kvm_arm_enable_hdbss_global(struct kvm *kvm)
+ {
++	struct kvm_vcpu *vcpu;
++	unsigned long i;
++
+ 	if (!system_supports_hdbss())
+ 		return;
+ 
+@@ -160,15 +166,15 @@ static void kvm_arm_enable_hdbss_global(struct kvm *kvm)
+ 		 (kvm->arch.hdbss_buffer_size ?: KVM_ARM_HDBSS_DEFAULT_SIZE) /
+ 		 sizeof(u64));
+ 
+-	/*
+-	 * We should kick vcpus out of guest mode here to load new
+-	 * vtcr value to vtcr_el2 register when re-enter guest mode.
+-	 */
+-	kvm_make_all_cpus_request(kvm, KVM_REQ_OUTSIDE_GUEST_MODE);
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_vcpu_kick(vcpu);
+ }
+ 
+ void kvm_arm_disable_hdbss_global(struct kvm *kvm)
+ {
++	struct kvm_vcpu *vcpu;
++	unsigned long i;
++
+ 	if (!kvm_hdbss_enabled(kvm)) /* Already Off */
+ 		return;
+ 
+@@ -178,11 +184,14 @@ void kvm_arm_disable_hdbss_global(struct kvm *kvm)
+ 	kvm_info("HDBSS disabled\n");
+ 
+ 	/*
+-	 * We should kick vcpus out of guest mode here to load new
+-	 * vtcr value to vtcr_el2 register when re-enter guest mode.
+-	 * Buffers are freed at vCPU destroy time, not here.
++	 * Buffers are freed at vCPU destroy time, not here.  The new VTCR
++	 * takes effect at the next vcpu_load; in the transitional window
++	 * hardware may still record entries, but the standard migration
++	 * flow (stop vCPUs → final sync → disable) ensures buffers are
++	 * already flushed before disable.
+ 	 */
+-	kvm_make_all_cpus_request(kvm, KVM_REQ_OUTSIDE_GUEST_MODE);
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_vcpu_kick(vcpu);
+ }
+ 
+ void kvm_arm_hdbss_on_dirty_logging_change(struct kvm *kvm, int nr_memslots_logging)
+-- 
+2.43.0
+
