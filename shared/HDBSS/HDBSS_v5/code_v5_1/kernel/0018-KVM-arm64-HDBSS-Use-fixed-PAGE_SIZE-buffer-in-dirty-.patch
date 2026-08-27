@@ -1,4 +1,4 @@
-From 45f4443ff9111a5390bae48d2ddb107615a27069 Mon Sep 17 00:00:00 2001
+From ac4db257022891610e9908cd5c26d11d56225637 Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Sat, 22 Aug 2026 02:42:28 +0800
 Subject: [PATCH 18/18] KVM: arm64: HDBSS: Use fixed PAGE_SIZE buffer in
@@ -34,14 +34,14 @@ Base commit: 0e35b9b6ec0f
 
 Signed-off-by: AkiraZheng <1428384878@qq.com>
 ---
- arch/arm64/kvm/arm.c | 34 +++++++++++++++++-----------------
- 1 file changed, 17 insertions(+), 17 deletions(-)
+ arch/arm64/kvm/arm.c | 35 ++++++++++++++++++-----------------
+ 1 file changed, 18 insertions(+), 17 deletions(-)
 
 diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
-index b25f4b4a67e6..8f2cb14549e6 100644
+index b25f4b4a67e6..44755954727c 100644
 --- a/arch/arm64/kvm/arm.c
 +++ b/arch/arm64/kvm/arm.c
-@@ -252,14 +252,19 @@ static int kvm_arm_default_max_vcpus(void)
+@@ -252,14 +252,20 @@ static int kvm_arm_default_max_vcpus(void)
  }
  
  /*
@@ -51,13 +51,14 @@ index b25f4b4a67e6..8f2cb14549e6 100644
 - * kernel; the user cannot override it via KVM_CAP_ARM_HDBSS_BUFFER_SIZE.
 + * Called after kvm->dirty_ring_size is set, allowing arch to configure
 + * the HDBSS buffer size.  In dirty-ring mode, the buffer size is
-+ * auto-configured by the kernel to PAGE_SIZE (minimum), matching x86
-+ * PML's fixed 512-entry buffer.  The user cannot override it via
-+ * KVM_CAP_ARM_HDBSS_BUFFER_SIZE.
++ * auto-configured by the kernel to PAGE_SIZE (minimum).  The user
++ * cannot override it via KVM_CAP_ARM_HDBSS_BUFFER_SIZE.
 + *
-+ * A larger buffer would increase rsvd, reducing the dirty ring's
-+ * soft_limit and causing more frequent userspace drains.  See
-+ * docs/hdbss_dirty_ring_analysis.md for the full analysis.
++ * A larger buffer increases rsvd, which reduces the dirty ring's
++ * soft_limit and causes more frequent userspace drains, degrading
++ * performance.  PAGE_SIZE gives the largest drain interval and the
++ * lowest drain frequency.  See docs/hdbss_dirty_ring_analysis.md
++ * for the full analysis.
   */
  void kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
  {
@@ -66,7 +67,7 @@ index b25f4b4a67e6..8f2cb14549e6 100644
  
  	if (!system_supports_hdbss())
  		return;
-@@ -269,21 +274,16 @@ void kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
+@@ -269,21 +275,16 @@ void kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
  		return;
  
  	ring_entries = kvm->dirty_ring_size / sizeof(struct kvm_dirty_gfn);
