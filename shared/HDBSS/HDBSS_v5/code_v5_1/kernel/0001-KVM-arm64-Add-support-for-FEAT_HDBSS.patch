@@ -1,7 +1,7 @@
 From 10b5c18a58c82ecc51a8122d46185e841a1c8786 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Thu, 9 Jul 2026 18:40:22 +0800
-Subject: [PATCH 01/18] KVM: arm64: Add support for FEAT_HDBSS
+Subject: [PATCH 01/19] KVM: arm64: Add support for FEAT_HDBSS
 
 Armv9.5 introduces the Hardware Dirty Bit State Structure (HDBSS)
 feature, indicated by ID_AA64MMFR1_EL1.HAFDBS == 0b0100.

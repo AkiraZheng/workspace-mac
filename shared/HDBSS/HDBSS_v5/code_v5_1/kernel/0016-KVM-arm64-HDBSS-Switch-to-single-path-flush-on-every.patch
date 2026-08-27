@@ -1,7 +1,7 @@
 From dd2052350c0b0aba81eeff4315ccb1b47f98c5a5 Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Fri, 21 Aug 2026 12:19:31 +0800
-Subject: [PATCH 16/18] KVM: arm64: HDBSS: Switch to single-path flush on every
+Subject: [PATCH 16/19] KVM: arm64: HDBSS: Switch to single-path flush on every
  VM exit
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

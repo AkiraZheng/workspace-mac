@@ -1,7 +1,7 @@
 From 6a321511645db3ed9e78b29afdfda534e31e8c1f Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Sat, 15 Aug 2026 06:02:46 +0800
-Subject: [PATCH 08/18] KVM: arm64: HDBSS v5 Phase 3: Medium correctness fixes
+Subject: [PATCH 08/19] KVM: arm64: HDBSS v5 Phase 3: Medium correctness fixes
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

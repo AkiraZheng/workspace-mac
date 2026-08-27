@@ -116,7 +116,7 @@ Note also that in v5 buffers are allocated unconditionally at vCPU creation when
 
 **Sashiko 原文**：Scheduler preempts vCPU thread holding `rq->lock` → `kvm_arch_vcpu_put()` → `kvm_flush_hdbss_buffer()` acquires `mmu_lock`. Other paths acquire `mmu_lock` then wake tasks (`rq->lock`), creating ABBA.
 
-**回复**：The premise does not hold: the flush path is `kvm_flush_hdbss_buffer()` → `kvm_vcpu_mark_page_dirty()` → `mark_page_dirty_in_slot()`, which performs only atomic `set_bit_le()` / dirty-ring pushes and never takes `mmu_lock`, so the rq->lock → mmu_lock inversion cannot occur. Furthermore, v5 removed all lock usage from the flush (SRCU only) and moved the flush out of `vcpu_put()` entirely — it now runs in the run-loop exit path — so no locks are taken from the preempt-notifier context at all.
+**回复**：Valid point — v4 did hold `mmu_lock` (`write_lock_irqsave`) inside the flush, which combined with `vcpu_put()` being callable from the scheduler's preempt-notifier path (with `rq->lock` held) created a lock-inversion risk. Fixed in v5 by two changes: (1) the flush no longer takes `mmu_lock` — its destinations (`set_bit_le()` / `kvm_dirty_ring_push()`) are lock-free, and memslot lookup is protected by `srcu_read_lock()` instead, which cannot participate in the inversion; (2) the flush was moved out of `vcpu_put()` into the run-loop exit path, so the preempt-notifier context takes no locks for HDBSS at all.
 
 ### S13/S21 [High] Flush without SRCU protection
 
@@ -128,7 +128,11 @@ Note also that in v5 buffers are allocated unconditionally at vCPU creation when
 
 **Sashiko 原文**：`KVM_REQUEST_WAIT` only waits for vCPUs in guest mode. vCPUs that exited to userspace may have unflushed HDBSS entries.
 
-**回复**：Not an issue. A vCPU that has returned to userspace has already gone through the VM-exit path, which flushes the HDBSS buffer before returning to userspace. While parked in userspace the vCPU cannot run guest code, so no new entries accumulate. Hence waiting only for in-guest vCPUs is sufficient. In v5, `kvm_arch_sync_dirty_log()` kicks vCPUs out of guest mode via `KVM_REQ_OUTSIDE_GUEST_MODE` (which carries `KVM_REQUEST_WAIT`), and the exit path performs the flush.
+**回复**：Not an issue. A vCPU that has returned to userspace has already gone through the VM-exit path, which flushes the HDBSS buffer before returning to userspace. While parked in userspace the vCPU cannot run guest code, so no new entries accumulate. Hence waiting only for in-guest vCPUs is sufficient.
+
+**Way 2 (v5 final design)**：v5's `kvm_arch_sync_dirty_log()` simply uses `kvm_vcpu_kick()` to force a VM exit; the exit path flushes the buffer. The kick is asynchronous with respect to the caller, so the flush may race with the `KVM_GET_DIRTY_LOG` snapshot — but this is explicitly designed-for: the generic dirty-log API documents concurrent vCPU bitmap writes (comment above `kvm_get_dirty_log_protect()` in `virt/kvm/kvm_main.c`), and the GET/CLEAR protocol self-heals: bits set after the snapshot are not in the mask cleared by `KVM_CLEAR_DIRTY_LOG` and survive to the next iteration. The final stop-and-copy snapshot, taken with all vCPUs stopped (whose last exit flushed their buffers), is complete.
+
+This mirrors x86, where `kvm_arch_sync_dirty_log()` uses `kvm_vcpu_kick()` with the comment: "KVM flushes the buffers on all VM-Exits, thus we only need to kick running vCPUs to force a VM-Exit."
 
 ### S15 [High] Tight loop overflows dirty ring
 

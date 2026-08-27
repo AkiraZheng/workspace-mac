@@ -1,7 +1,7 @@
 From ac4db257022891610e9908cd5c26d11d56225637 Mon Sep 17 00:00:00 2001
 From: AkiraZheng <1428384878@qq.com>
 Date: Sat, 22 Aug 2026 02:42:28 +0800
-Subject: [PATCH 18/18] KVM: arm64: HDBSS: Use fixed PAGE_SIZE buffer in
+Subject: [PATCH 18/19] KVM: arm64: HDBSS: Use fixed PAGE_SIZE buffer in
  dirty-ring mode
 
 Fix HDBSS + dirty-ring performance regression by using a fixed
