@@ -65,6 +65,36 @@ Spec Table D8-93 (D8-7778)：
 
 每个 entry 8 字节。Buffer 大小由 `HDBSSBR_EL2.SZ` 编码（`ilog2(size_bytes) - 12`）。
 
+#### 为什么 IPA 只需要 [55:12] 共 44 位
+
+HDBSS 硬件记录的是 **PTE 级别的 dirty state 变化**（C→D 转换）。一个 PTE 覆盖整页（4KB）或整 block（2MB/1GB）。硬件记录的 IPA 是该 PTE 对应的页/block 的起始地址，**页内偏移（低 12 位）必然为 0**，不需要存储。
+
+ARM64 最大 IPA = 48 位（`VTCR_EL2.T0SZ` 最小 = 16，64-16=48）。实际需要存储的 IPA 页号 = [47:12] = 36 位。HDBSS entry 的 IPA 字段 [55:12] = 44 位，远超 36 位需求。Spec 还说"Bits above the implemented physical address size are RES0"。
+
+代码中的使用：
+
+```c
+#define HDBSS_ENTRY_IPA    GENMASK_ULL(55, 12)    // 44 位 IPA
+
+// flush 时提取 IPA：
+gpa = hdbss_buf[idx];
+gpa &= HDBSS_ENTRY_IPA;              // 取 [55:12]，页基地址
+kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);  // 右移 12 位得到页帧号 gfn
+```
+
+`gpa >> PAGE_SHIFT` 把 44 位 IPA 右移 12 位，得到 32 位页帧号（gfn），正好够 `kvm_vcpu_mark_page_dirty()` 使用。
+
+#### 脏页跟踪的粒度
+
+| 层级 | 粒度 | 说明 |
+|------|------|------|
+| HDBSS entry | 页基地址（4KB 对齐 IPA） | 硬件记录"这一页被写了" |
+| dirty bitmap | 1 bit per page | 每个 bit 代表一页是否脏 |
+| dirty ring | 1 entry per page | 每个 entry 是 `{slot, gfn}` |
+| QEMU 迁移 | 整页（4KB） | 发送整页内容到目的端 |
+
+脏页跟踪的最小粒度就是**页**（4KB）。不存在"页内每个字节/字跟踪"的需求——只要页被写过，整页内容都要迁移。HDBSS entry 不存 offset 是因为硬件记录的是 PTE 级别的 dirty 状态，PTE 对应的是整页/block。
+
 ### 1.4 HDBSS Buffer Full 行为
 
 Spec D8.5.2.3 (D8-7779)：
@@ -79,11 +109,34 @@ Spec D8.5.2.3 (D8-7779)：
 
 ## 2. DBM 标签配置方式
 
-### 2.1 设计决策：无条件 DBM
+### 2.1 DBM 语义随 HD 位转变
+
+DBM 和 S2AP[1] 的语义取决于 `VTCR_EL2.HD`：
+
+**HD=0（无 HTTU / HDBSS 未启用）时**：
+
+| 位 | 语义 | 说明 |
+|----|------|------|
+| `DBM` | 被忽略 | 硬件不解释 DBM，dirty state 由软件管理 |
+| `S2AP[1]` (W) | 写权限位 | W=0 不可写（写→Permission fault），W=1 可写 |
+
+**HD=1（HDBSS 启用）时，语义发生转变**：
+
+| 位 | 语义 | 说明 |
+|----|------|------|
+| `DBM` | **写意图位**（write intent） | DBM=1 表示该页是硬件 dirty state 更新的候选（writable-clean） |
+| `S2AP[1]` (W) | **脏状态位**（dirty state） | W=0 表示 clean，W=1 表示 dirty |
+
+这正是 Oliver Upton 在 v4 review 中的核心洞察：
+> "the DBM bit really *is* the write permission bit"
+
+三态模型的本质：HD=1 时，**DBM 承担了"是否可写"的语义，S2AP[1] 承担了"是否已脏"的语义**。硬件在 guest 写 WC 页（DBM=1, W=0）时自动做 C→D 转换（设 S2AP[1]=1）并记录到 HDBSS buffer，而不是触发 Permission fault。
+
+### 2.2 设计决策：无条件 DBM
 
 v5 移除了 `KVM_PGTABLE_S2_DBM` page-table flag（Phase 6.1），DBM 位在所有可写非设备页上**无条件设置**。
 
-### 2.2 方案对比
+### 2.3 方案对比
 
 | 方案 | 描述 | 优点 | 缺点 |
 |------|------|------|------|
