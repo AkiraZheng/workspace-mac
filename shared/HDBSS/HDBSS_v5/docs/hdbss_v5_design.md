@@ -225,25 +225,166 @@ kvm_mmu_split_memory_region()         (mmu.c:1296)
 
 ### 3.2 v5 的适配方案
 
-v5 **不强制 eager split**（移除了 v4 的 `256 * 1024 * PAGE_SIZE` 默认值）。两种模式都支持：
+v5 **不强制 eager split**（移除了 v4 的 `256 * 1024 * PAGE_SIZE` 默认值）。两种模式都支持。
 
-**Lazy Split 模式**（`split_page_chunk_size = 0`，默认）：
+下面逐路径分析 DBM 的清/加时机。
+
+#### 3.2.1 路径 1：非 INITIALLY_SET 的 dirty logging 开启（eager split）
+
+完整调用链和 DBM 状态变化：
+
 ```
-dirty logging on → wrprotect（block→RO, page→WC）
-→ guest 写 RO block → fault → split → WC → HDBSS 记录
+kvm_arch_commit_memory_region()                  (mmu.c:2577)
+  → kvm_arm_hdbss_on_dirty_logging_change()      (dirty_bit.c:195)
+    → kvm_arm_enable_hdbss_global()               (dirty_bit.c:150)
+      → kvm->arch.mmu.vtcr |= HD|HDBSS|HA        ← 软件 VTCR 设 HDBSS 位
+      → kvm_vcpu_kick(vcpu)                       ← kick vCPU
+
+  → kvm_mmu_wp_memory_region()                    (mmu.c:1268)  ← 步骤 1: wrprotect
+    → kvm_stage2_wp_range()                       (mmu.c:1250)
+      → stage2_apply_range_resched()
+        → kvm_pgtable_stage2_wrprotect()          (pgtable.c:1313)
+          → stage2_update_leaf_attrs()
+            → stage2_attr_walker()                (pgtable.c:1237)
+              pte &= ~S2AP_W                       ← 清写权限
+              if (level < LAST_LEVEL)
+                  pte &= ~DBM                      ← block 清 DBM
+              else
+                  保留 DBM                          ← page 保留 DBM
 ```
 
-**Eager Split 模式**（用户通过 `KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE` ioctl 配置）：
+wrprotect 后的状态：
+- Block entry: **RO** (DBM=0, S2AP_W=0)
+- Level-3 page (已是 page): **WC** (DBM=1, S2AP_W=0)
+
 ```
-dirty logging on → wrprotect（block→RO, page→WC）→ eager split（block→pages, 子页 RO）
-→ guest 写 RO page → fault → relax_perms(W) → WD → HDBSS 记录
+  → kvm_mmu_split_memory_region()                 (mmu.c:1296)  ← 步骤 2: eager split
+    → kvm_mmu_split_huge_pages()                  (mmu.c:121)
+      → kvm_pgtable_stage2_split()
+        → stage2_split_walker()                   (pgtable.c:1519)
+          → prot = kvm_pgtable_stage2_pte_prot(pte)   (pgtable.c:1565)
+            ↑ 从 RO block PTE 提取 prot
+            ↑ pte 有 S2AP_R 但无 S2AP_W → prot = R（不含 W）
+          → kvm_pgtable_stage2_create_unlinked(phys, level, prot=R, ...)
+            (pgtable.c:1445)
+            → stage2_set_prot_attr(prot=R)        (pgtable.c:702)
+              ↑ prot 不含 W → 不设 S2AP_W，不设 DBM
+            → 子页: RO (DBM=0, S2AP_W=0)          ← 继承 block 的 RO 状态
 ```
 
-两种模式的关键：wrprotect 先执行，split 后执行。wrprotect 的 block/page DBM 区分（2.4 节）保证两种模式下 dirty tracking 都正确。
+**关键发现**：split 出来的子页是 **RO**（DBM=0, W=0），不是 WC。因为 `kvm_pgtable_stage2_pte_prot()` 只提取 S2AP_W 判断是否含 W prot，block 此时是 RO（W 被清了），所以 prot 不含 W，`stage2_set_prot_attr()` 不会设 DBM。
+
+子页的 DBM 不是在 split 时加的，而是在**首次写 fault 时由 `relax_perms` 加的**：
+
+```
+guest 写 RO 子页 → Permission fault → user_mem_abort()   (mmu.c:2105)
+  → perm_fault = true
+  → kvm_s2_fault_compute_prot():
+    → write_fault = true
+    → prot |= KVM_PGTABLE_PROT_W                       (mmu.c:1652-1653)
+  → kvm_s2_fault_map()                                 (mmu.c:2017)
+    → mapping_size == perm_fault_granule (= PAGE_SIZE)
+    → kvm_pgtable_stage2_relax_perms(pgt, ipa, prot=W|R)  (mmu.c:2077)
+      (pgtable.c:1382)
+      → set |= S2AP_W + set |= DBM                     ← 加写权限 + 加 DBM
+      → 子页: WD (DBM=1, S2AP_W=1)
+    → mark_page_dirty_in_slot()                        (mmu.c:2088-2089)
+      ← 软件标脏（首次写，HDBSS 还没 arm）
+  → guest 重试写入 → WD 状态，无 fault
+```
+
+**下一轮 dirty tracking（wrprotect 再次执行）**：
+
+```
+kvm_mmu_wp_memory_region()
+  → stage2_attr_walker():
+    → 子页: 清 S2AP_W, 保留 DBM → WC (DBM=1, S2AP_W=0)
+    ↑ 注意：此时是 level-3 page，不是 block，所以 DBM 被保留
+
+guest 写 WC 子页 → HDBSS 硬件 C→D + 记录到 buffer → 无 fault
+```
+
+完整生命周期（eager split + 首次写后）：
+
+```
+初始映射:     block WD (DBM=1, W=1)     ← stage2_set_prot_attr 设 W+DBM
+wrprotect:    block RO (DBM=0, W=0)     ← stage2_attr_walker 清 W+DBM (block)
+split:        子页 RO (DBM=0, W=0)       ← 继承 block 的 RO，DBM 未设
+首次写 fault: 子页 WD (DBM=1, W=1)       ← relax_perms 设 W+DBM + 软件标脏
+下一轮 wp:    子页 WC (DBM=1, W=0)       ← stage2_attr_walker 清 W, 保留 DBM (page)
+后续写:       硬件 C→D + HDBSS 记录      ← 无 fault, HDBSS 工作
+下一轮 wp:    子页 WC (DBM=1, W=0)       ← 循环
+```
+
+#### 3.2.2 路径 2：INITIALLY_SET 模式的 CLEAR ioctl
+
+```
+kvm_arch_mmu_enable_log_dirty_pt_masked()          (mmu.c:1326)
+  → kvm_stage2_wp_range()                          (mmu.c:1336)  ← 步骤 1: wrprotect
+    → stage2_attr_walker()
+      → block: RO (DBM=0, W=0)
+      → page:  WC (DBM=1, W=0)
+
+  → kvm_mmu_split_huge_pages()                     (mmu.c:1347)  ← 步骤 2: split
+    → stage2_split_walker()
+      → prot = kvm_pgtable_stage2_pte_prot(RO block PTE)
+        → prot = R (不含 W)
+      → stage2_set_prot_attr(R) → 子页 RO (DBM=0, W=0)
+```
+
+与路径 1 相同：split 后子页是 RO，DBM 在首次写 fault 时由 `relax_perms` 加上。
+
+#### 3.2.3 路径 3：Lazy Split（写 fault 触发）
+
+```
+wrprotect:    block RO (DBM=0, W=0)               ← stage2_attr_walker 清 W+DBM
+              page  WC (DBM=1, W=0)               ← 已是 page 的保留 DBM
+
+guest 写 RO block → Permission fault → user_mem_abort()   (mmu.c:2105)
+  → perm_fault = true
+  → memslot_is_logging() = true, write_fault = true
+    → topup_mmu_memcache()                        ← 准备 split 内存
+  → kvm_s2_fault_compute_prot():
+    → prot |= KVM_PGTABLE_PROT_W
+  → kvm_s2_fault_map()                            (mmu.c:2017)
+    → perm_fault_granule = kvm_vcpu_trap_get_perm_fault_granule(vcpu)
+      ↑ block mapping 的 permission fault，granule = block size
+    → mapping_size = PAGE_SIZE (不是 block size，因为 dirty logging on)
+    → mapping_size != perm_fault_granule
+    → kvm_pgtable_stage2_map(pgt, ipa, PAGE_SIZE, phys, prot=W|R, memcache)
+      (mmu.c:2080)
+      → stage2_map_walker() → stage2_map_walker_try_leaf()
+        → stage2_set_prot_attr(prot=W|R)
+          → set S2AP_W + set DBM                  ← 子页 WD (DBM=1, W=1)
+        → 替换 block entry 为 page table + page entry
+      → 子页: WD (DBM=1, W=1)
+    → mark_page_dirty_in_slot()                   ← 软件标脏
+
+guest 重试写入 → WD 状态，无 fault
+```
+
+lazy split 与 eager split 的区别：
+- eager split：先拆 block 成 RO 子页，首次写时 `relax_perms` 加 W+DBM
+- lazy split：在 fault handler 中直接 `stage2_map` 创建 WD 子页（含 W+DBM），一步到位
+
+两种方式最终结果一致：子页变成 WD (DBM=1, W=1)，下一轮 wrprotect 后变 WC (DBM=1, W=0)。
+
+#### 3.2.4 总结：DBM 的加/清时机
+
+| 步骤 | 操作 | DBM 变化 | 代码位置 |
+|------|------|---------|---------|
+| 初始映射 | `stage2_set_prot_attr(W)` | 设 DBM | `pgtable.c:749` |
+| wrprotect (block) | `stage2_attr_walker` 清 W | 清 DBM | `pgtable.c:1260` |
+| wrprotect (page) | `stage2_attr_walker` 清 W | 保留 DBM | `pgtable.c:1259` (不进 if) |
+| eager split | `stage2_set_prot_attr(R)` | 不设 DBM（继承 RO） | `pgtable.c:734` (不进 if) |
+| 首次写 fault (eager) | `relax_perms(W)` | 设 DBM | `pgtable.c:1397` |
+| lazy split fault | `stage2_map(W)` → `set_prot_attr(W)` | 设 DBM | `pgtable.c:749` |
+| 下一轮 wp (page) | `stage2_attr_walker` 清 W | 保留 DBM → WC | `pgtable.c:1259` (不进 if) |
+| HDBSS 硬件 C→D | 硬件设 S2AP_W=1 | DBM 保持 1 | ARM Spec |
 
 ### 3.3 为什么 v5 不强制 eager split
 
-v4 在 `kvm_init_stage2_mmu()` 中设置 `split_page_chunk_size = 256 * 1024 * PAGE_SIZE`，在 16KB/64KB 页上产生架构无效的 block size（4GB/16GB）。v5 移除该默认值，改为 `KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT`（0 = lazy），用户可通过 ioctl opt-in eager split。HDBSS 的三态模型（block→RO→fault→split→WC→HDBSS 记录）在 lazy 模式下同样正确。
+v4 在 `kvm_init_stage2_mmu()` 中设置 `split_page_chunk_size = 256 * 1024 * PAGE_SIZE`，在 16KB/64KB 页上产生架构无效的 block size（4GB/16GB）。v5 移除该默认值，改为 `KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT`（0 = lazy），用户可通过 ioctl opt-in eager split。HDBSS 的三态模型在 lazy 和 eager 两种模式下都正确（3.2.4 节）。
 
 ---
 
