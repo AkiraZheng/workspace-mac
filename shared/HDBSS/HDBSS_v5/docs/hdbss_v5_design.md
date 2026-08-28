@@ -99,13 +99,72 @@ HD=0 时 DBM 无硬件效果，软件管理 dirty state（Permission fault）。
 
 设计原则：**所有修改 S2AP 的软件路径必须紧跟 DBM 的修改**。
 
-| 代码路径 | 文件:行 | S2AP 修改 | DBM 修改 | 一致性 |
-|---------|--------|----------|---------|--------|
-| `stage2_set_prot_attr()` | `pgtable.c:734-749` | 设 S2AP_W | 设 DBM | ✅ 同一 if 块 |
-| `kvm_pgtable_stage2_wrprotect()` | `pgtable.c:1313-1318` | 清 S2AP_W | block 清 DBM, page 保留 | ✅ walker 中区分 |
-| `kvm_pgtable_stage2_relax_perms()` | `pgtable.c:1395-1398` | 设 S2AP_W | 设 DBM | ✅ 同一 if 块 |
-| `stage2_split_walker()` | `pgtable.c:1519-1570` | 继承原 block prot | 不设 DBM（继承 RO） | ✅ 继承 RO |
-| 硬件 C→D | ARM Spec | 硬件设 S2AP_W=1 | DBM 保持 1 | ✅ 硬件行为 |
+#### W→RO 方向（清 W，需要检查是否清 DBM）
+
+| # | 代码路径 | 文件:行 | S2AP 修改 | DBM 修改 | 一致性 |
+|---|---------|--------|----------|---------|--------|
+| 1 | `kvm_pgtable_stage2_wrprotect()` | `pgtable.c:1313-1318` | 清 S2AP_W | block 清 DBM, page 保留 | ✅ walker 中区分 |
+| 2 | `kvm_arch_mmu_enable_log_dirty_pt_masked()` | `mmu.c:1326-1352` → 调 #1 | 同 #1 | 同 #1 | ✅ |
+| 3 | `kvm_pgtable_stage2_unmap()` | `pgtable.c:1213` | 整 PTE 清零 | DBM 自然消失 | ✅ |
+
+#### RO→W 方向（设 W，DBM 跟着设）
+
+| # | 代码路径 | 文件:行 | S2AP 修改 | DBM 修改 | 一致性 |
+|---|---------|--------|----------|---------|--------|
+| 4 | `stage2_set_prot_attr(W)` | `pgtable.c:734-749` | 设 S2AP_W | 设 DBM | ✅ 同一 if 块 |
+| 5 | `kvm_pgtable_stage2_relax_perms(W)` | `pgtable.c:1395-1398` | 设 S2AP_W | 设 DBM | ✅ 同一 if 块 |
+| 6 | `kvm_pgtable_stage2_map(W)`（lazy split） | `pgtable.c:1109` → #4 | 设 S2AP_W | 设 DBM | ✅ |
+| 7 | `stage2_split_walker()` | `pgtable.c:1519-1570` → #4 | 继承 prot | 跟着 prot（有 W 就设，无 W 就不设） | ✅ |
+
+#### 硬件行为
+
+| # | 代码路径 | S2AP 修改 | DBM 修改 | 一致性 |
+|---|---------|----------|---------|--------|
+| 8 | 硬件 C→D | 硬件设 S2AP_W=1 | DBM 保持 1 | ✅ 硬件行为 |
+
+#### 不修改 S2AP_W 的路径（DBM 无影响）
+
+| # | 代码路径 | 操作 | DBM 影响 |
+|---|---------|------|---------|
+| 9 | `kvm_pgtable_stage2_mkyoung()` | 只设 AF 位 | 无影响 |
+| 10 | `kvm_pgtable_stage2_test_clear_young()` | 只清 AF 位 | 无影响 |
+| 11 | `kvm_pgtable_stage2_flush()` | 只做 cache flush，不改 PTE | 无影响 |
+| 12 | `relax_perms(R)` 或 `relax_perms(X)` | 不含 W 时只设 S2AP_R 或 XN | 无影响 |
+
+#### "只改 W 不碰 DBM"的场景分析
+
+问题：RO→W 方向中，如果旧 PTE 已带 DBM=1，设 W 时只 OR 了 W 位而没有同时 OR DBM，会怎样？
+
+**路径 4/6/7（`stage2_set_prot_attr`）**：不存在此问题。`*ptep = attr` 是**整体覆盖**，不是 OR 操作。新值完全由 `prot` 决定，有 W 就有 DBM，没 W 就没 DBM。旧 PTE 的 DBM 状态被完全覆盖。
+
+```c
+// stage2_set_prot_attr() — 整体覆盖
+if (prot & KVM_PGTABLE_PROT_W) {
+    attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+    attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;   // 无条件跟 W 一起设
+}
+// ...
+*ptep = attr;   // ← 整体覆盖，不是 OR
+```
+
+**路径 5（`relax_perms`）**：不存在此问题。底层是 OR 操作，但 v5 中 `set |= DBM` 是**无条件**执行的（移除了 v4 的 `if (pgt->flags & KVM_PGTABLE_S2_DBM)` 条件守卫）：
+
+```c
+// kvm_pgtable_stage2_relax_perms() — OR 操作
+if (prot & KVM_PGTABLE_PROT_W) {
+    set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+    set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;   // 无条件，不管旧 DBM 状态
+}
+// → stage2_attr_walker():
+//   pte |= data->attr_set;   // OR 操作，DBM 必被设为 1
+```
+
+| 旧 PTE 状态 | 操作 | 新 PTE 状态 | 正确? |
+|------------|------|------------|-------|
+| RO (DBM=0, W=0) | `pte \|= W \| DBM` | WD (DBM=1, W=1) | ✅ |
+| WC (DBM=1, W=0) | `pte \|= W \| DBM`（DBM 已是 1，OR 无变化） | WD (DBM=1, W=1) | ✅ |
+
+**结论：不存在"只改 W 不碰 DBM"的路径。** v5 中所有设 W 的路径都无条件同时设 DBM。v4 中 `relax_perms()` 有 `if (pgt->flags & KVM_PGTABLE_S2_DBM)` 条件守卫，在 flag 没设时确实可能只改 W 不设 DBM——v5 移除了该条件。
 
 ### 2.4 wrprotect 的 block/page 区分
 
