@@ -1,0 +1,33 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 4/6] arm64: sysreg: Add BBM_3
+From: Linu Cherian <linu.cherian@arm.com>
+Date: Thu, 23 Jul 2026 10:10:31 +0530
+Message-Id: <20260723044034.2983651-5-linu.cherian@arm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Add BBM_3 definition for ID_AA64MMFR2_EL1 register.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Anshuman Khandual <anshuman.khandual@arm.com>
+Signed-off-by: Linu Cherian <linu.cherian@arm.com>
+---
+ arch/arm64/tools/sysreg | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/tools/sysreg b/arch/arm64/tools/sysreg
+index 7cb61aca3797..e070ada06196 100644
+--- a/arch/arm64/tools/sysreg
++++ b/arch/arm64/tools/sysreg
+@@ -2259,6 +2259,7 @@ UnsignedEnum	55:52	BBM
+ 	0b0000	0
+ 	0b0001	1
+ 	0b0010	2
++	0b0011	3
+ EndEnum
+ UnsignedEnum	51:48	TTL
+ 	0b0000	NI
+-- 
+2.43.0
+

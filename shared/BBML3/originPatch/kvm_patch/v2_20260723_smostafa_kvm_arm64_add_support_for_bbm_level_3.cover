@@ -1,0 +1,112 @@
+Subject: [PATCH RFC v2 0/2] KVM: arm64: Add support for BBM level 3
+From: Mostafa Saleh <smostafa@google.com>
+Date: Thu, 23 Jul 2026 18:21:38 +0000
+Message-Id: <20260723182140.4025575-1-smostafa@google.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+This patch series adds support for BBM level 3 to KVM pgtable, it
+depends on [1]
+
+Changes from v1:
+https://lore.kernel.org/all/20260717130901.2239134-1-smostafa@google.com/
+- Limit BBML3 to systems with FWB and DIC and remove race check.
+
+Motivation
+==========
+I have been looking into this for the context of:
+- Page table sharing between the host CPU stage-2 and the SMMUv3 for
+  protected KVM.
+- Use the pagtable code to populate SMMUv3 stage-2 shadowed
+  page table [2]
+
+However, BBM level 3 is still useful for CPU only operations as it
+avoids intermediately breaking translation.
+
+Design
+======
+Some of the conditions that BBM level 3 will be useful in (RWHZWS):
+1) A change to a PTE memory type, shareability, cacheability or OA
+2) Changing from block to table
+3) Changing from table to block
+
+At the moment in the hyp page table code:
+- For #1) stage2_map_walker_try_leaf(): Replaces a leaf with another
+  one which does not match the same OA/perms/attrs.
+
+- For #2) Switch block to table is used from:
+  - kvm_pgtable_stage2_split(): Explicitly splitting a block (used
+    for dirty logging), where a block is replaced by a table with
+    the same attributes.
+  - stage2_map_walk_leaf(): Updating a mapping that is partially
+    part of an existing block.
+
+- #3) Does not exist in the code at the moment as coalescing is not
+  supported.
+
+The first patch is a preparation to be able to clean up the old pte
+for BBML3, the second patch adds the main logic.
+
+Initially, I encapsulated the full logic of BBM in one function,
+which was not readable, due to different ordering and dealing with
+CMO, TLBI.
+
+Instead, I kept the logic into 2 functions, where BBML3 is added in
+the make step.
+
+One interesting case, as BBML3 will update the PTE atomically, it
+can only know it raced with another core at the point of the cmpxchg
+failing, unlike the SW implementation which locks the PTE first.
+And as we must issue CMOs to the new mapped page before the update,
+that means with BBML3 racing cores will issue redundant CMOs, to
+avoid this, we limit the use of BBML3 to systems with FWB and DIC.
+
+Testing
+=======
+This was tested:
+- C1-Pro cores, unfortunately the version I have does not run
+  upstream, I backported the patches to Android kernel (6.18).
+
+- mainline(7.2-rc3) kernel on a Qualcomm X1 with a hacked cpufeature
+  as it does not support BBM, I did not see conflict aborts or TLB
+  corruption.
+
+I tested with VHE and protected (hvhe) modes, running VMs
+(and protected), and running some selftests, that might exercise and
+stress this path tools/testing/selftests/kvm:
+- demand_paging_test
+- memslot_perf_test
+- memslot_modification_stress_test
+- dirty_log_test
+
+Future work
+===========
+Some other changes that would be useful:
+- Eagerly install table on block split, we can now replace a block
+  with a fully populated table atomically when we unmap a partial
+  part of the block.
+
+- Use BBML3 in the hypervisor stage-1 with nvhe/protected mode to
+  improve preformance and reduce memory usage as now it is forced
+  to use leaf mappings.
+
+There is more to support page table sharing (such as dealing with
+TLB invalidation, coherency...), I submitted a talk to LPC to discuss
+this further.
+
+[1] https://lore.kernel.org/all/20260723044034.2983651-1-linu.cherian@arm.com/
+[2] https://lore.kernel.org/linux-iommu/20260715115906.2664882-1-smostafa@google.com/
+
+Mostafa Saleh (2):
+  KVM: arm64: Add stage2_clean_old_pte()
+  KVM: arm64: Support BBM level 3
+
+ arch/arm64/kvm/hyp/pgtable.c | 123 +++++++++++++++++++++++++----------
+ 1 file changed, 87 insertions(+), 36 deletions(-)
+
+-- 
+2.55.0.229.g6434b31f56-goog
+
+
+

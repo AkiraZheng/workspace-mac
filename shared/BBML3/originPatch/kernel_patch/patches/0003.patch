@@ -1,0 +1,83 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 3/6] arm64: cpufeature: Extend bbml2_noabort support
+ list
+From: Linu Cherian <linu.cherian@arm.com>
+Date: Thu, 23 Jul 2026 10:10:30 +0530
+Message-Id: <20260723044034.2983651-4-linu.cherian@arm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Add below cpus to the midr list, which supports
+BBML2_NOABORT.
+
+Cortex A520(AE)
+Cortex A715
+Cortex A720(AE)
+Cortex A725
+Neoverse N3
+C1-Nano
+C1-Pro
+C1-Ultra
+C1-Premium
+
+C1-Ultra and C1-Premium both suffer from erratum 3683289,
+where Break-Before-Make must be followed to avoid a livelock.
+For both CPUs, the erratum is fixed from r1p1.
+Hence we do not enable BBML2_NOABORT for CPU revisions <= r1p0.
+
+The relevant SDENs are:
+* C1-Ultra: https://developer.arm.com/documentation/111077/9-00/
+* C1-Premium: https://developer.arm.com/documentation/111078/9-00/
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Anshuman Khandual <anshuman.khandual@arm.com>
+Signed-off-by: Linu Cherian <linu.cherian@arm.com>
+---
+ Documentation/arch/arm64/silicon-errata.rst |  4 ++++
+ arch/arm64/kernel/cpufeature.c              | 10 ++++++++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/Documentation/arch/arm64/silicon-errata.rst b/Documentation/arch/arm64/silicon-errata.rst
+index 014aa1c215a1..57c778446936 100644
+--- a/Documentation/arch/arm64/silicon-errata.rst
++++ b/Documentation/arch/arm64/silicon-errata.rst
+@@ -242,10 +242,14 @@ stable kernels.
+ +----------------+-----------------+-----------------+-----------------------------+
+ | ARM            | Neoverse-V3AE   | #4193784        | ARM64_ERRATUM_4118414       |
+ +----------------+-----------------+-----------------+-----------------------------+
++| ARM            | C1-Premium      | #3683289        | N/A                         |
+++----------------+-----------------+-----------------+-----------------------------+
+ | ARM            | C1-Premium      | #4193780        | ARM64_ERRATUM_4118414       |
+ +----------------+-----------------+-----------------+-----------------------------+
+ | ARM            | C1-Pro          | #4193714        | ARM64_ERRATUM_4193714       |
+ +----------------+-----------------+-----------------+-----------------------------+
++| ARM            | C1-Ultra        | #3683289        | N/A                         |
+++----------------+-----------------+-----------------+-----------------------------+
+ | ARM            | C1-Ultra        | #4193780        | ARM64_ERRATUM_4118414       |
+ +----------------+-----------------+-----------------+-----------------------------+
+ | ARM            | MMU-500         | #562869,        | ARM_SMMU_MMU_500_CPRE_ERRATA|
+diff --git a/arch/arm64/kernel/cpufeature.c b/arch/arm64/kernel/cpufeature.c
+index 9a22df0c5120..98d2cfc2dc90 100644
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@ -2152,6 +2152,16 @@ bool cpu_supports_bbml2_noabort(void)
+ 		MIDR_ALL_VERSIONS(MIDR_NVIDIA_OLYMPUS),
+ 		MIDR_ALL_VERSIONS(MIDR_AMPERE1),
+ 		MIDR_ALL_VERSIONS(MIDR_AMPERE1A),
++		MIDR_ALL_VERSIONS(MIDR_CORTEX_A520AE),
++		MIDR_ALL_VERSIONS(MIDR_CORTEX_A715),
++		MIDR_ALL_VERSIONS(MIDR_CORTEX_A720AE),
++		MIDR_ALL_VERSIONS(MIDR_CORTEX_A725),
++		MIDR_ALL_VERSIONS(MIDR_NEOVERSE_N3),
++		MIDR_ALL_VERSIONS(MIDR_C1_NANO),
++		MIDR_ALL_VERSIONS(MIDR_C1_PRO),
++		/* Erratum 3683289 fixed in r1p1 */
++		MIDR_RANGE(MIDR_C1_ULTRA, 1, 1, 0xf, 0xf),
++		MIDR_RANGE(MIDR_C1_PREMIUM, 1, 1, 0xf, 0xf),
+ 		{}
+ 	};
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,278 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC v2 1/2] KVM: arm64: Add stage2_clean_old_pte()
+From: Mostafa Saleh <smostafa@google.com>
+Date: Thu, 23 Jul 2026 18:21:39 +0000
+Message-Id: <20260723182140.4025575-2-smostafa@google.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+At the moment, the pgtable code rely on BBM in SW which looks like:
+Break: stage2_try_break_pte()
+	1) Break PTE and lock it
+	2) TLBI
+	3) Put the ref on the old PTE
+
+Make: stage2_make_pte()
+	1) Get a ref on the new PTE
+	2) Install the new PTE
+
+With BBML3, the sequence will look as
+	1) Get ref on the new PTE
+	2) Install new PTE
+	3) TLBI
+	4) Put the ref on the old PTE
+
+Which requires moving step #2 #3 from the break function to the make
+function, although it is possible to do that for SW BBM also, that
+means the stage2_try_break_pte() did not fully break the PTE as it
+is referenced in TLBs, although that works it seems fragile.
+
+Instead, move this logic to a new function stage2_clean_old_pte()
+so that can be called from BBML3.
+
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/pgtable.c | 67 ++++++++++++++++++++----------------
+ 1 file changed, 37 insertions(+), 30 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index b74dd5ce1efd..d670da8882a5 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -810,39 +810,10 @@ static bool stage2_try_set_pte(const struct kvm_pgtable_visit_ctx *ctx, kvm_pte_
+ 	return cmpxchg(ctx->ptep, ctx->old, new) == ctx->old;
+ }
+ 
+-/**
+- * stage2_try_break_pte() - Invalidates a pte according to the
+- *			    'break-before-make' requirements of the
+- *			    architecture.
+- *
+- * @ctx: context of the visited pte.
+- * @mmu: stage-2 mmu
+- *
+- * Returns: true if the pte was successfully broken.
+- *
+- * If the removed pte was valid, performs the necessary serialization and TLB
+- * invalidation for the old value. For counted ptes, drops the reference count
+- * on the containing table page.
+- */
+-static bool stage2_try_break_pte(const struct kvm_pgtable_visit_ctx *ctx,
++static void stage2_clean_old_pte(const struct kvm_pgtable_visit_ctx *ctx,
+ 				 struct kvm_s2_mmu *mmu)
+ {
+ 	struct kvm_pgtable_mm_ops *mm_ops = ctx->mm_ops;
+-	kvm_pte_t locked_pte;
+-
+-	if (stage2_pte_is_locked(ctx->old)) {
+-		/*
+-		 * Should never occur if this walker has exclusive access to the
+-		 * page tables.
+-		 */
+-		WARN_ON(!kvm_pgtable_walk_shared(ctx));
+-		return false;
+-	}
+-
+-	locked_pte = FIELD_PREP(KVM_INVALID_PTE_TYPE_MASK,
+-				KVM_INVALID_PTE_TYPE_LOCKED);
+-	if (!stage2_try_set_pte(ctx, locked_pte))
+-		return false;
+ 
+ 	if (!kvm_pgtable_walk_skip_bbm_tlbi(ctx)) {
+ 		/*
+@@ -862,6 +833,42 @@ static bool stage2_try_break_pte(const struct kvm_pgtable_visit_ctx *ctx,
+ 
+ 	if (stage2_pte_is_counted(ctx->old))
+ 		mm_ops->put_page(ctx->ptep);
++}
++
++/**
++ * stage2_try_break_pte() - Invalidates a pte according to the
++ *			    'break-before-make' requirements of the
++ *			    architecture.
++ *
++ * @ctx: context of the visited pte.
++ * @mmu: stage-2 mmu
++ *
++ * Returns: true if the pte was successfully broken.
++ *
++ * If the removed pte was valid, performs the necessary serialization and TLB
++ * invalidation for the old value. For counted ptes, drops the reference count
++ * on the containing table page.
++ */
++static bool stage2_try_break_pte(const struct kvm_pgtable_visit_ctx *ctx,
++				 struct kvm_s2_mmu *mmu)
++{
++	kvm_pte_t locked_pte;
++
++	if (stage2_pte_is_locked(ctx->old)) {
++		/*
++		 * Should never occur if this walker has exclusive access to the
++		 * page tables.
++		 */
++		WARN_ON(!kvm_pgtable_walk_shared(ctx));
++		return false;
++	}
++
++	locked_pte = FIELD_PREP(KVM_INVALID_PTE_TYPE_MASK,
++				KVM_INVALID_PTE_TYPE_LOCKED);
++	if (!stage2_try_set_pte(ctx, locked_pte))
++		return false;
++
++	stage2_clean_old_pte(ctx, mmu);
+ 
+ 	return true;
+ }
+-- 
+2.55.0.229.g6434b31f56-goog
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC v2 2/2] KVM: arm64: Support BBM level 3
+From: Mostafa Saleh <smostafa@google.com>
+Date: Thu, 23 Jul 2026 18:21:40 +0000
+Message-Id: <20260723182140.4025575-3-smostafa@google.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+If the system supports hardware Break-Before-Make (BBM) level 3, use it
+to replace stage-2 PTEs directly. Otherwise, fall back to the software
+BBM sequence.
+
+For BBML3 the sequence is:
+1) Get a reference count on the containing table for the new PTE.
+2) Atomically update the PTE with the new valid descriptor.
+3) Invalidate the TLB for the old PTE.
+4) Drop the reference count holding the old PTE.
+
+One interesting case, as BBML3 will update the PTE atomically, it
+can only know it raced with another core at the point of the cmpxchg
+failing, unlike the SW implementation which locks the PTE first.
+And as we must issue CMOs to the new mapped page before the update,
+that means with BBML3 racing cores will issue redundant CMOs.
+To avoid this, limit BBML3 support for systems with DIC and FWB,
+which does not require CMOs.
+
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/pgtable.c | 58 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 51 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index d670da8882a5..4644b596f020 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -835,10 +835,24 @@ static void stage2_clean_old_pte(const struct kvm_pgtable_visit_ctx *ctx,
+ 		mm_ops->put_page(ctx->ptep);
+ }
+ 
++/*
++ * We assume that KVM will never change the OA of an active translation.
++ * If the host needs to move the backing PFN, it should do an explicit
++ * unmap to issue the required TLBI.
++ */
++static bool stage2_use_bbml3(void)
++{
++	return system_supports_bbml3() &&
++	       cpus_have_final_cap(ARM64_HAS_STAGE2_FWB) &&
++	       cpus_have_final_cap(ARM64_HAS_CACHE_DIC);
++}
++
+ /**
+  * stage2_try_break_pte() - Invalidates a pte according to the
+  *			    'break-before-make' requirements of the
+- *			    architecture.
++ *			    architecture, if BMML3 is supported it
++ *			    will be used, meaning that this function
++ *			    won't break the PTE.
+  *
+  * @ctx: context of the visited pte.
+  * @mmu: stage-2 mmu
+@@ -854,6 +868,10 @@ static bool stage2_try_break_pte(const struct kvm_pgtable_visit_ctx *ctx,
+ {
+ 	kvm_pte_t locked_pte;
+ 
++	/* All handled in stage2_make_pte() */
++	if (stage2_use_bbml3() && kvm_pte_valid(ctx->old))
++		return true;
++
+ 	if (stage2_pte_is_locked(ctx->old)) {
+ 		/*
+ 		 * Should never occur if this walker has exclusive access to the
+@@ -873,16 +891,35 @@ static bool stage2_try_break_pte(const struct kvm_pgtable_visit_ctx *ctx,
+ 	return true;
+ }
+ 
+-static void stage2_make_pte(const struct kvm_pgtable_visit_ctx *ctx, kvm_pte_t new)
++static bool stage2_make_pte(const struct kvm_pgtable_visit_ctx *ctx, struct kvm_s2_mmu *mmu,
++			    kvm_pte_t new)
+ {
+ 	struct kvm_pgtable_mm_ops *mm_ops = ctx->mm_ops;
+ 
+-	WARN_ON(!stage2_pte_is_locked(*ctx->ptep));
+-
+ 	if (stage2_pte_is_counted(new))
+ 		mm_ops->get_page(ctx->ptep);
+ 
++	if (stage2_use_bbml3() && kvm_pte_valid(ctx->old)) {
++		/*
++		 * Barrier is required because stage2_try_set_pte() uses
++		 * WRITE_ONCE for non-shared walks, lacking release semantics
++		 * used in the software BBM case.
++		 */
++		smp_wmb();
++		if (!stage2_try_set_pte(ctx, new)) {
++			/* Raced with another core. */
++			if (stage2_pte_is_counted(new))
++				mm_ops->put_page(ctx->ptep);
++			return false;
++		}
++
++		stage2_clean_old_pte(ctx, mmu);
++		return true;
++	}
++
++	WARN_ON(!stage2_pte_is_locked(*ctx->ptep));
+ 	smp_store_release(ctx->ptep, new);
++	return true;
+ }
+ 
+ static bool stage2_unmap_defer_tlb_flush(struct kvm_pgtable *pgt)
+@@ -1014,7 +1051,8 @@ static int stage2_map_walker_try_leaf(const struct kvm_pgtable_visit_ctx *ctx,
+ 	    stage2_pte_executable(new))
+ 		mm_ops->icache_inval_pou(kvm_pte_follow(new, mm_ops), granule);
+ 
+-	stage2_make_pte(ctx, new);
++	if (!stage2_make_pte(ctx, data->mmu, new))
++		return -EAGAIN;
+ 
+ 	return 0;
+ }
+@@ -1069,7 +1107,10 @@ static int stage2_map_walk_leaf(const struct kvm_pgtable_visit_ctx *ctx,
+ 	 * will be mapped lazily.
+ 	 */
+ 	new = kvm_init_table_pte(childp, mm_ops);
+-	stage2_make_pte(ctx, new);
++	if (!stage2_make_pte(ctx, data->mmu, new)) {
++		mm_ops->put_page(childp);
++		return -EAGAIN;
++	}
+ 
+ 	return 0;
+ }
+@@ -1560,7 +1601,10 @@ static int stage2_split_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 	 * writes the PTE using smp_store_release().
+ 	 */
+ 	new = kvm_init_table_pte(childp, mm_ops);
+-	stage2_make_pte(ctx, new);
++	if (!stage2_make_pte(ctx, mmu, new)) {
++		kvm_pgtable_stage2_free_unlinked(mm_ops, childp, level);
++		return -EAGAIN;
++	}
+ 	return 0;
+ }
+ 
+-- 
+2.55.0.229.g6434b31f56-goog
+

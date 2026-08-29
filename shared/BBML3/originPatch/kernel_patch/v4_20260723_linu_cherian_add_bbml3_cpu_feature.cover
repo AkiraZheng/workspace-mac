@@ -1,0 +1,77 @@
+Subject: [PATCH v4 0/6] Add BBML3 cpu feature
+From: Linu Cherian <linu.cherian@arm.com>
+Date: Thu, 23 Jul 2026 10:10:27 +0530
+Message-Id: <20260723044034.2983651-1-linu.cherian@arm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+- Patches 1, 2 and 3 adds more cpus to the bbml2_noabort 
+  support list. bbml2_noabort would eventually gets renamed
+  to bbml3 in a subsequent patch as they are functionally
+  equivalent. 
+- Patches 4, 5 & 6 introduces BBML3 cpu feature
+
+Changelog from v3:
+* In order to cover future C1-Ultra and C1-Premium cpus starting
+from r1p1, replaced MIDR_REV_RANGE with MIDR_RANGE in patch 3
+
+* Few minor fixes in comments
+
+* Collected Reviewed-bys.
+
+Changelog from v2:
+* Added errata id to Documentation/arch/arm64/silicon-errata.rst
+  in patch 3. Added comments in code related to errata as well.
+
+* Fixed register name typo in commit message in patch 4.
+
+* Renamed patch title in patch 5. 
+
+* Commit message reworded in patch 6.
+
+* No functional changes in this version.
+
+Changelog from v1:
+* Patches associated with adding cpus to BBML2_NOABORT,
+  support list, were kept at bottom in v1 is now moved
+  up in this version, for ease of backporting.
+
+* Adding BBM_3 definition in sysreg moved into a separate patch
+
+* MMFR2_ID check for BBM_3 has been changed from == BBM_3 to
+  >= BBM_3, so that BBML3 cpu feature gets enabled for BBM_4 as well.
+
+* For feature detection, MMFR2_ID check comes first followed by 
+  midr check for code readability
+
+* Errata details for C1-Ultra and C1-Premium added to commit message
+
+
+
+
+
+Linu Cherian (6):
+  arm64: cputype: Add Cortex-A520AE definitions
+  arm64: cputype: Add C1-Nano definitions
+  arm64: cpufeature: Extend bbml2_noabort support list
+  arm64: sysreg: Add BBM_3
+  arm64: cpufeature: Rename BBML2_NOABORT as BBML3
+  arm64: cpufeature: Detect BBML3 based on ID_AA64MMFR2_EL1.BBM
+
+ Documentation/arch/arm64/silicon-errata.rst |  4 ++
+ arch/arm64/include/asm/cpufeature.h         |  6 +--
+ arch/arm64/include/asm/cputype.h            |  4 ++
+ arch/arm64/kernel/cpufeature.c              | 55 ++++++++++-----------
+ arch/arm64/mm/contpte.c                     | 21 +++-----
+ arch/arm64/mm/mmu.c                         | 54 ++++++++++----------
+ arch/arm64/mm/proc.S                        |  4 +-
+ arch/arm64/tools/cpucaps                    |  2 +-
+ arch/arm64/tools/sysreg                     |  1 +
+ 9 files changed, 77 insertions(+), 74 deletions(-)
+
+-- 
+2.43.0
+
+
+

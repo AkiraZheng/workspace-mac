@@ -1,0 +1,47 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v4 2/6] arm64: cputype: Add C1-Nano definitions
+From: Linu Cherian <linu.cherian@arm.com>
+Date: Thu, 23 Jul 2026 10:10:29 +0530
+Message-Id: <20260723044034.2983651-3-linu.cherian@arm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Add cputype definitions for C1-Nano.
+
+The definition can be found in C1-Nano TRM,
+https://developer.arm.com/documentation/107753/0002
+as part of MIDR_EL1 bit descriptions.
+
+This is going to be used in the bbml3 support list.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Anshuman Khandual <anshuman.khandual@arm.com>
+Signed-off-by: Linu Cherian <linu.cherian@arm.com>
+---
+ arch/arm64/include/asm/cputype.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/arch/arm64/include/asm/cputype.h b/arch/arm64/include/asm/cputype.h
+index e41fae46426b..1fa29616e586 100644
+--- a/arch/arm64/include/asm/cputype.h
++++ b/arch/arm64/include/asm/cputype.h
+@@ -100,6 +100,7 @@
+ #define ARM_CPU_PART_CORTEX_A720AE	0xD89
+ #define ARM_CPU_PART_C1_ULTRA		0xD8C
+ #define ARM_CPU_PART_NEOVERSE_N3	0xD8E
++#define ARM_CPU_PART_C1_NANO		0xD8A
+ #define ARM_CPU_PART_C1_PRO		0xD8B
+ #define ARM_CPU_PART_C1_PREMIUM		0xD90
+ 
+@@ -195,6 +196,7 @@
+ #define MIDR_CORTEX_A720AE MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A720AE)
+ #define MIDR_C1_ULTRA MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_C1_ULTRA)
+ #define MIDR_NEOVERSE_N3 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_NEOVERSE_N3)
++#define MIDR_C1_NANO MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_C1_NANO)
+ #define MIDR_C1_PRO MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_C1_PRO)
+ #define MIDR_C1_PREMIUM MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_C1_PREMIUM)
+ #define MIDR_THUNDERX	MIDR_CPU_MODEL(ARM_CPU_IMP_CAVIUM, CAVIUM_CPU_PART_THUNDERX)
+-- 
+2.43.0
+
