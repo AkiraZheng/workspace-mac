@@ -1,0 +1,265 @@
+From 2cd30f625b2c4d1d78418f04d83bf3021db0ea78 Mon Sep 17 00:00:00 2001
+From: Eillon <yezhenyu2@huawei.com>
+Date: Fri, 4 Sep 2026 13:53:38 +0800
+Subject: [PATCH 08/13] KVM: arm64: Add HDBSS fault handling and buffer flush
+
+HDBSS entries accumulate in the per-vCPU buffer while the guest
+runs, and must be drained into the dirty bitmap or dirty ring
+before userspace can observe them. Once the buffer is full, the
+architecture no longer promotes writable-clean descriptors, and
+the write access instead generates a stage-2 Permission fault with
+ESR_EL2.ISS2.HDBSSF.
+
+Drain the buffer at a single point: kvm_arch_vcpu_ioctl_run()
+flushes it on every VM exit, before the exit reason is handled.
+The placement inside the run loop is what closes the dirty ring
+feedback in time: kvm_dirty_ring_push() raises
+KVM_REQ_DIRTY_RING_SOFT_FULL when the flush pushes the ring past
+its soft limit, and check_vcpu_requests() observes that at the top
+of the next loop iteration, so the vCPU exits to userspace for the
+harvest before re-entering the guest. A flush from
+kvm_arch_vcpu_put() instead would raise the request outside the
+run loop, where nothing observes it until the next KVM_RUN entry,
+delaying the userspace drain by a full round trip.
+
+kvm_flush_hdbss_buffer() marks the recorded pages dirty under
+kvm->srcu, as the memslots it resolves GFNs through are
+SRCU-protected. It only resets HDBSSPROD_EL2.INDEX, leaving the
+FSC field alone: a non-zero FSC means an HDBSS access failed, and
+the error state must survive until the fault handler observes it.
+
+kvm_handle_hdbss_fault(), reached from kvm_handle_guest_abort()
+through the new esr_iss2_is_hdbssf() helper, distinguishes a full
+buffer (FSC == OK, resume the guest) from external aborts and
+granule protection check faults: the latter clear FSC to resume
+hardware dirty state updates and are reported to userspace with
+-EFAULT.
+
+kvm_arch_sync_dirty_log() kicks all vCPUs out of guest mode: the
+exit path flushes on the way out, and the dirty-log GET/CLEAR
+protocol tolerates bits set concurrently with the snapshot.
+
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/esr.h           |  5 ++
+ arch/arm64/include/asm/kvm_dirty_bit.h | 16 ++++++
+ arch/arm64/kvm/arm.c                   | 20 +++++++
+ arch/arm64/kvm/dirty_bit.c             | 79 ++++++++++++++++++++++++++
+ arch/arm64/kvm/mmu.c                   |  4 ++
+ 5 files changed, 124 insertions(+)
+
+diff --git a/arch/arm64/include/asm/esr.h b/arch/arm64/include/asm/esr.h
+index f816f5d77f1a..4b3ccd407faa 100644
+--- a/arch/arm64/include/asm/esr.h
++++ b/arch/arm64/include/asm/esr.h
+@@ -437,6 +437,11 @@
+ #ifndef __ASSEMBLER__
+ #include <asm/types.h>
+ 
++static inline bool esr_iss2_is_hdbssf(unsigned long esr)
++{
++	return !!(ESR_ELx_ISS2(esr) & ESR_ELx_HDBSSF);
++}
++
+ static inline unsigned long esr_brk_comment(unsigned long esr)
+ {
+ 	return esr & ESR_ELx_BRK64_ISS_COMMENT_MASK;
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index ee4de4ba8f5c..7319bae2d14e 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -13,6 +13,9 @@
+ #include <asm/sysreg.h>
+ #include <linux/sizes.h>
+ 
++#define HDBSS_ENTRY_VALID	BIT(0)
++#define HDBSS_ENTRY_IPA	GENMASK_ULL(55, 12)
++
+ #define KVM_ARM_HDBSS_DEFAULT_SIZE  PAGE_SIZE
+ #define KVM_ARM_HDBSS_MAX_SIZE      SZ_2M
+ 
+@@ -22,6 +25,17 @@ static inline u32 kvm_hdbss_buffer_size(struct kvm *kvm)
+ 	return kvm->arch.hdbss_buffer_size ?: KVM_ARM_HDBSS_DEFAULT_SIZE;
+ }
+ 
++/*
++ * VM-level HDBSS check, L1 only: kvm->arch.mmu.vtcr does not follow
++ * the vCPU into a nested shadow stage-2 MMU, unlike vcpu_hdbss_enabled().
++ * Use in VM-level control paths that never touch the HDBSS registers
++ * directly.
++ */
++static inline bool kvm_hdbss_enabled(struct kvm *kvm)
++{
++	return kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS;
++}
++
+ /*
+  * Tests hw_mmu->vtcr, the stage-2 MMU in use for the vCPU's current
+  * execution context: when running L1, hw_mmu points to kvm->arch.mmu
+@@ -36,5 +50,7 @@ static inline bool vcpu_hdbss_enabled(struct kvm_vcpu *vcpu)
+ 
+ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
++int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
+ 
+ #endif /* __ARM64_KVM_DIRTY_BIT_H__ */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 483b64e0b832..8e5af2e3958c 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1426,6 +1426,14 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+ 
+ 		trace_kvm_exit(ret, kvm_vcpu_trap_get_class(vcpu), *vcpu_pc(vcpu));
+ 
++		/*
++		 * Drain the HDBSS buffer before the exit is handled, so
++		 * entries pushed to the dirty ring are accounted for by
++		 * dirty_ring_check_request() on the next iteration.
++		 */
++		if (vcpu_hdbss_enabled(vcpu))
++			kvm_flush_hdbss_buffer(vcpu);
++
+ 		/* Exit types that need handling before we can be preempted */
+ 		handle_exit_early(vcpu, ret);
+ 
+@@ -2013,7 +2021,19 @@ long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
+ 
+ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ {
++	unsigned long i;
++	struct kvm_vcpu *vcpu;
+ 
++	if (!kvm_hdbss_enabled(kvm))
++		return;
++
++	/*
++	 * The buffer is drained on every VM exit, so kicking running
++	 * vCPUs is enough to flush them; the dirty-log GET/CLEAR
++	 * protocol tolerates bits set concurrently with the snapshot.
++	 */
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_vcpu_kick(vcpu);
+ }
+ 
+ static int kvm_vm_ioctl_set_device_addr(struct kvm *kvm,
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 52ece46ddd0c..74b8b4113bda 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -13,6 +13,7 @@
+ #include <linux/kconfig.h>
+ #include <linux/log2.h>
+ #include <linux/mm.h>
++#include <linux/srcu.h>
+ 
+ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu)
+ {
+@@ -58,3 +59,81 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ 	vcpu->arch.hdbss.hdbss_pg = NULL;
+ 	vcpu->arch.hdbss.hdbssbr_el2 = 0;
+ }
++
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
++{
++	int idx, curr_idx;
++	u64 prod;
++	u32 entries;
++	u64 *hdbss_buf;
++	struct kvm *kvm = vcpu->kvm;
++	int srcu_idx;
++
++	if (!vcpu_hdbss_enabled(vcpu))
++		return;
++
++	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
++	curr_idx = HDBSSPROD_IDX(prod);
++
++	if (curr_idx == 0 || !vcpu->arch.hdbss.hdbss_pg)
++		return;
++
++	hdbss_buf = page_address(vcpu->arch.hdbss.hdbss_pg);
++	if (!hdbss_buf)
++		return;
++
++	entries = kvm_hdbss_buffer_size(kvm) / sizeof(u64);
++
++	/* kvm_vcpu_mark_page_dirty() resolves the memslot under SRCU. */
++	srcu_idx = srcu_read_lock(&kvm->srcu);
++	for (idx = 0; idx < min_t(u32, curr_idx, entries); idx++) {
++		u64 gpa;
++
++		gpa = hdbss_buf[idx];
++		if (!(gpa & HDBSS_ENTRY_VALID))
++			continue;
++
++		gpa &= HDBSS_ENTRY_IPA;
++		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
++	}
++	srcu_read_unlock(&kvm->srcu, srcu_idx);
++
++	/*
++	 * Reset the index, keeping FSC: a non-zero FSC flags a failed
++	 * HDBSS access and must survive until the fault handler has
++	 * observed it.
++	 */
++	prod &= ~HDBSSPROD_EL2_INDEX_MASK;
++	write_sysreg_s(prod, SYS_HDBSSPROD_EL2);
++	vcpu->arch.hdbss.hdbssprod_el2 = prod;
++	isb();
++}
++
++int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
++{
++	u64 prod;
++	u64 fsc;
++
++	if (WARN_ON_ONCE(!system_supports_hdbss()))
++		return -EFAULT;
++
++	if (WARN_ON_ONCE(!vcpu_hdbss_enabled(vcpu)))
++		return -EFAULT;
++
++	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
++	fsc = FIELD_GET(HDBSSPROD_EL2_FSC_MASK, prod);
++
++	if (fsc == HDBSSPROD_EL2_FSC_OK)
++		/* Buffer full: the exit path drained it before handle_exit. */
++		return 1;
++
++	if (fsc != HDBSSPROD_EL2_FSC_ExternalAbort &&
++	    fsc != HDBSSPROD_EL2_FSC_GPF)
++		WARN_ONCE(1,
++			  "Unexpected HDBSS fault type, FSC: 0x%llx (prod=0x%llx, vcpu=%d)\n",
++			  fsc, prod, vcpu->vcpu_id);
++
++	/* Clear FSC so hardware dirty state updates can resume. */
++	write_sysreg_s(prod & ~HDBSSPROD_EL2_FSC_MASK, SYS_HDBSSPROD_EL2);
++	return -EFAULT;
++}
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index b1a6f743be7b..a9b35adf962f 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -15,6 +15,7 @@
+ #include <asm/pgalloc.h>
+ #include <asm/cacheflush.h>
+ #include <asm/kvm_arm.h>
++#include <asm/kvm_dirty_bit.h>
+ #include <asm/kvm_mmu.h>
+ #include <asm/kvm_pgtable.h>
+ #include <asm/kvm_pkvm.h>
+@@ -2313,6 +2314,9 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+ 
+ 	is_iabt = kvm_vcpu_trap_is_iabt(vcpu);
+ 
++	if (esr_iss2_is_hdbssf(esr))
++		return kvm_handle_hdbss_fault(vcpu);
++
+ 	if (esr_fsc_is_translation_fault(esr)) {
+ 		/* Beyond sanitised PARange (which is the IPA limit) */
+ 		if (fault_ipa >= BIT_ULL(get_kvm_ipa_limit())) {
+-- 
+2.43.0
+

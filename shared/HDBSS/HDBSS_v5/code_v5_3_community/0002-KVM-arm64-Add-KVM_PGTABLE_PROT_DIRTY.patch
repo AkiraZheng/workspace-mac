@@ -1,0 +1,242 @@
+From c5fc4372b2767b48c3920e2c73e208f85dc13787 Mon Sep 17 00:00:00 2001
+From: Leonardo Bras <leo.bras@arm.com>
+Date: Tue, 1 Sep 2026 18:15:53 +0100
+Subject: [PATCH 02/13] KVM: arm64: Add KVM_PGTABLE_PROT_DIRTY
+
+Second step of changing the encoding for the Stage2 PTE descriptor,
+introduce the concept of dirty page, so we can have a writable but not
+dirty (WC) page, and a writable and dirty (WD) page.
+
+In order to do so, evaluate uses in a per-case basis, and figure what
+concept was important in each case (being dirty, or writable).
+
+[zhengtian: split the folio dirty account from the dirty-bitmap account
+in kvm_s2_fault_map() and gmem_abort(). The host folio account
+(SetPageDirty, reclaim/writeback correctness) must be speculative: a
+writable-clean mapping can be hardware-promoted to writable-dirty
+without any VM exit, and the arm64 KVM unmap path does not harvest the
+stage-2 dirty bit, so releasing the folio clean on a read fault would
+leave written guest data invisible to reclaim. Gate the folio release
+on PROT_W while keeping the dirty bitmap on PROT_DIRTY, per the
+contract documented in kvm_release_faultin_page().]
+
+Link: https://lore.kernel.org/all/20260901171558.2674031-3-leo.bras@arm.com/
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h |  9 +++++---
+ arch/arm64/kvm/hyp/pgtable.c         | 23 ++++++++++++++-----
+ arch/arm64/kvm/mmu.c                 | 33 +++++++++++++++++++---------
+ arch/arm64/kvm/ptdump.c              |  6 +++++
+ 4 files changed, 52 insertions(+), 19 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 37baa86d6fd8..379031c74cbc 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -265,6 +265,7 @@ enum kvm_pgtable_stage2_flags {
+  * @KVM_PGTABLE_PROT_X:		Privileged and unprivileged execute permission.
+  * @KVM_PGTABLE_PROT_W:		Write permission.
+  * @KVM_PGTABLE_PROT_R:		Read permission.
++ * @KVM_PGTABLE_PROT_DIRTY:	Dirty attribute.
+  * @KVM_PGTABLE_PROT_DEVICE:	Device attributes.
+  * @KVM_PGTABLE_PROT_NORMAL_NC:	Normal noncacheable attributes.
+  * @KVM_PGTABLE_PROT_SW0:	Software bit 0.
+@@ -279,9 +280,10 @@ enum kvm_pgtable_prot {
+ 						  KVM_PGTABLE_PROT_UX,
+ 	KVM_PGTABLE_PROT_W			= BIT(2),
+ 	KVM_PGTABLE_PROT_R			= BIT(3),
++	KVM_PGTABLE_PROT_DIRTY			= BIT(4),
+ 
+-	KVM_PGTABLE_PROT_DEVICE			= BIT(4),
+-	KVM_PGTABLE_PROT_NORMAL_NC		= BIT(5),
++	KVM_PGTABLE_PROT_DEVICE			= BIT(5),
++	KVM_PGTABLE_PROT_NORMAL_NC		= BIT(6),
+ 
+ 	KVM_PGTABLE_PROT_SW0			= BIT(55),
+ 	KVM_PGTABLE_PROT_SW1			= BIT(56),
+@@ -289,7 +291,8 @@ enum kvm_pgtable_prot {
+ 	KVM_PGTABLE_PROT_SW3			= BIT(58),
+ };
+ 
+-#define KVM_PGTABLE_PROT_RW	(KVM_PGTABLE_PROT_R | KVM_PGTABLE_PROT_W)
++#define KVM_PGTABLE_PROT_RW	(KVM_PGTABLE_PROT_R | KVM_PGTABLE_PROT_W | \
++				 KVM_PGTABLE_PROT_DIRTY)
+ #define KVM_PGTABLE_PROT_RWX	(KVM_PGTABLE_PROT_RW | KVM_PGTABLE_PROT_X)
+ 
+ #define PKVM_HOST_MEM_PROT	KVM_PGTABLE_PROT_RWX
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index ca49f1bd7c34..2ff33d3e371e 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -731,8 +731,12 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 	if (prot & KVM_PGTABLE_PROT_R)
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+ 
+-	if (prot & KVM_PGTABLE_PROT_W)
+-		attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM | KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++	if (prot & KVM_PGTABLE_PROT_W) {
++		attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++
++		if (prot & KVM_PGTABLE_PROT_DIRTY)
++			attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++	}
+ 
+ 
+ 	if (!kvm_lpa2_is_enabled())
+@@ -754,9 +758,13 @@ enum kvm_pgtable_prot kvm_pgtable_stage2_pte_prot(kvm_pte_t pte)
+ 
+ 	if (pte & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R)
+ 		prot |= KVM_PGTABLE_PROT_R;
+-	if (pte & KVM_PTE_LEAF_ATTR_HI_S2_DBM)
++	if (pte & KVM_PTE_LEAF_ATTR_HI_S2_DBM) {
+ 		prot |= KVM_PGTABLE_PROT_W;
+ 
++		if (pte & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W)
++			prot |= KVM_PGTABLE_PROT_DIRTY;
++	}
++
+ 	switch (FIELD_GET(KVM_PTE_LEAF_ATTR_HI_S2_XN, pte)) {
+ 	case 0b00:
+ 		prot |= KVM_PGTABLE_PROT_PX | KVM_PGTABLE_PROT_UX;
+@@ -1289,7 +1297,6 @@ static int stage2_update_leaf_attrs(struct kvm_pgtable *pgt, u64 addr,
+ int kvm_pgtable_stage2_wrprotect(struct kvm_pgtable *pgt, u64 addr, u64 size)
+ {
+ 	return stage2_update_leaf_attrs(pgt, addr, size, 0,
+-					KVM_PTE_LEAF_ATTR_HI_S2_DBM |
+ 					KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
+ 					NULL, NULL,
+ 					KVM_PGTABLE_WALK_IGNORE_EAGAIN);
+@@ -1369,8 +1376,12 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 	if (prot & KVM_PGTABLE_PROT_R)
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+ 
+-	if (prot & KVM_PGTABLE_PROT_W)
+-		set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM | KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++	if (prot & KVM_PGTABLE_PROT_W) {
++		set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++
++		if (prot & KVM_PGTABLE_PROT_DIRTY)
++			set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++	}
+ 
+ 	if (prot & KVM_PGTABLE_PROT_X) {
+ 		ret = stage2_set_xn_attr(prot, &xn);
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 9ba86450fe4a..e01db87daa97 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -1212,7 +1212,9 @@ int kvm_phys_addr_ioremap(struct kvm *kvm, phys_addr_t guest_ipa,
+ 	struct kvm_pgtable *pgt = mmu->pgt;
+ 	enum kvm_pgtable_prot prot = KVM_PGTABLE_PROT_DEVICE |
+ 				     KVM_PGTABLE_PROT_R |
+-				     (writable ? KVM_PGTABLE_PROT_W : 0);
++				     (writable ?
++				      (KVM_PGTABLE_PROT_W | KVM_PGTABLE_PROT_DIRTY) :
++				      0);
+ 
+ 	if (is_protected_kvm_enabled())
+ 		return -EPERM;
+@@ -1578,7 +1580,7 @@ static enum kvm_pgtable_prot adjust_nested_fault_perms(struct kvm_s2_trans *nest
+ 						       enum kvm_pgtable_prot prot)
+ {
+ 	if (!kvm_s2_trans_writable(nested))
+-		prot &= ~KVM_PGTABLE_PROT_W;
++		prot &= ~(KVM_PGTABLE_PROT_W | KVM_PGTABLE_PROT_DIRTY);
+ 	if (!kvm_s2_trans_readable(nested))
+ 		prot &= ~KVM_PGTABLE_PROT_R;
+ 
+@@ -1649,7 +1651,7 @@ static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
+ 	}
+ 
+ 	if (!(s2fd->memslot->flags & KVM_MEM_READONLY))
+-		prot |= KVM_PGTABLE_PROT_W;
++		prot |= KVM_PGTABLE_PROT_W | KVM_PGTABLE_PROT_DIRTY;
+ 
+ 	if (s2fd->nested)
+ 		prot = adjust_nested_fault_perms(s2fd->nested, prot);
+@@ -1681,10 +1683,17 @@ static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
+ 	}
+ 
+ out_unlock:
++	/*
++	 * Two distinct dirty ledgers with different precision requirements:
++	 * the host folio account (SetPageDirty) must be speculative, as a
++	 * writable-clean mapping can be hardware-promoted to writable-dirty
++	 * without any VM exit once VTCR_EL2.HD is set; the dirty bitmap must
++	 * remain exact, or pre-copy will ship clean pages.
++	 */
+ 	kvm_release_faultin_page(kvm, page, !!ret, prot & KVM_PGTABLE_PROT_W);
+ 	kvm_fault_unlock(kvm);
+ 
+-	if ((prot & KVM_PGTABLE_PROT_W) && !ret)
++	if ((prot & KVM_PGTABLE_PROT_DIRTY) && !ret)
+ 		mark_page_dirty_in_slot(kvm, s2fd->memslot, gfn);
+ 
+ 	return ret != -EAGAIN ? ret : 0;
+@@ -1984,11 +1993,14 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
+ 
+ 	*prot = KVM_PGTABLE_PROT_R;
+ 
+-	if (s2vi->map_writable && (s2vi->device ||
+-				   !memslot_is_logging(s2fd->memslot) ||
+-				   kvm_is_write_fault(s2fd->vcpu)))
++	if (s2vi->map_writable) {
+ 		*prot |= KVM_PGTABLE_PROT_W;
+ 
++		if (s2vi->device || !memslot_is_logging(s2fd->memslot) ||
++		    kvm_is_write_fault(s2fd->vcpu))
++			*prot |= KVM_PGTABLE_PROT_DIRTY;
++	}
++
+ 	if (s2fd->nested)
+ 		*prot = adjust_nested_fault_perms(s2fd->nested, *prot);
+ 
+@@ -2019,7 +2031,7 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
+ 			    void *memcache)
+ {
+ 	enum kvm_pgtable_walk_flags flags = KVM_PGTABLE_WALK_SHARED;
+-	bool writable = prot & KVM_PGTABLE_PROT_W;
++	bool dirty = prot & KVM_PGTABLE_PROT_DIRTY;
+ 	struct kvm *kvm = s2fd->vcpu->kvm;
+ 	struct kvm_pgtable *pgt;
+ 	long perm_fault_granule;
+@@ -2082,7 +2094,8 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
+ 	}
+ 
+ out_unlock:
+-	kvm_release_faultin_page(kvm, s2vi->page, !!ret, writable);
++	/* Speculative folio dirtying, see gmem_abort(): use W, not DIRTY. */
++	kvm_release_faultin_page(kvm, s2vi->page, !!ret, prot & KVM_PGTABLE_PROT_W);
+ 	kvm_fault_unlock(kvm);
+ 
+ 	/*
+@@ -2090,7 +2103,7 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
+ 	 * making sure we adjust the canonical IPA if the mapping size has
+ 	 * been updated (via a THP upgrade, for example).
+ 	 */
+-	if (writable && !ret) {
++	if (dirty && !ret) {
+ 		phys_addr_t ipa = gfn_to_gpa(get_canonical_gfn(s2fd, s2vi));
+ 		ipa &= ~(mapping_size - 1);
+ 		mark_page_dirty_in_slot(kvm, s2fd->memslot, gpa_to_gfn(ipa));
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index b0cb8d84a9e9..a1251e252b4f 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -45,6 +45,12 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+ 		.set	= "W",
+ 		.clear	= " ",
+ 	},
++	{
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
++		.val	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
++		.set	= "D",
++		.clear	= "C",
++	},
+ 	{
+ 		.mask	= KVM_PTE_LEAF_ATTR_HI_S2_XN,
+ 		.val	= 0b00UL << __bf_shf(KVM_PTE_LEAF_ATTR_HI_S2_XN),
+-- 
+2.43.0
+

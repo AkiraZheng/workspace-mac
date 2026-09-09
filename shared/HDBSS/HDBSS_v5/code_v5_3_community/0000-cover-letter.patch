@@ -1,0 +1,182 @@
+Subject: [PATCH v5 00/13] KVM: arm64: FEAT_HDBSS-based dirty page tracking
+
+From: Tian Zheng <zhengtian10@huawei.com>
+
+Armv9.5 introduces FEAT_HDBSS, the hardware dirty state tracking
+structure: with VTCR_EL2.{HDBSS,HA,HD} set, the hardware promotes
+writable-clean stage-2 descriptors to writable-dirty without a
+permission fault and records the dirtied IPAs into an in-memory
+per-vCPU buffer. This series uses it for hardware-assisted dirty page
+tracking during live migration: instead of write-protecting guest
+pages and taking a fault on every first write, KVM leaves the pages
+writable-clean and drains the buffer into the dirty bitmap (or dirty
+ring) on every VM exit.
+
+The series builds on Leonardo Bras' three-state stage-2 encoding RFC
+[1], which splits the traditional RW descriptor encoding into
+Non-writable / Writable-clean / Writable-dirty states, with DBM
+carrying writability and S2AP[1] carrying dirtiness. Patches 1-4 pick
+up that series (with adaptations noted below), patch 5 closes the host
+folio accounting gap that hardware dirty management opens, patches
+6-10 add the HDBSS buffer plumbing, and patch 11 replaces the RFC's
+HAFDBS enablement and our earlier HDBSS enable/disable hooks with a
+single derived hardware dirty mode.
+
+Adaptations to the picked-up patches:
+
+  - Patch 1 keeps reading writability from S2AP[1] alone in
+    walk_nested_s2_pgd(): KVM hides HAFDBS.DBM from L1 (its visible
+    ID_AA64MMFR1_EL1.HAFDBS is limited to AF-only), so bit 51 is RES0
+    from L1's perspective and could be misread as writability. The
+    union reading can return once nested HAFDBS emulation exists.
+
+  - Patch 2 additionally gates the host folio account on PROT_W while
+    the dirty bitmap keeps the PROT_DIRTY gate, following the sashiko
+    review of the RFC [2]: a writable-clean mapping can be
+    hardware-promoted to writable-dirty without any VM exit, so the
+    folio must be marked speculatively at fault-in time or reclaim can
+    discard written guest data.
+
+  - Patch 11 is a rework of "Enable HAFDBS for guests not on
+    migration" [3]: the RFC's kvm_set_hafdbs() and our earlier
+    HDBSS enable/disable hooks both flip VTCR_EL2 bits from
+    kvm_arch_commit_memory_region() in opposite directions. The rework
+    merges them into kvm_arch_update_hw_dirty_mode(), a pure function
+    of the static capabilities and the number of logging memslots, and
+    additionally pairs HD with HA, flushes the VMID after each mode
+    switch, and derives writable-clean decisions from the live HD
+    state instead of the static capability.
+
+The FEAT_HDBSS buffer registers (HDBSSBR_EL2, HDBSSPROD_EL2) are
+EL2-only and programmed from host context, so the feature is
+restricted to VHE systems. Nested guests are excluded: shadow stage-2
+MMUs do not carry the HDBSS bits, and L2 tracking stays on the classic
+fault path.
+
+Patch 12 adds a VM ioctl to configure the buffer size in dirty-bitmap
+mode, and patch 13 documents it. In dirty-ring mode the buffer size is
+pinned to PAGE_SIZE: the ring reserves room for a full buffer flush,
+so a larger buffer would only shrink the soft limit and force more
+frequent userspace drains.
+
+The series is also the vehicle for hardware dirty tracking on systems
+without FEAT_HDBSS: the derived mode falls back to the classic
+write-protect fault mechanism there, while still using HAFDBS outside
+of migration so that only pages actually written to are dirty when the
+next migration starts.
+
+ [1] https://lore.kernel.org/all/20260901171558.2674031-1-leo.bras@arm.com/
+ [2] https://lore.kernel.org/all/20260901171558.2674031-3-leo.bras@arm.com/
+ [3] https://lore.kernel.org/all/20260901171558.2674031-6-leo.bras@arm.com/
+
+Eillon (2):
+  KVM: arm64: Add HDBSS per-vCPU buffer management
+  KVM: arm64: Add HDBSS fault handling and buffer flush
+
+Leonardo Bras (4):
+  KVM: arm64: pgtables: Change write bit from S2AP_W to DBM
+  KVM: arm64: Add KVM_PGTABLE_PROT_DIRTY
+  KVM: arm64: Introduce a dedicated walker for stage2 write-protect
+  KVM: arm64: Add KVM_REQ_RELOAD_STAGE2
+
+Tian Zheng (7):
+  KVM: arm64: Harvest stage-2 dirty state into the host folio account
+  KVM: arm64: Add support for FEAT_HDBSS
+  KVM: Add kvm_arch_dirty_ring_size_updated() hook
+  KVM: arm64: Reserve dirty ring space for the HDBSS buffer
+  KVM: arm64: Derive the VM hardware dirty mode from dirty logging
+  KVM: arm64: Add HDBSS buffer size ioctl for dirty-bitmap mode
+  KVM: arm64: Document HDBSS buffer size ioctl
+
+base-commit: a500db7819c5
+---
+v4 -> v5:
+ - Rebase onto Leonardo Bras' three-state stage-2 encoding RFC [1]
+   (patches 1-4 picked up with adaptations, replacing our two-state
+   DBM enablement); drop our KVM_REQ_HDBSS_RELOAD_VTCR in favour of
+   the RFC's KVM_REQ_RELOAD_STAGE2.
+ - Replace the standalone HAFDBS enablement and our HDBSS
+   enable/disable hooks with a single derived hardware dirty mode
+   (patch 11): fixes the opposite-direction VTCR_EL2 writes, the
+   vcpu-setup race (HD as a pure derived value), sets HA alongside
+   HD, flushes the VMID on mode switches, and derives writable-clean
+   decisions from the live HD state (VGA-style always-logged slots no
+   longer degrade to a fault per page on non-logged slots).
+ - Split the host folio account from the dirty-bitmap account
+   (patch 2) and harvest the stage-2 dirty bit on unmap and
+   write-protect (patch 5), closing a silent data loss on reclaim
+   found by the sashiko review of the encoding RFC.
+ - Keep reading L1 writability from S2AP[1] only in
+   walk_nested_s2_pgd() (patch 1): bit 51 is RES0 from L1's
+   perspective until nested HAFDBS emulation exists.
+
+v3 -> v4:
+ - Fix HDBSS buffer size vs buddy order encoding mismatch on 16KB/
+   64KB pages, which over-released on free.
+ - Drain the HDBSS buffer before the exit reason is handled in
+   kvm_arch_vcpu_ioctl_run(), closing the dirty-ring feedback loop.
+ - Fix kvm_share_hyp() error path leaking the hyp mapping, and free
+   the HDBSS buffer in the vCPU destroy path.
+ - Drop the forced eager-page-splitting default; write-protect now
+   strips DBM from block entries so the first write faults and
+   triggers the split in both lazy and eager modes.
+
+v2 -> v3:
+ - Move to the dirty-bitmap-first design with the dirty ring reserve
+   wired through kvm_cpu_dirty_log_size().
+ - Pin the buffer size to PAGE_SIZE in dirty-ring mode via the new
+   kvm_arch_dirty_ring_size_updated() hook.
+
+v1 -> v2:
+ - Restrict the capability to VHE systems (buffer registers are
+   EL2-only and programmed from host context).
+ - Keep buffers allocated for the vCPU lifetime, decoupled from the
+   enable/disable lifecycle (PML-style), fixing the UAF found by
+   sashiko in v1.
+
+ arch/arm64/include/asm/cpufeature.h    |   5 +
+ arch/arm64/include/asm/esr.h           |   5 +
+ arch/arm64/include/asm/kvm_dirty_bit.h |  52 +++++
+ arch/arm64/include/asm/kvm_host.h      |  15 +
+ arch/arm64/include/asm/kvm_mmu.h       |  23 +
+ arch/arm64/include/asm/kvm_nested.h    |   9 +-
+ arch/arm64/include/asm/kvm_pgtable.h   |  21 +-
+ arch/arm64/include/asm/sysreg.h        |   9 +
+ arch/arm64/kvm/Makefile                |   1 +
+ arch/arm64/kvm/arm.c                   |  92 ++++++-
+ arch/arm64/kvm/config.c                |   2 +
+ arch/arm64/kvm/dirty_bit.c             | 197 +++++++++++++
+ arch/arm64/kvm/hyp/pgtable.c           |  83 ++++--
+ arch/arm64/kvm/hyp/vhe/switch.c        |  17 +
+ arch/arm64/kvm/mmu.c                   | 104 ++++++-
+ arch/arm64/kvm/nested.c                |    5 +-
+ arch/arm64/kvm/ptdump.c                |    6 +
+ arch/arm64/kvm/reset.c                 |   3 +
+ arch/arm64/kernel/cpufeature.c         |  17 +
+ arch/arm64/tools/cpucaps               |   1 +
+ Documentation/virt/kvm/api.rst         |  30 ++++++
+ arch/arm64/include/asm/cpufeature.h    |   5 +
+ arch/arm64/include/asm/esr.h           |   5 +
+ arch/arm64/include/asm/kvm_dirty_bit.h |  57 +++++++++++
+ arch/arm64/include/asm/kvm_host.h      |  15 +++
+ arch/arm64/include/asm/kvm_mmu.h       |  31 ++++++
+ arch/arm64/include/asm/kvm_nested.h    |   9 +-
+ arch/arm64/include/asm/kvm_pgtable.h   |  22 ++++-
+ arch/arm64/include/asm/sysreg.h        |   9 ++
+ arch/arm64/kernel/cpufeature.c         |  17 ++++
+ arch/arm64/kvm/Makefile                |   1 +
+ arch/arm64/kvm/arm.c                   | 106 ++++++++++++++++++++-
+ arch/arm64/kvm/dirty_bit.c             | 167 +++++++++++++++++++++++++++++++++
+ arch/arm64/kvm/hyp/pgtable.c           |  79 +++++++++++++---
+ arch/arm64/kvm/hyp/vhe/switch.c        |  17 ++++
+ arch/arm64/kvm/mmu.c                   | 154 ++++++++++++++++++++++++++++--
+ arch/arm64/kvm/ptdump.c                |  10 +-
+ arch/arm64/kvm/reset.c                 |   3 +
+ arch/arm64/tools/cpucaps               |   1 +
+ include/linux/kvm_dirty_ring.h         |   1 +
+ include/uapi/linux/kvm.h               |   1 +
+ virt/kvm/dirty_ring.c                  |   4 +
+ virt/kvm/kvm_main.c                    |   1 +
+ 23 files changed, 715 insertions(+), 30 deletions(-)
+--
+2.43.0

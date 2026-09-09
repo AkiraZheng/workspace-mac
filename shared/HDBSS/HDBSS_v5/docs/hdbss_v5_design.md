@@ -65,7 +65,7 @@ Spec Table D8-93 (D8-7778)：
 
 每个 entry 8 字节。Buffer 大小由 `HDBSSBR_EL2.SZ` 编码（`ilog2(size_bytes) - 12`）。
 
-#### 为什么 IPA 只需要 [55:12] 共 44 位
+#### IPA 只需要 [55:12] 共 44 位
 
 HDBSS 硬件记录的是 **PTE 级别的 dirty state 变化**（C→D 转换）。一个 PTE 覆盖整页（4KB）或整 block（2MB/1GB）。硬件记录的 IPA 是该 PTE 对应的页/block 的起始地址，**页内偏移（低 12 位）必然为 0**，不需要存储。
 
