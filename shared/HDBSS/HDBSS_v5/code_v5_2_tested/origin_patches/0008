@@ -1,0 +1,158 @@
+From zhengtian10@huawei.com Thu Sep  4 13:53:38 2026
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Thu, 04 Sep 2026 13:53:38 +0800
+Subject: [PATCH v5 7/8] KVM: arm64: Support HDBSS with dirty ring mode
+Message-ID: <20260904055338.1208603-8-zhengtian10@huawei.com>
+To: virt@openeuler.org
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+Enable HDBSS to coexist with dirty ring mode, following the x86 PML
+design pattern.  HDBSS buffer entries are flushed into the dirty ring
+via kvm_vcpu_mark_page_dirty(), and the dirty ring reservation
+mechanism guarantees sufficient ring space.
+
+Add a generic kvm_arch_dirty_ring_size_updated() hook, called after
+kvm->dirty_ring_size is set, which arm64 overrides to auto-configure
+the HDBSS buffer size.  In dirty-ring mode the buffer is fixed at
+PAGE_SIZE (512 entries on 4KB pages), matching x86 PML.  A larger
+buffer would increase the reserved entries, reduce the dirty ring
+soft_limit and cause more frequent userspace drains, so the userspace
+cannot override it via KVM_CAP_ARM_HDBSS_BUFFER_SIZE.
+
+kvm_cpu_dirty_log_size() reports the HDBSS buffer entry count so the
+dirty ring framework computes correct rsvd/soft_limit values, and the
+dirty-ring rejection in the auto-enable path is removed so HDBSS is
+enabled whenever dirty logging starts, in either mode.
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/arm.c           | 22 ++++++++++++++++++++++
+ arch/arm64/kvm/dirty_bit.c     |  3 ---
+ arch/arm64/kvm/mmu.c           |  8 ++++++++
+ include/linux/kvm_dirty_ring.h |  1 +
+ virt/kvm/dirty_ring.c          |  4 ++++
+ virt/kvm/kvm_main.c            |  1 +
+ 6 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index a89d094efd12..75384b735e1d 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -241,6 +241,28 @@ static int kvm_arm_default_max_vcpus(void)
+ 	return vgic_present ? kvm_vgic_get_max_vcpus() : KVM_MAX_VCPUS;
+ }
+
++/*
++ * Called after kvm->dirty_ring_size is set, allowing arch to configure
++ * the HDBSS buffer size.  In dirty-ring mode, the buffer size is
++ * auto-configured by the kernel to PAGE_SIZE (minimum).  The user
++ * cannot override it via KVM_CAP_ARM_HDBSS_BUFFER_SIZE.
++ *
++ * A larger buffer increases rsvd, which reduces the dirty ring's
++ * soft_limit and causes more frequent userspace drains, degrading
++ * performance.  PAGE_SIZE gives the largest drain interval and the
++ * lowest drain frequency.
++ */
++void kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
++{
++	if (!system_supports_hdbss())
++		return;
++
++	if (kvm->arch.hdbss_buffer_size)
++		return;
++
++	kvm->arch.hdbss_buffer_size = KVM_ARM_HDBSS_DEFAULT_SIZE;
++}
++
+ /**
+  * kvm_arch_init_vm - initializes a VM data structure
+  * @kvm:	pointer to the KVM struct
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 120e0d52abfd..d909cc745358 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -135,9 +135,6 @@ void kvm_arm_enable_hdbss_global(struct kvm *kvm)
+ 	if (!system_supports_hdbss())
+ 		return;
+
+-	if (kvm->dirty_ring_size) /* Don't support HDBSS in dirty ring mode */
+-		return;
+-
+ 	if (kvm_hdbss_enabled(kvm)) /* Already On */
+ 		return;
+
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index b00546bb0fb8..de1a919d6f52 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2800,3 +2800,11 @@ void kvm_toggle_cache(struct kvm_vcpu *vcpu, bool was_enabled)
+
+ 	trace_kvm_toggle_cache(*vcpu_pc(vcpu), was_enabled, now_enabled);
+ }
++
++int kvm_cpu_dirty_log_size(struct kvm *kvm)
++{
++	if (!system_supports_hdbss())
++		return 0;
++
++	return kvm_hdbss_buffer_size(kvm) / sizeof(u64);
++}
+diff --git a/include/linux/kvm_dirty_ring.h b/include/linux/kvm_dirty_ring.h
+index eb10d87adf7d..c2b922791530 100644
+--- a/include/linux/kvm_dirty_ring.h
++++ b/include/linux/kvm_dirty_ring.h
+@@ -73,6 +73,7 @@ static inline void kvm_dirty_ring_free(struct kvm_dirty_ring *ring)
+ #else /* CONFIG_HAVE_KVM_DIRTY_RING */
+
+ int kvm_cpu_dirty_log_size(struct kvm *kvm);
++void kvm_arch_dirty_ring_size_updated(struct kvm *kvm);
+ bool kvm_use_dirty_bitmap(struct kvm *kvm);
+ bool kvm_arch_allow_write_without_running_vcpu(struct kvm *kvm);
+ u32 kvm_dirty_ring_get_rsvd_entries(struct kvm *kvm);
+diff --git a/virt/kvm/dirty_ring.c b/virt/kvm/dirty_ring.c
+index 572b854edf74..784f53c95b54 100644
+--- a/virt/kvm/dirty_ring.c
++++ b/virt/kvm/dirty_ring.c
+@@ -16,6 +16,10 @@ int __weak kvm_cpu_dirty_log_size(struct kvm *kvm)
+ 	return 0;
+ }
+
++void __weak kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
++{
++}
++
+ u32 kvm_dirty_ring_get_rsvd_entries(struct kvm *kvm)
+ {
+ 	return KVM_DIRTY_RING_RSVD_ENTRIES + kvm_cpu_dirty_log_size(kvm);
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 45e784462ec6..e3273be17277 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -4969,6 +4969,7 @@ static int kvm_vm_ioctl_enable_dirty_log_ring(struct kvm *kvm, u32 size)
+ 		r = -EINVAL;
+ 	} else {
+ 		kvm->dirty_ring_size = size;
++		kvm_arch_dirty_ring_size_updated(kvm);
+ 		r = 0;
+ 	}
+
+--
+2.33.0
+
+    
+
+    
+
+    
+
+      
+
+        
+
+          
+                
+          
+          <a href="/archives/list/virt@openeuler.org/message/3BPZXYNIGFIH6OEEEU6AJDN347KJCBRC/"
+             title="
+

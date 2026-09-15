@@ -1,0 +1,82 @@
+From zhengtian10@huawei.com Thu Sep  4 13:53:38 2026
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Thu, 04 Sep 2026 13:53:38 +0800
+Subject: [PATCH v5 8/8] KVM: arm64: Document HDBSS buffer size ioctl
+Message-ID: <20260904055338.1208603-9-zhengtian10@huawei.com>
+To: virt@openeuler.org
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+Document the KVM_CAP_ARM_HDBSS_BUFFER_SIZE capability, which provides a
+mechanism for userspace to configure the per-vCPU Hardware Dirty State
+Tracking Structure (HDBSS) buffer size used for hardware-assisted dirty
+page tracking during live migration.
+
+The capability applies to dirty-bitmap mode; it is mutually exclusive with
+the dirty ring (KVM_CAP_DIRTY_LOG_RING), in which the buffer size is
+auto-configured to the default and cannot be overridden.
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ Documentation/virt/kvm/api.rst | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/Documentation/virt/kvm/api.rst b/Documentation/virt/kvm/api.rst
+index 3660d7478fb9..07d561089180 100644
+--- a/Documentation/virt/kvm/api.rst
++++ b/Documentation/virt/kvm/api.rst
+@@ -9032,6 +9032,35 @@ enabled, cmma can't be enabled anymore and pfmfi and the storage key
+ interpretation are disabled. If cmma has already been enabled or the
+ hpage_2g module parameter is not set to 1, -EINVAL is returned.
+
++7.48 KVM_CAP_ARM_HDBSS_BUFFER_SIZE
++-----------------------------------
++
++:Architectures: arm64
++:Target: VM
++:Parameters: args[0] is the per-vCPU HDBSS buffer size in bytes
++:Returns: 0 on success; -EINVAL if the size is invalid or vCPUs have already
++          been created; -EBUSY if the buffer size was already configured.
++
++This capability configures the Hardware Dirty State Tracking Structure
++(HDBSS) buffer size used for hardware-assisted dirty page tracking during
++live migration.
++
++When live migration is initiated, userspace can configure the per-vCPU HDBSS
++buffer size through this capability; KVM will allocate per-vCPU HDBSS buffers
++of the requested size.
++
++The size must be a power of two between the default (``PAGE_SIZE``) and the
++maximum (2MB).  This capability applies to dirty-bitmap mode and is mutually
++exclusive with the dirty ring (``KVM_CAP_DIRTY_LOG_RING``); in dirty-ring mode
++the buffer size is auto-configured to the default and cannot be overridden.
++
++This capability may only be set before any vCPUs are created.  Setting the
++size a second time is rejected with -EBUSY.
++
++KVM_CHECK_EXTENSION for this capability returns the maximum supported buffer
++size when queried without a VM, or the currently configured per-VM buffer size
++(defaulting to ``PAGE_SIZE``) when queried with a VM.
++
+ 8. Other capabilities.
+ ======================
+
+--
+2.33.0
+
+    
+
+    
+
+    
+
+      
+
+        
+
+          
+                
+          
+          <a href="/archives/list/virt@openeuler.org/message/NMNS3ZUTXEAN6Z56CDFWMV2RAPG7BBQO/"
+             title="
+

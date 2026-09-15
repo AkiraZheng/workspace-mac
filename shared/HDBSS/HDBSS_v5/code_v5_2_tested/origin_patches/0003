@@ -1,0 +1,146 @@
+From zhengtian10@huawei.com Thu Sep  4 13:53:38 2026
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Thu, 04 Sep 2026 13:53:38 +0800
+Subject: [PATCH v5 2/8] KVM: arm64: Add auto DBM support for hardware dirty tracking
+Message-ID: <20260904055338.1208603-3-zhengtian10@huawei.com>
+To: virt@openeuler.org
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+The DBM (Dirty Bit Modifier) attribute, introduced in ARMv8.1, enables
+hardware to automatically promote write-clean pages to write-dirty. This
+prevents the guest from being trapped in EL2 due to missing write
+permissions.
+
+Implement a three-state dirty tracking model for stage-2 page tables
+where DBM is unconditionally set on all writable pages:
+
+  State       DBM  S2AP[1]  Meaning
+  ----------  ----  -------  ------------------------------------
+  NW           0      0      Non-writable, write -> permission fault
+  WC           1      0      Writable-clean, write -> hw sets WD
+  WD           1      1      Writable-dirty, no fault
+
+When VTCR_EL2.HD=1 (HDBSS active), hardware manages the WC->WD
+transition automatically. When HD=0, DBM has no hardware effect and
+dirty tracking falls back to software.
+
+stage2_set_prot_attr() and kvm_pgtable_stage2_relax_perms() set DBM
+unconditionally on writable pages. Pages not participating in dirty
+logging are naturally filtered during buffer processing by
+mark_page_dirty_in_slot().
+
+For dirty logging write-protect, stage2_attr_walker() strips DBM from
+block entries (level < KVM_PGTABLE_LAST_LEVEL), forcing them into state
+NW. This is necessary because lazy splitting depends on permission
+faults to break down blocks to level-3: with DBM=1 on a block, a guest
+write transitions it from WC to WD (via hardware WC->WD transition)
+without faulting, so the block is never split and per-page dirty
+tracking is lost. Level-3 pages keep DBM, staying in state WC so the
+first guest write after write-protect marks them dirty automatically
+(WC->WD).
+
+Co-developed-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h |  2 ++
+ arch/arm64/kvm/hyp/pgtable.c         | 36 ++++++++++++++++++++++++++--
+ 2 files changed, 36 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 41a8687938eb..6d751f23b23a 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -93,6 +93,8 @@ typedef u64 kvm_pte_t;
+
+ #define KVM_PTE_LEAF_ATTR_HI_S2_XN	GENMASK(54, 53)
+
++#define KVM_PTE_LEAF_ATTR_HI_S2_DBM	BIT(51)
++
+ #define KVM_PTE_LEAF_ATTR_HI_S1_GP	BIT(50)
+
+ #define KVM_PTE_LEAF_ATTR_S2_PERMS	(KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R | \
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index b74dd5ce1efd..d55010430fd5 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -731,9 +731,24 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 	if (prot & KVM_PGTABLE_PROT_R)
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+
+-	if (prot & KVM_PGTABLE_PROT_W)
++	if (prot & KVM_PGTABLE_PROT_W) {
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+
++		/*
++		 * Set DBM bit unconditionally for all writable pages as
++		 * part of the three-state dirty tracking model. When
++		 * VTCR_EL2.HD=1 (HDBSS enabled), hardware manages the
++		 * WC->WD transition automatically. When HD=0, DBM has no
++		 * hardware effect and dirty state is managed by software.
++		 *
++		 * Pages that do not participate in dirty logging are
++		 * naturally filtered during buffer processing by
++		 * mark_page_dirty_in_slot() which only marks pages covered
++		 * by an active dirty-logging memslot.
++		 */
++		attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++	}
++
+ 	if (!kvm_lpa2_is_enabled())
+ 		attr |= FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S2_SH, sh);
+
+@@ -1234,6 +1249,21 @@ static int stage2_attr_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 	pte &= ~data->attr_clr;
+ 	pte |= data->attr_set;
+
++	/*
++	 * Strip DBM from block entries (level < LAST_LEVEL) during
++	 * write-protect. With DBM=1, a writable block entry is in state
++	 * WC and a guest write directly transitions it to WD (WC->WD)
++	 * without generating a permission fault. Since lazy splitting
++	 * relies on permission faults to break down blocks into level-3
++	 * pages, leaving DBM on blocks would prevent them from ever
++	 * being split, making per-page dirty tracking impossible.
++	 * Level-3 pages keep DBM to stay in state WC, so the first guest
++	 * write after write-protect marks the page dirty automatically
++	 * (WC->WD).
++	 */
++	if (ctx->level < KVM_PGTABLE_LAST_LEVEL)
++		pte &= ~KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++
+ 	/*
+ 	 * We may race with the CPU trying to set the access flag here,
+ 	 * but worst-case the access flag update gets lost and will be
+@@ -1367,8 +1397,10 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 	if (prot & KVM_PGTABLE_PROT_R)
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+
+-	if (prot & KVM_PGTABLE_PROT_W)
++	if (prot & KVM_PGTABLE_PROT_W) {
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++		set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++	}
+
+ 	if (prot & KVM_PGTABLE_PROT_X) {
+ 		ret = stage2_set_xn_attr(prot, &xn);
+--
+2.33.0
+
+    
+
+    
+
+    
+
+      
+
+        
+
+          
+                
+          
+          <a href="/archives/list/virt@openeuler.org/message/LWRGNXGG2I2WJBUYHKOJ7T5SCWNJP4MI/"
+             title="
+

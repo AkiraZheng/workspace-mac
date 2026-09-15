@@ -1,0 +1,126 @@
+From f497b018c022eb9b811d3d4e58fe3958c6c54aae Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Fri, 4 Sep 2026 13:53:38 +0800
+Subject: [PATCH v5 08/10] KVM: arm64: Add auto HDBSS enable/disable on dirty
+ logging change
+To: virt@openeuler.org
+
+Tie HDBSS activation to dirty logging: enable it when the first
+memslot starts logging and disable it when the last one stops.
+Dirty logging is all userspace ever toggles for live migration,
+so no dedicated HDBSS enable/disable API is needed - hardware
+dirty tracking follows the memslot flags. The buffers themselves
+are decoupled from this lifecycle and stay allocated for the
+whole vCPU lifetime.
+
+Enabling and disabling only flips the VTCR_EL2.HDBSS, HD and HA
+bits in kvm->arch.mmu.vtcr, followed by
+kvm_make_all_cpus_request(KVM_REQ_RELOAD_STAGE2): the request
+handler reloads VTCR_EL2 before the next guest entry, so once the
+call returns no vCPU can enter the guest with stale bits, and the
+hardware state cannot disagree with the software state. The exit
+taken to process the request also drains the HDBSS buffer on the
+way out.
+
+kvm_arch_destroy_vm() also disables HDBSS, as userspace may
+destroy the VM without ever stopping dirty logging.
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h |  4 ++++
+ arch/arm64/kvm/arm.c                   |  9 ++++++++
+ arch/arm64/kvm/dirty_bit.c             | 32 ++++++++++++++++++++++++++
+ arch/arm64/kvm/mmu.c                   |  3 +++
+ 4 files changed, 48 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index 7319bae2d14e..b22304dd0be3 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -52,5 +52,9 @@ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
++void kvm_arm_enable_hdbss_global(struct kvm *kvm);
++void kvm_arm_disable_hdbss_global(struct kvm *kvm);
++void kvm_arm_hdbss_on_dirty_logging_change(struct kvm *kvm,
++					   int nr_memslots_logging);
+ 
+ #endif /* __ARM64_KVM_DIRTY_BIT_H__ */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index facc53991998..6cd37b169d27 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -343,6 +343,15 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
+ 	if (is_protected_kvm_enabled())
+ 		pkvm_destroy_hyp_vm(kvm);
+ 
++	/*
++	 * Userspace may destroy the VM without disabling dirty
++	 * logging, so the auto-disable path is never reached. Force
++	 * disable HDBSS before the stage-2 MMU and the vCPU buffers
++	 * go away.
++	 */
++	if (kvm_hdbss_enabled(kvm))
++		kvm_arm_disable_hdbss_global(kvm);
++
+ 	kvm_uninit_stage2_mmu(kvm);
+ 	kvm_destroy_mpidr_data(kvm);
+ 
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 74b8b4113bda..2d0df30e8ac7 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -137,3 +137,35 @@ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 	write_sysreg_s(prod & ~HDBSSPROD_EL2_FSC_MASK, SYS_HDBSSPROD_EL2);
+ 	return -EFAULT;
+ }
++
++void kvm_arm_enable_hdbss_global(struct kvm *kvm)
++{
++	if (!system_supports_hdbss())
++		return;
++
++	if (kvm_hdbss_enabled(kvm)) /* Already On */
++		return;
++
++	kvm->arch.mmu.vtcr |= VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA;
++
++	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
++}
++
++void kvm_arm_disable_hdbss_global(struct kvm *kvm)
++{
++	if (!kvm_hdbss_enabled(kvm)) /* Already Off */
++		return;
++
++	kvm->arch.mmu.vtcr &= ~(VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA);
++
++	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
++}
++
++void kvm_arm_hdbss_on_dirty_logging_change(struct kvm *kvm,
++					   int nr_memslots_logging)
++{
++	if (nr_memslots_logging > 0 && !kvm_hdbss_enabled(kvm))
++		kvm_arm_enable_hdbss_global(kvm);
++	else if (nr_memslots_logging == 0 && kvm_hdbss_enabled(kvm))
++		kvm_arm_disable_hdbss_global(kvm);
++}
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index a5860c766a85..4c7018d3d3f0 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2583,6 +2583,9 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ {
+ 	bool log_dirty_pages = new && new->flags & KVM_MEM_LOG_DIRTY_PAGES;
+ 
++	kvm_arm_hdbss_on_dirty_logging_change(kvm,
++		atomic_read(&kvm->nr_memslots_dirty_logging));
++
+ 	/*
+ 	 * At this point memslot has been committed and there is an
+ 	 * allocated dirty_bitmap[], dirty pages will be tracked while the
+-- 
+2.43.0
+
