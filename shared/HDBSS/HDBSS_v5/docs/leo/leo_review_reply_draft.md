@@ -6,22 +6,25 @@
 > 正文"与 sashiko 的关系"小节），sashiko 原文和 Leo 的英文回应保留原样并附中文翻译。
 > **修复状态**：`[已修 xxx]` = code_v5_3_leo 分支已带该修复（commit 号可查）；
 > `[待问]` = 需 Leo 澄清；`[讨论]` = 设计向，看 Leo 意愿。
+> **maintainer 对账（2026-09-16 新增）**：Marc（9/12–13）与 Oliver（9/15）的 review 已并入
+> 考量——N5 被 maintainer 定性闭环（不再发）、N6 升级为合并行动项、N3 暂停；仍值得发回
+> Leo 的问题清单见 §0.5，英文精简稿（maintainer 风格）见附录 A。
 
 ## 0. 总览表
 
 | # | 问题 | 来源 | Leo 回应 | 处置 |
 |---|---|---|---|---|
 | 1 | folio 两种脏账（fault 路径标脏被改成 DIRTY 门控） | **sashiko Critical ×5 连问** | 认了最后一条（good catch），前四条答偏/误报 | [已修 F2 + harvest] |
-| 2 | HD 不带 HA（疑似规格违规） | 自查（sashiko 未报） | **无回应** | [已修 F1] |
+| 2 | HD 不带 HA（架构性失效——spec 已定案） | 自查（sashiko 未报） | **无回应** | [已修 F1] |
 | 3 | 翻 HD 无 TLBI | **sashiko High** | 半辩护（只答了开 logging 方向） | [已修 F3] |
 | 4 | compute_prot 静态能力判断（VGA 悬崖） | **sashiko High** | 认了 tradeoff 但低估普遍性 | [已修 F4] |
 | 5 | vtcr 无锁 RMW 竞态 | **sashiko Critical** | 认了方向（加 slots_lock），未验证死锁 | [已修 R1 推导式状态机] |
 | N1 | wrprotect walker 并发原语降级（cmpxchg→裸写） | 自查 | 无（sashiko 也没报） | [待问] |
 | N2 | WRITE_ONCE 与硬件原子更新竞态——静默化假设零注释 | 自查 | 无 | [待问] |
-| N3 | vcpu_has_nv 从 per-vcpu 改 per-KVM 粒度 | 自查 | 无 | [待问] |
-| N4 | HAFDBS always-on 还是 opt-in | 自查（设计） | 无 | [讨论] |
-| N5 | 嵌套联合判断短期处置（bit51 安全洞） | **sashiko High 的后续** | 声明依赖 Oliver 模拟系列，未改代码 | [待问] |
-| N6 | v2 边界：我们的 fixup 他收不收 | 自查（协作） | 间接（patch 4 线程说过 "rebase as much as you want"） | [待问] |
+| N3 | vcpu_has_nv 从 per-vcpu 改 per-KVM 粒度 | 自查 | 无 | [暂停——Oliver 已批 gate 本身，见 §0.5] |
+| N4 | HAFDBS always-on 还是 opt-in | 自查（设计） | 无 | [讨论——合并后归我们设计，不发 Leo] |
+| N5 | 嵌套联合判断短期处置（bit51 安全洞） | **sashiko High 的后续** | 声明依赖 Oliver 模拟系列，未改代码 | [闭环——Marc/Oliver 已定性，不再发] |
+| N6 | v2 边界：我们的 fixup 他收不收 | 自查（协作） | 间接（patch 4 线程说过 "rebase as much as you want"） | [升级为行动项——回 Oliver 邮件中提出 merge 进 HDBSS v5] |
 | N7 | RELOAD-before-wp 顺序依赖文档化 | 自查（**支撑 sashiko TLBI 条的开向论证**） | 无 | [待问] |
 | N8 | 非迁移 HAFDBS 性能数据 | **sashiko High（性能条）的后续** | 承认没数据（"really just want feedback"） | [讨论] |
 | N9 | SMMU 共享 S2 前瞻：WC 页对无 HTTU SMMU 是 RO | 自查 | 无 | [讨论] |
@@ -34,6 +37,50 @@
 | patch2 Q1：编码器 WC = "DBM bypass" | "That's the desired effect" | **误报**，WC 是设计本意 |
 | patch2 Q2/Q3/Q4：gmem/compute_prot/dirty 变量三连问 | "disable HAFDBS or enable HDBSS" / "That's the desired behavior" / "read fault does not dirty a folio" | **答偏**——混淆两种账（详见第一部分 §1），是 #1 的铺垫而非独立问题 |
 | patch5 [Low]：KVM_MR_DELETE 死代码 | "we should be safe" | pre-existing，无害，顺手清理即可 |
+
+## 0.5 与 maintainer 意见对账（2026-09-16）
+
+Marc（9/12–13）与 Oliver（9/15）的 review 落地后，本清单按"是否仍值得发回 Leo"重新定稿：
+
+### 已被 maintainer 覆盖，不再单独发
+
+- **N5（nested bit51 联合判断）**：Marc 原话 "Absolutely NOT... you are now actively
+  corrupting memory by turning a RO mapping with a spurious DBM bit set into a
+  writable mapping. VTCR_EL2.HD exists for a reason."；Oliver 补了机理：
+  guest hypervisor 设 VTCR_EL2.HD=0 时 bit51 必须按 RES0 处理，软件 walker
+  无视 HD 值消费 DBM 正是这个 bug。**已定性为必须修复，我们无需再发**。
+- **N6（fixup 边界）**：Oliver 明确 "Can you please work with Tian to get a
+  combined series out for this?"——问题从"你收不收我们的 fixup"变为
+  **行动项：把 Leo 系列合并进 HDBSS 树、随 HDBSS v5 一起发**，在回 Oliver 的
+  邮件中向 Leo 提出（见附录 A 邮件一）。
+- **N3（vcpu_has_nv 粒度）**：Oliver 已点名两处——`kvm_vcpu_has_nv(kvm)` 命名
+  不当；更根本的是 "KVM can make use of HAFDBS in the canonical stage-2 MMU
+  independent of the guest hypervisor"，即 **NV gate 本身不该存在**。若 v2 按
+  此删除 gate，粒度问题随之消失。暂停，等 v2 形态。
+- **N4（always-on vs opt-in）**：合并后 HAFDBS 成为 HDBSS 的前置，开关设计由
+  我们的 R1 状态机承担（HDBSS enable/disable 事件驱动），不再是问 Leo 的
+  问题。
+
+### 仍值得发回 Leo（maintainer 均未触碰）
+
+| 条目 | 优先级 | 备注 |
+|---|---|---|
+| #1 folio 两本账拆分 + 收割端 | **最高** | sashiko Critical 的根因，Leo 只答对 fault 端一半 |
+| #2 HD 必须配 HA | 高 | **spec 已定案（2026-09-16 查证）**：VTCR_EL2.HD 字段描述明文"HA=0 时 HD behaves as 0"（D24.2.223），单设 HD 是空操作；HDBSS 更要求 {HDBSS,HA,HD} 全 1（ITMYVQ, D8.5.2.3） |
+| #3 HD 翻转无 TLBI | 高 | Leo 只辩护了开 logging 方向 |
+| #4 compute_prot 静态判断（VGA 悬崖） | 高 | 直接回应 Oliver 的"要性能数据"之问——悬崖可让最常见的非迁移 VM 反而退化 |
+| #5 vtcr RMW 竞态 → 推导式 HD | 高 | Leo 认了加锁方向，未闻推导式方案 |
+| N1 wrprotect walker 并发契约 | 中 | cmpxchg→裸写，契约静默收紧 |
+| N2+N7 静默化假设零注释 | 中 | 两条合并为"注释固化"一条 |
+| N9 SMMU 共享 S2 前瞻 | 低 | 前瞻提醒 |
+| N10 selftests 计划 | 低 | 顺手提出可贡献用例 |
+
+### 转移阵地
+
+- **N8（性能数据）**：Oliver 已在 PATCH 5/5 直接问 Leo "Do you have any
+  performance numbers?"——我们在**回 Oliver 的邮件**中认领数据产出
+  （headless server 形态受益、desktop 形态被 VGA 悬崖拖累，两态都测），
+  不再作为问 Leo 的问题。
 
 ---
 
@@ -91,28 +138,36 @@ DIRTY（精确）；harvest（8fc9342022ca）补收割端——wp 清位前、un
 用 DIRTY 两本账）；另外补了 wp/unmap 两处收割（对齐 stage-1 的 zap_present_folio_ptes），
 fault 端 + 收割端合起来才闭环——unmap 侧你考虑过吗？"
 
-### 2. HD 不带 HA（疑似规格违规）
+### 2. HD 不带 HA（架构性失效——spec 已定案）
 
 **与 sashiko 的关系**：自查，sashiko 未报，Leo 无任何回应。
 
-**问题**：patch 5 只设 `kvm->arch.mmu.vtcr |= VTCR_EL2_HD`，HA 恒为 0。三重反证：
+**spec 查证（DDI 0487 M.b，2026-09-16）**：结论从"疑似违规"升级为"确证失效"——
 
-1. SMMU 驱动同场景（walk 的表可写位就是 DBM 位）永远成对开，注释原文：
-   "To enable dirty flag update, set both Access flag and dirty state update"
-   （arm-smmu-v3.c:1676）；SVA CD 也是 `CD.TCR.HA|HD` 一起（arm-smmu-v3-sva.c:108，
-   "PTE_WRITE and PTE_DBM share the same bit"）。
-2. 内核自家 stage-1：proc.S `__cpu_setup` 先开 HA，HD 经 `ARM64_HW_DBM` cap 延迟补开
-   （cpufeature.c `cpu_enable_hw_dbm`），从未出现单开 HD 的写法。
-3. FEAT_HDBSS 规格要求 VTCR_EL2.{HDBSS,HA,HD} **全 1** 才生效（D8.5.2.3）——HDBSS 系列的地基。
+1. **VTCR_EL2.HD 字段描述（D24.2.223，页 D24-10139）原文**："When the Effective value of
+   VTCR_EL2.HA is 0, this field behaves as 0 for all purposes other than a direct read
+   of the value of this bit."——**HA=0 时 HD 架构性失效**（直接读返回 1，但行为为 0）。
+   即 patch 5 的 `vtcr |= VTCR_EL2_HD`（不带 HA）在合规硬件上是**空操作**：stage-2
+   硬件脏管理根本没开启。不是"风险"，是"不工作"。
+2. **D8.5.2.3 规则 ITMYVQ（页 D8-7777）**："HDBSS is enabled only if VTCR_EL2.{HDBSS,HA,HD}
+   are {1,1,1}."；VTCR_EL2.HDBSS 字段描述（页 D24-10131）同款："If VTCR_EL2.{HA,HD} is
+   not {1,1}, the Effective value of this field is 0."
+3. 佐证先例：SMMU 驱动同场景永远成对开（arm-smmu-v3.c:1676，arm_smmu_make_s1_cd()：
+   "To enable dirty flag update, set both Access flag and dirty state update"）；
+   内核 stage-1 也是先 HA（proc.S）后 HD（ARM64_HW_DBM cap）。
+4. 位号核对（防串位）：内核生成头 sysreg-defs.h 中 VTCR_EL2_HD=bit[22]、HA=bit[21]、
+   HDBSS=bit[45]，与 M.b 字段描述一致；我们 v5_3 的 0011 号 patch（三态状态机）
+   已 `HD | HA (| HDBSS)` 成对设置，与规格吻合。
 
-**影响**：轻则 HD 不生效（优化失效但行为安全，写照常 fault），重则 CONSTRAINED
-UNPREDICTABLE。需对着 ARM ARM VTCR_EL2.HD 的 field description 定案。
+**影响修正**：原判断"轻则 HD 不生效、重则 CONSTRAINED UNPREDICTABLE"过于保守——按
+M.b 就是干净的"HD 不生效"（行为安全、写照常 fault），但优化整体空转，且 patch 5 的
+全部收益归零。
 
 **我们的修复**：F1（e9449e94cc9d），两处入口（setup_vcpu / set_hafdbs→状态机）都改为
 `HD | HA` 成对。附带收益：mmu-notifier 老化页的 AF fault exit 消失。
 
-**拟问 Leo**："除非 ARM ARM 说 VTCR_EL2.HD 对 HA 没有依赖，否则建议 `HD | HA` 成对设；
-你们内部有没有核对过这条 field 约束？"
+**拟问 Leo**（升级为定性陈述）："VTCR_EL2.HD 的 field description 写明 HA=0 时 HD
+behaves as 0——patch 5 单设 HD 在合规硬件上不会开启任何脏管理，v2 需要成对设 HA。"
 
 ### 3. 翻 HD 无 TLBI
 
@@ -233,6 +288,9 @@ HDBSS），顺带解决了 HDBSS enable/disable 与 set_hafdbs 方向相反的�
 
 ### N3. vcpu_has_nv 从 per-vcpu 改 per-KVM 粒度
 
+> **状态（2026-09-16）**：暂停。Oliver 已指出 NV gate 本身不该存在（HAFDBS 可用于
+> canonical stage-2 而与 guest hypervisor 无关），若 v2 删 gate 则本问题消失。
+
 **与 sashiko 的关系**：自查（patch 5 附带重构）。
 
 - **问题**：patch 5 把 `vcpu_has_nv(vcpu)` 重构成 `kvm_vcpu_has_nv(kvm)`（per-KVM），语义
@@ -255,6 +313,10 @@ HDBSS），顺带解决了 HDBSS enable/disable 与 set_hafdbs 方向相反的�
 
 ### N5. 嵌套联合判断的短期处置（bit51 安全洞）
 
+> **状态（2026-09-16）**：闭环，不再发。Marc 已定性 "Absolutely NOT"（RO+spurious DBM
+> 被判可写 = 内存损坏），Oliver 补充机理（guest 设 VTCR_EL2.HD=0 时 shadow S2 必须
+> 把 bit51 按 RES0 处理）。Leo 必须修，无需我们再发。
+
 **与 sashiko 的关系**：**sashiko patch 1 的 High 条的直接后续**。
 
 - **sashiko 原文**：L0 把 L1 可见 HAFDBS 限制为 AF-only（nested.c:1783
@@ -270,6 +332,11 @@ HDBSS），顺带解决了 HDBSS enable/disable 与 set_hafdbs 方向相反的�
   显式声明这个前置依赖，避免有人只拿 patch 1 用在开嵌套的 host 上。"
 
 ### N6. v2 边界：我们的 fixup 他收不收
+
+> **状态（2026-09-16）**：升级为行动项。Oliver 已点名 "work with Tian to get a
+> combined series"——改为在回 Oliver 的邮件（附录 A 邮件一）中直接向 Leo 提出：
+> 若其同意，本系列并入 HDBSS 树、随 HDBSS v5 一起发；fixup 或折叠或移交 v2，
+> 由 Leo 选。
 
 **与 sashiko 的关系**：自查（协作问题）。
 
@@ -330,149 +397,129 @@ HDBSS），顺带解决了 HDBSS enable/disable 与 set_hafdbs 方向相反的�
 
 ---
 
-## 附录 A：英文邮件原稿（供翻译参考）
+## 附录 A：英文邮件原稿（maintainer 风格精简版，2026-09-16 重写）
 
-> 以下是此前拟好的英文邮件体（回复 lkml 线程 `[RFC PATCH 2/5]`，覆盖第一部分 #1-#5 的
-> 表述）。翻译新问题时可复用其中的技术措辞。原有的中文对照块已删除——第一部分即权威
-> 中文分析。
+> 两封：**邮件一**回 Oliver（PATCH 1/5 线程，认领 combined series + 性能数据）；
+> **邮件二**回 Leo（PATCH 2/5 线程，仅保留 maintainer 未覆盖的问题）。
+> 风格对齐 Marc/Oliver：不用 markdown 标题，一段一问，引用代码/规范时给到函数级。
+> 旧版长稿已删除，中文权威分析仍是正文第一、二部分。
 
-**To:** Leonardo Bras \<leo.bras@arm.com\>
-**Cc:** linux-arm-kernel@lists.infradead.org, kvmarm@lists.linux.dev, Oliver Upton, Marc Zyngier
-**Subject:** Re: [RFC PATCH 2/5] KVM: arm64: Add KVM_PGTABLE_PROT_DIRTY
+### 邮件一：回 Oliver（PATCH 1/5 线程，回 `<aqnku2TcFzIKhjQl@kernel.org>`）
 
-Hi Leo,
+**To:** Oliver Upton \<oupton@kernel.org\>
+**Cc:** Leonardo Bras \<leo.bras@arm.com\>, Marc Zyngier \<maz@kernel.org\>,
+kvmarm@lists.linux.dev, linux-arm-kernel@lists.infradead.org
+**Subject:** Re: [RFC PATCH 1/5] KVM: arm64: pgtables: Change write bit from S2AP_W to DBM
 
-Thanks for the series, and for walking through the sashiko findings. A few
-comments, mostly cross-checking against how stage-1 handles the same
-problems — it turns out the core kernel already has precedents for each
-of the gaps below.
-
-## 1. Releasing the folio as dirty: agree, but the two "dirty" accounts must be split
-
-I agree with your conclusion that kvm_release_faultin_page() should use
-writable rather than clean. One refinement: the series currently derives
-both consumers from the same expression:
-
-```c
-	bool dirty = prot & KVM_PGTABLE_PROT_DIRTY;          /* kvm_s2_fault_map() */
-
-	kvm_release_faultin_page(kvm, s2vi->page, !!ret, dirty);   /* host folio account */
-	...
-	if (dirty && !ret)
-		mark_page_dirty_in_slot(...);                    /* KVM dirty bitmap account */
 ```
+On Tue, Sep 15, 2026 at 05:37:15PM -0700, Oliver Upton wrote:
+> I don't think the HAFDBS enablement is complicated enough to be done in
+> a separate series without any meaningful users, nor would I really be
+> interested in taking it without, say, HDBSS.
+>
+> Can you please work with Tian to get a combined series out for this?
 
-These are two different ledgers with different precision requirements:
+Works for us.
 
-- **host folio dirty** (SetPageDirty) — for reclaim/writeback
-  correctness. Must be *speculative*: any mapping that *could* be made
-  writable locklessly has to mark the folio dirty at fault time. The
-  existing comment in kvm_release_faultin_page() says exactly this
-  ("KVM must (somewhat) speculatively mark the folio dirty if KVM could
-  locklessly make the SPTE writable"), and x86 relies on it for the same
-  reason (hardware dirty updates need no VM exit).
-- **KVM dirty bitmap** (mark_page_dirty_in_slot) — for migration. Must
-  be *exact*: a read-faulted WC page must not enter the bitmap, or
-  pre-copy will ship clean pages.
+Leo, if you're happy with it, we'll take this series into the HDBSS
+tree and send it out as part of HDBSS v5. We've been carrying a few
+fixups on top already (folio dirty accounting split, HD|HA pairing,
+TLBI on the HD flip, dynamic HD check) — details in my reply to
+patch 2 — and can either fold them in or hand them over for your v2,
+whichever you prefer.
 
-So I'd suggest:
-
-```c
-	kvm_release_faultin_page(kvm, s2vi->page, !!ret,
-				 prot & KVM_PGTABLE_PROT_W);       /* speculative */
-	...
-	if ((prot & KVM_PGTABLE_PROT_DIRTY) && !ret)             /* exact */
-		mark_page_dirty_in_slot(...);
-```
-
-and the same split in gmem_abort().
-
-For the long term, stage-1 closes this hole at unmap time: on zap, the
-generic mm does
-
-```c
-	/* mm/memory.c, zap_present_folio_ptes() */
-		if (pte_dirty(ptent))
-			folio_mark_dirty(folio);
-```
-
-i.e. the dirty state harvested from the PTE is pushed back into the folio
-when the mapping is torn down, no matter who set it (software pte_mkdirty
-or a hardware DBM update). The arm64 KVM unmap walker currently only puts
-the page-table page; harvesting S2AP_W there (and before the write-protect
-clear) would make the folio account exact at the mapping lifecycle ends.
-We have that working on top of the HDBSS tree, along with the speculative
-marking above.
-
-## 2. VTCR_EL2.HD without HA
-
-Patch 5 enables HD alone:
-
-```c
-	kvm->arch.mmu.vtcr |= VTCR_EL2_HD;
-```
-
-Three reference points suggest HA must come along:
-
-- The SMMUv3 driver, in the equivalent situation (walking descriptors
-  whose writable bit *is* the DBM bit), always sets both:
-  "To enable dirty flag update, set both Access flag and dirty state
-  update" (arm-smmu-v3.c, arm_smmu_make_s1_cd()), and the SVA CD enables
-  CD.TCR.HA|HD together ("PTE_WRITE and PTE_DBM share the same bit",
-  arm-smmu-v3-sva.c).
-- The kernel's own stage-1 enablement path sets HA first (proc.S,
-  __cpu_setup) and HD later via the ARM64_HW_DBM capability.
-- The spec requirement for FEAT_HDBSS is that HDBSS is only enabled
-  when VTCR_EL2.{HDBSS,HA,HD} are all 1 (D8.5.2.3).
-
-Unless the ARM ARM says VTCR_EL2.HD has no such dependency, I'd suggest
-`VTCR_EL2_HD | VTCR_EL2_HA`. Side benefit: hardware-managed AF kills the
-access-flag exits on mmu-notifier aged pages.
-
-## 3. No TLB invalidation on the HD flip
-
-cpu_enable_hw_dbm() pairs the TCR_EL1.HD flip with isb() +
-local_flush_tlb_all(). For the VTCR flip, kvm_set_hafdbs() only requests
-KVM_REQ_RELOAD_STAGE2. For the enable-logging direction the subsequent
-kvm_mmu_wp_memory_region() + kvm_flush_remote_tlbs_memslot() happens to
-cover us, but that ordering dependency is implicit, and for the
-disable-logging direction (HD off→on) stale read-only cached translations
-keep faulting until each page takes its next fault. Either a
-kvm_flush_remote_tlbs(kvm) in kvm_set_hafdbs() or at least a comment
-documenting the caller-side TLBI responsibility would make this robust.
-
-## 4. Static vs dynamic HAFDBS check in compute_prot
-
-kvm_s2_fault_compute_prot() decides WC based on the static
-kvm_supports_hafdbs(kvm), but HD is flipped off globally as soon as any
-single memslot starts logging. Note this is not just migration: QEMU's
-VGA keeps KVM_MEM_LOG_DIRTY_PAGES on the VRAM slot for the whole runtime
-of a desktop VM. With HD off but the static check still true, every read
-fault on the non-logged RAM slots installs WC, which is RO under HD=0 —
-one extra fault per page, for the most common "not migrating" workload.
-
-Reading the actual state (`kvm->arch.mmu.vtcr & VTCR_EL2_HD`) instead of
-the capability would keep the optimization honest; alternatively
-kvm_set_hafdbs(0) could bulk-promote existing WC pages to WD so only the
-pages mapped before the flip pay the one-time cost.
-
-## 5. Minor: vtcr race, and nested bit 51
-
-On the setup_vcpu vs kvm_set_hafdbs race sashiko flagged: rather than
-adding slots_lock to kvm_setup_vcpu(), making the HD bit a pure derived
-value (capability && nr_memslots_dirty_logging == 0, recomputed on each
-event) would remove the lost-update window entirely.
-
-And just to make sure it's on the radar: the walk_nested_s2_pgd()
-`desc & (DBM | S2AP_W)` union reading depends on Oliver's nested HAFDBS
-emulation to be safe — until L1's view of HAFDBS.DBM exists, bit 51 is
-RES0 from L1's perspective and an honest L1 could use it as software
-metadata. Maybe worth an explicit note in the cover letter that the
-nested change rides on that series, or a temporary revert to S2AP_W-only
-until it lands.
-
-Happy to test any of the above on top of our HDBSS tree — we're rebasing
-v5 onto this series as discussed on patch 4.
+Happy to produce the performance numbers for patch 5 as well. The
+headless-server shape is where HD stays on and the series should win;
+desktop shapes need more care, as QEMU keeps dirty-logging on the VGA
+slot (more on that in the patch 2 reply). We'll measure both.
 
 Thanks,
 Tian
+```
+
+### 邮件二：回 Leo（PATCH 2/5 线程）
+
+**To:** Leonardo Bras \<leo.bras@arm.com\>
+**Cc:** Oliver Upton \<oupton@kernel.org\>, Marc Zyngier \<maz@kernel.org\>,
+kvmarm@lists.linux.dev, linux-arm-kernel@lists.infradead.org
+**Subject:** Re: [RFC PATCH 2/5] KVM: arm64: Add KVM_PGTABLE_PROT_DIRTY
+
+```
+Hi Leo,
+
+We've had this series under our HDBSS tree for a while, with a few
+fixups on top. Comments below — none of this overlaps with what Marc
+and Oliver already raised.
+
+The dirty accounting in kvm_s2_fault_map() needs to be split; both
+consumers are currently gated on PROT_DIRTY:
+
+	bool dirty = prot & KVM_PGTABLE_PROT_DIRTY;
+
+	kvm_release_faultin_page(kvm, s2vi->page, !!ret, dirty);
+	...
+	if (dirty && !ret)
+		mark_page_dirty_in_slot(...);
+
+These are two ledgers with opposite precision requirements. The folio
+one must stay speculative — the comment above kvm_release_faultin_page()
+says exactly that, and x86 relies on the same property for its
+hardware dirty bit. The bitmap one must stay exact, or pre-copy ships
+clean pages. Your "use writable" from the sashiko thread fixes the
+fault side; the account still needs closing on the way out —
+zap_present_folio_ptes() does folio_mark_dirty() on pte_dirty(), and
+the S2 unmap/wp walkers want the same treatment for S2AP_W/DBM.
+
+On the VTCR flip: HD alone is architecturally a no-op. The VTCR_EL2.HD
+field description reads "When the Effective value of VTCR_EL2.HA is 0,
+this field behaves as 0 for all purposes other than a direct read of
+the value of this bit" — so as it stands, patch 5 never enables
+stage-2 dirty management at all. HA has to come along regardless:
+FEAT_HDBSS requires VTCR_EL2.{HDBSS,HA,HD} = {1,1,1} (D8.5.2.3,
+ITMYVQ).
+
+Also on the flip: cpu_enable_hw_dbm() pairs it with isb() +
+local_flush_tlb_all(). The enable-logging direction happens to be
+covered by the subsequent wp+flush, but that ordering is implicit, and
+the disable-logging direction keeps faulting through stale RO
+translations page by page. A kvm_flush_remote_tlbs() in
+kvm_set_hafdbs() — or at least a comment on the caller's TLBI
+responsibility — would make both directions robust.
+
+kvm_s2_fault_compute_prot() gates WC on the static
+kvm_supports_hafdbs(), which stays true once HD is flipped off. A
+single logging memslot does that: QEMU keeps LOG_DIRTY_PAGES on the
+VGA VRAM slot for the whole lifetime of a desktop VM, so this is the
+common non-migrating case, not an edge. Every new read fault then
+installs WC, which is RO under HD=0 — one extra fault per page,
+indefinitely. Reading vtcr & VTCR_EL2_HD instead keeps the
+optimization honest.
+
+On the setup_vcpu vs set_hafdbs race: rather than adding slots_lock to
+kvm_setup_vcpu(), making HD a derived value (capability &&
+!nr_memslots_dirty_logging, recomputed on each event) gets rid of the
+RMW window entirely, with no lock ordering to audit.
+
+Minor:
+
+- stage2_wrprotect_walker() plain-WRITE_ONCEs where the old path
+  cmpxchg'd for SHARED walks. Fine while the only caller holds the
+  write lock, but the contract is now silent. Either keep the cmpxchg
+  or state exclusive-only at the function.
+
+- The plain store is only safe because RELOAD (KVM_REQUEST_WAIT)
+  quiesces all vCPUs before wp runs, so no hardware WC->WD update can
+  race it. That ordering in kvm_arch_commit_memory_region() is
+  load-bearing and undocumented — worth comments in both places.
+
+Forward-looking: once S2 sharing with the SMMU lands, WC pages are RO
+to any SMMU without HTTU dirty support, and device faults have no
+relax path. If that's in sight, kvm_supports_hafdbs() probably wants a
+gate for assigned devices / dbm-capable SMMUs.
+
+Any selftests plans for v2? Happy to contribute three-state round-trip
+cases.
+
+Thanks,
+Tian
+```
