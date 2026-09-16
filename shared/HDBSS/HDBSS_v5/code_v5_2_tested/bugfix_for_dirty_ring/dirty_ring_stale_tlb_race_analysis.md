@@ -762,6 +762,12 @@ flush)。最后一轮有 kick 兜底，见"QEMU 侧 Dirty Ring Reap 路径分析
 > 伤害形态、bitmap/INITIALLY_SET 判别、bulk 救不了的边沿触发原理);
 > 本节以下内容保留作为历史分析记录。
 
+> **[2026-09-17 定案] 修复经实测验证有效**: 打上修复
+> (linux.git code_v5_2_tested `d52cdc8ea269`) 后,原崩溃场景
+> (4K stage-2 + dirty ring + HDBSS 迁移) **不再复现**——根因就此
+> 定案。最终结论与两个变体 (kick/RELOAD) 的完整闭环见文末
+> **"根因定案与实测验证 (2026-09-17)"** 一节。
+
 ### 已确认的事实
 
 1. 崩溃仅在 HDBSS + 4K 页 + dirty ring 场景出现
@@ -1066,7 +1072,7 @@ bitmap sync 再 reap 一次，所有脏页（包括 HDBSS 中的）都被收割�
 
 ## 根因确认: HDBSS 使能窗口的 HDBSSBR_EL2 陈旧编程 (2026-09-16)
 
-**状态: 已确认 (代码层面证据链完整), 修复已提交。**
+**状态: 已定案——2026-09-17 实测验证修复有效, 原崩溃场景不再复现。**
 本节结论取代上文"当前分析状态与未解问题"中的全部未解假设——
 stale TLB 窗口(假设 1)与 HDBSS buffer 硬件边界(假设 3)确实存在,
 但都是次要因素,均不是 4K + dirty ring 场景独有崩溃的根因。
@@ -1479,7 +1485,82 @@ push 进 dirty ring。
    ```
 2. 对比宿主机冷启动后的第一次迁移(预期 ExternalAbort/报错)与
    连续第二次迁移(预期静默 guest 崩溃)
-3. 修复后重跑 rand_ring2048_lazy_4k_bw800 场景 ≥300s
+3. ~~修复后重跑 rand_ring2048_lazy_4k_bw800 场景 ≥300s~~
+   **[2026-09-17 已完成: 通过, 崩溃不再复现, 根因定案]**
+
+## 根因定案与实测验证 (2026-09-17)
+
+**实测结果: 打上修复 (linux.git code_v5_2_tested `d52cdc8ea269`,
+"Program HDBSS buffer registers on KVM_REQ_RELOAD_STAGE2") 后,
+原崩溃场景 (4K stage-2 + dirty ring + HDBSS 迁移, redis 负载)
+不再复现。根因就此定案。**
+
+### 定案的根因 (最终表述)
+
+HDBSS 的硬件使能 (per-CPU 的 VTCR_EL2.HDBSS 翻转) 与 per-CPU
+HDBSS 缓冲寄存器 (HDBSSBR_EL2/HDBSSPROD_EL2) 的装载之间存在
+**结构性缝隙**: 使能发生时, 正在 KVM_RUN 中间的 vCPU 所在 CPU 上,
+这两个寄存器仍持有陈旧值 (复位值 0, 或上一个在这颗 CPU 上跑过
+HDBSS 的 vCPU 的残留——其 buffer 页已释放并可能被 buddy 复用)。
+而硬件对 writable-clean 页的写响应是零软件介入的静默动作
+(C→D 原子升级 + entry 写入 BR.BADDR + INDEX*8), 于是:
+
+1. **真实脏页记录永久丢失** → 页已是 State-D 无 C→D, ring 无 entry
+   → 永不 wrprotect → QEMU dirty 集合永远没有该页 → bulk 快照之后的
+   写入永不重发 → DST 收到部分停留在旧快照的内存, 增量发散后
+   guest 随机崩溃 (call trace 每次不同)
+2. **无关物理内存被 8 字节 entry 污染** (BR 指向 freed-and-reused 页时)
+
+一句话: **使能瞬间 per-CPU 硬件状态切换不完整——VTCR 切了,
+buffer 寄存器没切。**
+
+### 同一缺陷在两个变体中的表现 (kick vs RELOAD)
+
+排查中发现开发线上存在两个使能变体, 缺陷以两种形态出现, 修复
+(d52cdc8ea269) 同时覆盖:
+
+| 变体 | 使能方式 | 缺口表现 | 修复如何闭合 |
+|------|---------|---------|------------|
+| kick 变体 (origin_patches / HDBSS_V5 `f928b0b`) | 软件置 VTCR 位 + `kvm_vcpu_kick` 踢出 | vCPU 被踢出后不经过 vcpu_load, 带旧 VTCR (HD=0) 直接重入 guest; 期间 exit 路径 flush 的守卫读软件 VTCR (已 ON) → 用**上一任 vCPU 残留的 HDBSSPROD_EL2.INDEX** 去**未清零**的 buffer 页读 garbage GFN push 进 ring | `__GFP_ZERO`: buffer 页清零后, 错误 INDEX 只能读到 invalid entry (bit 0=0), 不会被当作 GFN |
+| RELOAD 变体 (当前 code_v5_2_tested, `6c52858` 之后) | 软件置 VTCR 位 + `KVM_REQ_RELOAD_STAGE2` | handler 只重载 VTCR/VTTBR, **不装 BR/PROD** → vCPU 带【新 VTCR (HD=1) + 陈旧 BR】重入 guest → 硬件全速把 entry 写进陈旧地址 | `kvm_vcpu_load_hdbss()`: 在 `__load_stage2()` **之前**编程 BR/PROD——"先装弹, 后开保险", 不变式在 HDBSS 激活的写指令执行时已成立 |
+
+两个变体的演进关系: `6c52858` 把 kick 改成 RELOAD, 关闭了
+"软件 ON / 硬件 OFF" 的 VTCR 窗口, 却引入了 "硬件 ON / BR 陈旧"
+的反向窗口; `d52cdc8ea269` 补齐了这半块。**两者合起来才是完整的
+使能路径修复**——这也是为什么该 bug 的威胁面是"任何使能时刻存在
+writable-clean 页的模式", 不只 dirty ring (bitmap/legacy 同理,
+只是 INITIALLY_SET 恰好跳过 eager wp 而侥幸)。
+
+### 定案结论清单
+
+1. **崩溃判别变量**: HDBSS 使能瞬间 stage-2 里有无 writable-clean 页。
+   4K+ring: eager wp 与使能同瞬间发生 (同一 commit_memory_region),
+   L3 保留 DBM → 全 State-C, 首批写立即命中缺口 💥;
+   bitmap: INITIALLY_SET 跳过 eager wp → 全 State-D, 硬件没活干 ✓;
+   THP/huge: block 剥 DBM → State-N, split 子页继承 RO → 第一轮走
+   fault 软件路径, 不经 State-C ✓; hdbss=off: 无硬件路径 ✓
+2. **崩溃显形在迁入端**: SRC 丢的是"页在变"的信息 (guest 本身
+   运行正常), 陈旧快照经迁移通道传导到 DST, 在 DST 兑现为内存发散
+   (~617MB recvmsg 序列号差 ≈ bulk 快照后持续写入量)
+3. **bulk 全量拷贝不构成兜底**: 脏跟踪是边沿触发, 记录丢失的页
+   无法再被重新武装 (wp 依赖 entry 收割 → 死循环), bulk 快照之后到
+   cutover 之间的写入全部丢失
+4. **flush 救不了**: kvm_flush_hdbss_buffer() 的 entry 数据从软件侧
+   hdbss_pg 读, 从不回读 BR; PROD 的 save/restore 也全是软件值,
+   没有一个字节能修正 BR 里的地址
+5. **方案 C (stale TLB 方向) 无效的原因**: 它修的是稳态 reset 循环
+   的竞态, 污染发生在使能瞬间, 两者正交
+
+### 修复内容 (d52cdc8ea269, 已实测验证)
+
+1. `arch/arm64/kvm/arm.c` RELOAD_STAGE2 handler: `__load_stage2()`
+   之前调 `kvm_vcpu_load_hdbss(vcpu)` (守卫 `vcpu_hdbss_enabled`)
+2. `arch/arm64/kvm/dirty_bit.c` 新增 `kvm_vcpu_load_hdbss()`:
+   宿主上下文写 HDBSSBR_EL2/HDBSSPROD_EL2 + isb (HDBSS 为 VHE-only)
+3. `kvm_arm_vcpu_alloc_hdbss()`: 分配加 `__GFP_ZERO`
+
+补丁文件: 本目录
+`0001-KVM-arm64-Program-HDBSS-buffer-registers-on-KVM_REQ_.patch`
 
 ## 关键代码位置索引
 
