@@ -757,7 +757,9 @@ flush)。最后一轮有 kick 兜底，见"QEMU 侧 Dirty Ring Reap 路径分析
 > HDBSSBR_EL2/HDBSSPROD_EL2**, 使能窗口内硬件把脏页 entry 写进陈旧
 > buffer 地址。该结论同时解释了下面全部"未解问题"(4K+ring 独有、
 > huge/THP 不崩、bitmap 不崩、方案 C 无效)。详见文末
-> **"根因确认: HDBSS 使能窗口的 HDBSSBR_EL2 陈旧编程"** 一节;
+> **"根因确认: HDBSS 使能窗口的 HDBSSBR_EL2 陈旧编程"** 一节
+> (含 **"追问与深入"** 六问: BR 残留机制、装载时机不变式、两端
+> 伤害形态、bitmap/INITIALLY_SET 判别、bulk 救不了的边沿触发原理);
 > 本节以下内容保留作为历史分析记录。
 
 ### 已确认的事实
@@ -1203,6 +1205,223 @@ T5  redis 又写 P → P 是 State D → 无记录、无 fault、无 wp
     → QEMU 的 dirty 集合里永远没有 P → 永远不重发
 T6  迁移完成, DST 的 P 停在 T4 快照, T5 的写入永久丢失
 ```
+
+### 追问与深入 (2026-09-16 Q&A, 根因的完整论证)
+
+以下六问是根因确认过程中的关键质疑,每个答案都曾是假设的
+"必答考题"。全部闭合后,该根因从"最可疑候选"升级为"确认"。
+
+#### Q1: 寄存器里到底是什么?是"装载了上一个 VM 的 BR"吗?
+
+**是残留,不是错误装载——这是遗漏型 bug,不是装载错误。**
+
+HDBSSBR_EL2 是 per-CPU 寄存器: 没人写它,就永远保留上一次被写入
+的值。宿主机上该寄存器的生命周期:
+
+```
+宿主机冷启动: BR = 0 (复位值)
+之前某轮测试: 旧 VM 的 vCPU 在某 CPU 上 vcpu_load → BR = 旧 buffer 页 P_old
+  → 测试结束, VM 销毁 → __free_pages(P_old) 还给 buddy
+  → P_old 可能已被复用成任何页 (slab / page cache / 甚至当前 VM 的 guest RAM!)
+  → 该 CPU 的 BR 仍指着 P_old ← 没有任何代码清它
+
+当前 VM 开机 → 迁移开始前:
+  每次 kvm_arch_vcpu_load() → __load_hdbss()
+  → vcpu_hdbss_enabled() == false → 【提前 return】
+  → 本 VM 的 buffer 地址【从未】写进过 BR
+
+T0 迁移开始: RELOAD_STAGE2 只写 VTCR → BR 仍是残留值
+  → guest 写 State-C 页 → entry 写进 P_old 💥
+```
+
+两种残留值后果不同(也是可证伪预测的基础):
+
+| 残留值 | 硬件写 entry 到哪 | 症状 |
+|--------|------------------|------|
+| BR = 0 (冷启动后首轮) | PA 0 | ExternalAbort → FSC 置位 → -EFAULT → **QEMU 报错**,非静默崩溃 |
+| BR = P_old (复测) | 已释放被 buddy 复用的任意页 | **静默污染**,复用成 guest RAM 页则垃圾 entry 直接进 guest 内存 |
+
+测试反复在同一宿主机跑 SRC/DST,恰是第二种: 每轮 SRC 在跑、上轮
+buffer 页刚被释放,复用概率极高。P_old 被复用成什么页决定症状——
+这解释了 call trace 每次都不同。
+
+#### Q2: `__load_hdbss()` 不是会装载吗?
+
+**会,但守卫条件与调用时机存在结构性错位。**
+
+```c
+static void __load_hdbss(struct kvm_vcpu *vcpu)
+{
+    if (!vcpu_hdbss_enabled(vcpu))     // ← 守卫: HDBSS 未启用则不装载
+        return;
+    write_sysreg_s(vcpu->arch.hdbss.hdbssbr_el2, SYS_HDBSSBR_EL2);
+    ...
+}
+```
+
+装载只发生在 **vcpu_load**(KVM_RUN 入口 / 抢占后 sched-in);而
+HDBSS 打开走的是第三条路——**run loop 中间的 RELOAD handler**,
+处理完直接回 guest,不经过 vcpu_load。守卫条件与装载时机的矩阵:
+
+```
+装载机会:  [开机 ~~~~~~~~~ T0]  [T0 后回 userspace/被抢占 ~~~~~]
+守卫条件:   恒 false ✗           恒 true ✓
+                        ↑
+          T0 (HDBSS 打开): 守卫刚翻转,但该时刻不经过 vcpu_load
+          → BR 在 [T0, 下次 vcpu_load) 之间一直是残留值
+```
+
+**装载的时机和打开的时机永远错不开这个缝隙**——这是 bug 的结构性
+成因,不是某次调用的偶然失误。
+
+#### Q3: 使能瞬间必须装载 BR 吗?"立即生效"的精确含义?
+
+不变式 (per-CPU, 无宽限期):
+
+```
+对任意物理 CPU, 在任意时刻:
+  若 VTCR_EL2.HDBSS == 1 且该 CPU 可能执行 guest 代码
+  则 HDBSSBR_EL2 必须指向当前 vCPU 的 buffer
+```
+
+为什么没有任何宽限期: 威胁不是来自 KVM 代码,而是硬件的**零介入
+静默动作**——guest 第一条 store 碰到 State-C 页,MMU 当场 C→D 并写
+`BR + INDEX*8`,中间没有任何软件介入点。不变式只要在 guest 重入前
+被破坏过一个周期,伤害已发生。
+
+"先装弹,后开保险"的顺序纪律:
+
+```c
+kvm_vcpu_load_hdbss(vcpu);        // ① 先装 BR/PROD
+__load_stage2(vcpu->arch.hw_mmu); // ② 后写 VTCR —— HDBSS 在此激活
+```
+
+不变式在 HDBSS 激活的那条写指令执行时已成立,不依赖"此刻恰好
+没人用"的上下文推理。`kvm_vcpu_load_vhe()` 里现存顺序相反
+(stage2 先、hdbss 后),但两写之间无 guest 执行、guest entry 前
+两者都就位——同样满足不变式,只是靠上下文而非顺序。
+
+注意 VTCR 也是 per-CPU 生效的: `kvm->arch.mmu.vtcr` 只是软件模板,
+硬件在每颗 CPU 各自 `write_sysreg(vtcr)` 时才切换行为——这正是使能
+要发 RELOAD request 把所有 vCPU 踢出来的原因。
+
+#### Q4: 为什么 call trace 在迁入端 (DST),而不是迁出端启动时就崩?
+
+**SRC 也踩空了,但两端的伤害形态不同;SRC 是肇事者,DST 是案发现场。**
+
+窗口内两笔伤害的归属:
+
+| 伤害 | 机制 | 可见端 |
+|------|------|--------|
+| A. 错误物理页被覆写 | entry 写到陈旧 BR 指向的页 | 宿主机随机页,非定向 |
+| B. 真实脏页记录丢失 | 页已 State-D,无 C→D → 永不 wrprotect → 永不重发 | **DST** (陈旧页到达) |
+
+SRC guest 不崩: 它的内存没有被写过错误内容 (伤害 A 打的是宿主机
+上无关页,偶尔随机命中 SRC 自己的 RAM backing page 才有局部污染),
+丢的只是"哪些页变了"的**信息**。SRC 端 redis/内核数据结构照常
+在内存里正确演化。
+
+DST 崩溃机制: 收到的内存里部分页停留在迁移中某快照版本。redis/
+内核数据结构 (哈希表、TCP 序列号、函数指针、页表) 是增量演化的,
+SRC 上继续演化、DST 冻结,两边发散:
+
+- `recvmsg bug 2: copied BD61E65F seq 893F5899` —— 序列号差约
+  617MB,恰是 T4 (bulk 快照) 之后 SRC 持续写入量级 (800MB/s 限速
+  × 迁移持续时间的合理比例)。这不是巧合: T5 阶段丢的写 = 快照后
+  的持续演化量
+- IABT at PC=0x14000c0 / PC=0、`x9-x14=0x78...` 整页模式 —— 函数
+  指针/返回地址/数据页陈旧化的随机显形
+- 崩溃点取决于哪个页丢了写 (纯随机) → **call trace 每次不同**
+
+DST 自身没有敞开的窗口: precopy 的 DST 在 cutover 前 vCPU 不运行,
+全部停在 userspace;首次 KVM_RUN 时 vcpu_load → __load_hdbss
+(守卫已真) → BR 正确。
+
+#### Q5: 那 bitmap 为什么没问题?两种机制不是都没重装 BR 吗?
+
+**对——bitmap 的 BR 窗口同样敞开。区别不在有无窗口,而在窗口敞开的
+那一刻硬件有没有活干。**
+
+关键差异在 QEMU 一行代码 (kvm-all.c:2653):
+
+```c
+if (!s->kvm_dirty_ring_size) {   // 只有 bitmap 模式才启用 manual protect
+    ... KVM_DIRTY_LOG_INITIALLY_SET ...
+}
+```
+
+于是内核 `commit_memory_region` (mmu.c) 走向不同:
+
+```c
+kvm_arm_hdbss_on_dirty_logging_change(...);   // 两种模式都在 T0 开 HDBSS (BR 陈旧)
+if (kvm_dirty_log_manual_protect_and_init_set(kvm))
+    return;                        // ← bitmap: 跳过 eager wp+split
+kvm_mmu_wp_memory_region(...);     // ← ring: eager wp → 全部页变 State C
+```
+
+- **bitmap** (INITIALLY_SET): T0 时所有页保持 State D → 窗口内
+  guest 写 State-D 页,硬件看 dirty 位=1,什么都不做 → **硬件零
+  buffer 写,陈旧 BR 无从作恶**。第一批 State-C 页要等 bulk 完成
+  (4G @ 800MB/s ≈ 5s+) 后首次 CLEAR ioctl 才出现;这 5 秒里 vCPU
+  因 virtio MMIO/中断等频繁回 userspace → 每次 vcpu_load → BR
+  早已修正。**bitmap 是侥幸安全,不是机制免疫。**
+- **ring** (QEMU 跳过该 cap): eager wp 与 HDBSS 激活同瞬间发生
+  (同一个 commit_memory_region 内连续执行),全部 L3 页变 State C,
+  redis 第一批写零延迟命中陈旧 BR。
+
+**eager wp 是内核写死的,不是 QEMU 可配参数**: 唯一开关是
+INITIALLY_SET 标志,只由 QEMU 是否发 MANUAL_DIRTY_LOG_PROTECT2 cap
+决定;用户面没有任何 eager/lazy split 命令行参数 (QEMU 树里
+`kvm_eager_split_size` 写死为 0)。lazy split 只是设计文档中的方案,
+未合入本树;且 lazy 方案中 wp 照做 (仅拆页推迟)。
+
+**判别实验** (未做,预测): 把 QEMU 的 `if (!s->kvm_dirty_ring_size)`
+砍掉,让 bitmap 模式也不启用 manual protect → 内核对 bitmap 做
+eager wp → 预测 **bitmap + 4K 同样出现 DST 内存损坏**。若成立,则
+"崩溃与否的唯一判别变量 = HDBSS 激活瞬间有无 writable-clean 页"
+从推论变为实测事实,也说明该 bug 威胁面是"任何使能时刻存在
+State-C 页的模式",修复对 bitmap/legacy 同样必要。
+
+THP/huge + ring 不崩的同构解释: eager wp+split 确实做了,但 block
+wp 剥 DBM → State N,split 子页继承 → State N (RO)。第一轮写走
+permission fault 软件路径,relax 设 W+DBM **直达 State D,全程不经
+State C 中间态** → 硬件零 buffer 写;等下一轮 wp 造出 State-C 页
+时 BR 已修正。
+
+#### Q6: dirty ring 一开始不也是全量标脏+全量拷贝吗?窗口内标错的脏不影响吧?
+
+**bulk 确实会把窗口内 (T2) 的写入内容拷过去——这点对。但 bulk 是
+一次性快照,救不了它结束之后的事。**
+
+关键: 脏跟踪是**边沿触发** (C→D 迁移瞬间记录一次),不是电平触发。
+P 在 T2 走完迁移但记录进了错误物理页,从此进入死循环:
+
+```
+要重新武装这页 (wp: D→C) → 需要它的 entry 出现在 ring 里
+要 entry 进 ring            → 需要硬件记录一次 C→D
+要 C→D                      → 需要这页先回到 State C
+要回到 State C              → 需要重新武装这页    ← 死循环,断在第一环
+```
+
+ring 模式下 wp 的唯一触发源 = "entry 被 ring 收割" (reset →
+kvm_arch_mmu_enable_log_dirty_pt_masked)。entry 不存在 → 永不
+wp → P 永远 State D → T4 之后 (bulk 快照后到 cutover 前) 的**所有**
+写入静默丢失。
+
+与两个旧窗口的本质区别 (为什么旧的能自愈、这个不能):
+
+| 窗口 | 窗口内 PTE (内存中) | 自愈路径 |
+|------|:---:|------|
+| stale TLB 窗口 | **仍是 C** | TLB flush 后下次写仍触发 C→D → 被记录 ✓ |
+| HDBSS 异步延迟 | D, entry **在 buffer 里** | 下次 exit flush 进 ring, 延迟一轮 ✓ |
+| **BR 陈旧窗口** | D, entry 在**错误物理页** | 无任何路径再碰这页 ✗ |
+
+量级佐证: 丢的写入 = T4→cutover 期间打在"被解除武装页"上的全部
+写入 ≈ 617MB (recvmsg 序列号差)。eager wp 刚把全部 4G 刷成 State C,
+redis 的写打哪哪中——被解除武装的页不是少数,是整个工作集。
+
+"bulk 先全量拷"反而解释了一个表象: 崩溃不在迁移一开始爆,而是
+cutover 后 redis 跑了一段时间才炸——因为丢失的是快照之后的增量。
 
 ### 可证伪预测
 
