@@ -1,0 +1,146 @@
+From d52cdc8ea269639bc13f63bf394cda06fa413e81 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Wed, 16 Sep 2026 21:44:45 +0800
+Subject: [PATCH] KVM: arm64: Program HDBSS buffer registers on
+ KVM_REQ_RELOAD_STAGE2
+
+HDBSS is enabled by flipping VTCR_EL2.HDBSS in kvm->arch.mmu.vtcr and
+issuing KVM_REQ_RELOAD_STAGE2, whose handler only reloads VTCR/VTTBR
+through __load_stage2(). HDBSSBR_EL2/HDBSSPROD_EL2 are per-CPU
+registers that bind the hardware dirty-state buffer to the running
+vCPU; they are programmed solely by kvm_arch_vcpu_load() (via
+__load_hdbss()), which additionally skips the write when HDBSS is not
+yet enabled.
+
+A vCPU that is mid-KVM_RUN when dirty logging starts therefore
+re-enters the guest with HDBSS active in VTCR_EL2 but a stale
+HDBSSBR_EL2: for the first migration the register still holds its
+reset value, and on a host that has run a previous HDBSS-enabled VM
+it points at the freed (and possibly reused) buffer page of a vCPU
+from that VM. Hardware dirty-state updates are silent writable-clean
+to writable-dirty promotions: the MMU writes the dirtied IPA to
+HDBSSBR_EL2.BADDR + HDBSSPROD_EL2.INDEX * 8 without any fault, so
+
+  - the dirtied-IPA entries land in unrelated physical memory,
+    corrupting e.g. guest RAM backing pages, and
+  - kvm_flush_hdbss_buffer() reads the vCPU's own software page,
+    so the real entries are lost forever: the page is already
+    writable-dirty, no further C->D transition ever records it, and
+    with no ring entry the page is never write-protected again.
+
+This only manifests with 4K stage-2 mappings plus the dirty ring:
+eager write-protect leaves level-3 PTEs writable-clean (DBM kept),
+and the dirty-ring QEMU path does not enable
+KVM_DIRTY_LOG_INITIALLY_SET, so the first guest writes happen inside
+the window. The dirty-bitmap path skips the eager write-protect
+(INITIALLY_SET), and huge-page mappings are split to read-only pages
+that fault in software before any writable-clean page exists.
+
+Fix it by programming HDBSSBR_EL2/HDBSSPROD_EL2 in the
+KVM_REQ_RELOAD_STAGE2 handler before __load_stage2(): hardware
+dirty-state updates only start once the new VTCR_EL2 is written, so
+with this ordering no window remains where HDBSS is active with a
+stale buffer address. vCPUs that are in userspace or preempted are
+already covered by kvm_arch_vcpu_load().
+
+Also zero the HDBSS buffer pages at allocation, so a stale
+HDBSSPROD_EL2.INDEX can only ever observe invalid entries instead of
+pushing leftover page contents into the dirty ring as GFNs.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h |  1 +
+ arch/arm64/kvm/arm.c                   | 11 +++++++++
+ arch/arm64/kvm/dirty_bit.c             | 34 +++++++++++++++++++++++++-
+ 3 files changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index b22304dd0be3..d1177b83f10e 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -50,6 +50,7 @@ static inline bool vcpu_hdbss_enabled(struct kvm_vcpu *vcpu)
+ 
+ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
++void kvm_vcpu_load_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
+ void kvm_arm_enable_hdbss_global(struct kvm *kvm);
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index eafd51f9ab8a..d14f6ca0c6c3 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1241,6 +1241,17 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
+ 			unsigned long flags;
+ 
+ 			local_irq_save(flags);
++			/*
++			 * The new VTCR_EL2 may be turning HDBSS on for a
++			 * vCPU that is mid-KVM_RUN and never went through
++			 * kvm_arch_vcpu_load() with the feature on.
++			 * Program the buffer registers first: hardware
++			 * dirty-state updates start with the VTCR write
++			 * below, and would otherwise be recorded through
++			 * whatever stale address HDBSSBR_EL2 still holds.
++			 */
++			if (vcpu_hdbss_enabled(vcpu))
++				kvm_vcpu_load_hdbss(vcpu);
+ 			__load_stage2(vcpu->arch.hw_mmu);
+ 			local_irq_restore(flags);
+ 		}
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 2d0df30e8ac7..95d7aacbffba 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -35,7 +35,13 @@ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu)
+ 	buddy_order = get_order(size);
+ 	sz_encoded = ilog2(size) - 12;
+ 
+-	hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT, buddy_order);
++	/*
++	 * The hardware fills this buffer based on HDBSSPROD_EL2.INDEX and
++	 * the flush reads as many entries: zero it so a stale index can
++	 * only ever observe invalid entries (bit 0 clear) instead of
++	 * pushing leftover page contents into the dirty ring as GFNs.
++	 */
++	hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO, buddy_order);
+ 	if (!hdbss_pg)
+ 		return -ENOMEM;
+ 
+@@ -60,6 +66,32 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ 	vcpu->arch.hdbss.hdbssbr_el2 = 0;
+ }
+ 
++/*
++ * Program the per-vCPU HDBSS buffer registers on the current CPU.
++ *
++ * HDBSSBR_EL2/HDBSSPROD_EL2 are per-CPU registers binding the hardware
++ * dirty-state buffer to the running vCPU; they are normally programmed
++ * by kvm_arch_vcpu_load().  KVM_REQ_RELOAD_STAGE2 can turn HDBSS on in
++ * VTCR_EL2 while the vCPU is mid-KVM_RUN, without an intervening
++ * vcpu_load(): reload them there as well, before the new VTCR_EL2 is
++ * written, or the hardware records dirty-state updates through
++ * whatever stale buffer address the registers still hold.
++ *
++ * Must be called with interrupts disabled, before the matching VTCR
++ * load.  VHE-only like the feature itself: hdbss_pg is only set when
++ * the hardware (and thus VHE) is present, so on anything else this is
++ * a no-op.
++ */
++void kvm_vcpu_load_hdbss(struct kvm_vcpu *vcpu)
++{
++	if (!vcpu->arch.hdbss.hdbss_pg)
++		return;
++
++	write_sysreg_s(vcpu->arch.hdbss.hdbssbr_el2, SYS_HDBSSBR_EL2);
++	write_sysreg_s(vcpu->arch.hdbss.hdbssprod_el2, SYS_HDBSSPROD_EL2);
++	isb();
++}
++
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ {
+ 	int idx, curr_idx;
+-- 
+2.43.0
+
