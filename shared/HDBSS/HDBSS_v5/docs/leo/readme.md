@@ -80,6 +80,16 @@ Leo 系列全部待沟通问题的中文分析（看懂后自行翻译成英文�
 - 第二部分（10 项新问题 N1-N10）：wrprotect 并发原语降级、硬件竞态静默化假设、vcpu_has_nv 粒度、always-on 设计、嵌套 bit51 短期处置、v2 边界协作、RELOAD 顺序文档化、性能数据、SMMU S2 共享前瞻、selftests——统一模板（问题/证据/影响/建议/拟问）
 - 附录 A：英文邮件原稿（翻译时复用措辞）
 
+### 回复leo-dbm-rfc.md —— 对外发送定稿（9/17）
+
+三封可直接粘贴的英文邮件 + 可选跟帖 + 发送/发系列前清单（取代附录 A 邮件一，定稿邮件二）：
+
+- 邮件 B（先发，回 Oliver + 问 Leo）：下周 HDBSS v5 随系列合并发布（dirty ring / dirty bitmap 两标脏场景已适配）；请求 p1-4 pickup + SoB、p5 改造为 derived dirty mode；性能数据分工（Leo 测 HAFDBS 形态，我们出 HDBSS 腿 + VGA 形态）
+- 邮件 A（回 Leo 9/16 14:25）：同样未找到 bit51 RES0 条文（不抢答，等 Marc）；提议 NV 联合读先 revert 回 S2AP[1]-only（= 0001 已做，可移交 hunk）
+- 邮件 C（随系列发，PATCH 2/5 线程）：技术细节 review 终版（#1-#5/N1/N2+N7/N9/N10），增量 = 衔接 B 的开头 + N2+N7 段补 0014 实证（RELOAD 只重载翻译寄存器、HDBSS buffer 寄存器陈旧丢脏）
+- 邮件 D（可选，回 Leo 9/17）：pKVM 跟帖素材（HDBSSBR/HDBSSPROD EL2-only、hyp 侧管道、PROT_RW 补 DIRTY 后编码 pKVM 中性）
+- §5 不发清单（bit51 条文出处让 Marc 回、N3/N4 暂停或归我们等）；§6 发送前工程清单（0014 squash 进 0007、清 Co-Authored-By、cover letter 重生成、复验）与性能数据兑现排期
+
 ## 相关材料（不在本文件夹）
 
 - `docs/dbm_with_leo.md`：三态模型、编码/解码器、PERMS 掩码、wrprotect、HAFDBS 生命周期的逐函数分析（系列主链）
