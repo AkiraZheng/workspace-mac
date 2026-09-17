@@ -7,6 +7,9 @@
 > PATCH 5/5 线程:认领性能数据 + 问 pKVM),此后无人回复。旧稿(附录 A 邮件一/二)未发;
 > 本文的 B 取代旧邮件一,C 在旧邮件二基础上定稿。
 > **发送人署名**:Tian Zheng \<zhengtian10@huawei.com\>(下文邮件落款统一 Tian)。
+> **spec 核查(2026-09-17,kunpeng MCP / DDI 0487 M.b 全文)**:邮件 A 首段升级为第一手
+> 核实——四处定位均无 "HD=0 时 bit51 为 RES0" 明文;并新增 D8.4.2.1 Table D8-76
+> (stage 2 写权限只由 S2AP 决定)作为 NV revert 的直接条文依据。详见 §2 核查记录。
 
 ## 0. 发送计划总览
 
@@ -134,12 +137,29 @@ walk_nested_s2_pgd() 联合读把 L1 只读页读成可写 = 内存损坏)连番
 9/16 14:25([`aqqY1QiB0ZBAQkwc`](https://lore.kernel.org/linux-arm-kernel/aqqY1QiB0ZBAQkwc@LeoBrasDK/))
 承认在 Arm ARM M.cc 里找不到 "HD=0 时 bit51 为 RES0" 的条文(Table D8-53 只讲
 位分配),请 Marc 给出处。
-我们的立场:**条文出处确实没找到,和 Leo 一样在等 Marc 的指针;但 NV 部分不需要
-等架构答案**——KVM 对 L1 可见的 ID_AA64MMFR1_EL1.HAFDBS 限为 AF-only,bit51 对
+我们的立场:**条文出处已于 9/17 用 DDI 0487 M.b 第一手核查(四处定位均无,见下
+核查记录),继续等 Marc 的指针;但 NV 部分不需要等架构答案**——KVM 对 L1 可见的 ID_AA64MMFR1_EL1.HAFDBS 限为 AF-only,bit51 对
 L1 无架构含义,诚实 L1 拿它当软件元数据就会被联合读误判可写。NV 今天没有 HAFDBS
 模拟,这段 hunk 直接 revert 回只读 S2AP[1],等模拟系列落地再回来(并 gate 在
 L1 的 effective VTCR_EL2.HD 上)。**这正是我们 0001 已做的事**(不携带 nested.c
 hunk,cover letter 已声明),可顺手移交给 Leo。
+
+**spec 核查记录(2026-09-17,kunpeng MCP,DDI 0487 M.b 全文;PDF 页号 = 印刷页号)**:
+
+| 位置 | 页码 | 关键内容 | "HD=0 时 bit51 RES0" 明文 |
+|---|---|---|---|
+| Stage 2 descriptor 字段表(Leo 的 M.cc "Table D8-53" 对应物) | D8-7735/7736 | bit[51]: **DBM**(Direct)/ **PIIndex[1]**(Indirect);bit[7]: S2AP[1]/Dirty 同款二选一 | 无 |
+| D8.4.2.1.1 Stage 2 data accesses using Direct permissions | D8-7757 | **Table D8-76:S2AP[1:0] 定读写权限**(00 无/01 RO/10 WO/11 RW);INTJRL:HD=1 时硬件可置 S2AP[1] | 无 |
+| D8.5.2.1 Hardware management of the dirty state(RXZFQH/RBRFGY/IMHJZP/IDLNSK) | D8-777x | 所有规则以 "dirty state hardware update **enabled**" 为前提 | 无 |
+| VTCR_EL2.HD 字段描述(D24.2.223) | D24-10139 | 只有 HA 依赖("HA=0 时 HD behaves as 0") | 无 |
+
+- **Table D8-76 为关键新发现**(Leo/Marc 均未引):stage 2 写权限只由 S2AP 决定,
+  DBM 不是权限位;WC 在 HD=1 时可写靠 RTYCNM 例外("HW 脏管理使能时对 WC 描述符的
+  写不产生 Permission fault"),不是 DBM 授予写。同时支持两方:Leo 的行为表
+  (WC→RO 的机理是 S2AP[1]=0)成立;Marc 的软件 walker 论点(读 DBM 为可写 = 错)
+  得到比 R_XZFQH 更直接的依据。
+- caveat:核查基于 **M.b**;Leo 查的是 M.cc(表号体系不同,M.b 中上述 Stage 2 表
+  不叫 "D8-53")。若 Marc 引的是更新修订版的条文,此处未覆盖。
 
 **头信息**:
 
@@ -162,12 +182,19 @@ On Wed, Sep 16, 2026 at 02:25:41PM +0100, Leonardo Bras wrote:
 
 Hi Leo,
 
-I'm afraid I can't find that either: no explicit "bit 51 is RES0 when
-VTCR_EL2.HD == 0" statement that I could locate — Table D8-53 only
-describes the bit allocation, and D8.5.2 doesn't seem to say anything
-about its behavior under HD=0. Looking forward to Marc's pointer.
+I'm afraid I can't find that either: I checked the Stage 2 descriptor
+field table, D8.4.2.1, D8.5.2, and the VTCR_EL2.HD field description —
+none of them says bit 51 is RES0 when VTCR_EL2.HD == 0; the descriptor
+table only picks between DBM and PIIndex[1] based on Indirect
+permissions. Looking forward to Marc's pointer.
 
-That said, I don't think the NV side needs to wait for that answer.
+For what it's worth, D8.4.2.1 already settles the permission side of
+the NV discussion: stage 2 write permission is determined by S2AP
+alone (Table D8-76 in the M.b release), so a software walker reading
+DBM as writability is wrong regardless of HD — which is the
+walk_nested_s2_pgd() issue in disguise.
+
+Either way, the NV side does not need to wait for that answer.
 KVM limits the L1-visible ID_AA64MMFR1_EL1.HAFDBS to AF-only, so bit 51
 has no architectural meaning to L1, and an L1 using it as software
 metadata would have its read-only pages misread as writable by the
@@ -190,11 +217,16 @@ Tian
 
 **中文要点**:
 
-1. 第一段:我也找不到条文(同 Leo 的困惑),等 Marc 的指针——**不抢答架构问题**。
-2. 第二段:NV 部分不必等答案。三个论据链:HAFDBS 对 L1 限 AF-only → bit51 对 L1
+1. 第一段(**已升级为第一手核实**):四个位置(Stage 2 descriptor 字段表 /
+   D8.4.2.1 / D8.5.2 / VTCR_EL2.HD 字段描述)都查过,均无 "HD=0 时 bit51 RES0"
+   明文——只陈述已核实的事实,**不抢答 RES0 出处**(等 Marc 指针)。
+2. 第二段(新增,建设性输入):D8.4.2.1 Table D8-76——stage 2 写权限只由 S2AP
+   决定,DBM 不是权限位 → 软件 walker 读 DBM 为可写在任何 HD 值下都是错的,正是
+   walk_nested_s2_pgd() 的问题本身——revert 提议的最直接条文依据。
+3. 第三段:NV 部分不必等答案。论据链:HAFDBS 对 L1 限 AF-only → bit51 对 L1
    无架构含义 → 联合读会把"L1 拿 bit51 当软件元数据的只读页"误判可写
    (= Marc 说的内存损坏)。NV 无 HAFDBS 模拟 → 先 revert,只看 S2AP[1]。
-3. 第三段:回来条件(嵌套 HAFDBS 模拟落地 + gate 在 L1 的 effective
+4. 第四段:回来条件(嵌套 HAFDBS 模拟落地 + gate 在 L1 的 effective
    VTCR_EL2.HD);我们 0001 已这么做,愿意移交 hunk。
 
 **与 leo_review_reply_draft.md N5 处置的关系**:N5 原判定"闭环不再发"指
@@ -388,7 +420,7 @@ Tian
 
 | 话头 | 为什么不接 |
 |---|---|
-| bit51 RES0 条文出处(Leo 9/16 14:25 问 Marc,R_XZFQH/R_BRFGY/I_MHJZP) | 让 Marc 回。我们未在 ARM ARM 核实到该条文;已定案的只有 HD↔HA 的 D24.2.223(邮件 C 已用),不是这条。邮件 A 只说"我也没找到",不给答案 |
+| bit51 RES0 条文出处(Leo 9/16 14:25 问 Marc,R_XZFQH/R_BRFGY/I_MHJZP) | 让 Marc 回。已在 DDI 0487 M.b 四处定位核查(§2 核查记录:D8-7735/7736、D8-7757、D8-777x、D24-10139),均无该明文;邮件 A 陈述已核实事实并引 D8.4.2.1 Table D8-76,但不替 Marc 下结论(M.b ≠ M.cc,修订版条文未覆盖) |
 | "HD=0 时 DBM 能否当软件编码位"(patch 1 always-set-DBM 的架构合法性) | Leo/Marc 之间未决;Oliver 已引 stage-1 先例。我们没有增量论据,不带立场 |
 | vcpu_has_nv 粒度(N3) | 暂停等 v2:Oliver 已指出 NV gate 本身不该存在(canonical S2 可独立用 HAFDBS),Leo 9/17 已提议改名 kvm_has_nv();v2 若删 gate,问题消失 |
 | HAFDBS always-on vs opt-in(N4) | 归我们设计:合并后由 0011 事件驱动状态机承担,不是问 Leo 的问题 |
