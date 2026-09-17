@@ -7,18 +7,18 @@
 > PATCH 5/5 线程:认领性能数据 + 问 pKVM),此后无人回复。旧稿(附录 A 邮件一/二)未发;
 > 本文的 B 取代旧邮件一,C 在旧邮件二基础上定稿。
 > **发送人署名**:Tian Zheng \<zhengtian10@huawei.com\>(下文邮件落款统一 Tian)。
-> **spec 核查(2026-09-17,kunpeng MCP / DDI 0487 M.b 全文)**:邮件 A 首段升级为第一手
-> 核实——四处定位均无 "HD=0 时 bit51 为 RES0" 明文。**邮件 A 定稿 v2**(更简洁
-> 谦逊:期待 pointer → KVM 已限 L1 AF-only[nested.c:1781 锚点,commit d5bbb76f4474
-> 为 Oliver 亲手封顶] → 保险起见先 revert → 等真实支持再回来);**v1 完整论证版
-> 保留备选**(含 D8-76 段)。详见 §2 核查记录。
+> **spec 核查(2026-09-17,kunpeng MCP / DDI 0487 M.b 全文)**:四处定位均无 "HD=0 时
+> bit51 为 RES0" 明文(记录见 §2)。**邮件 A 定稿 v2 = 实际发送版**(直击要害:条文
+> 问题让 Marc → KVM 已限 L1 AF-only[nested.c:1781 锚点,commit d5bbb76f4474 为
+> Oliver 亲手封顶] → 坦承了解有限、保险起见先 revert → 等真实支持再回来);
+> **v1 完整论证版保留备选**(含 D8-76 段)。详见 §2 核查记录。
 
 ## 0. 发送计划总览
 
 | 序 | 邮件 | 回复哪封(In-Reply-To) | 收件人 | 一句话内容 | 时机 |
 |---|---|---|---|---|---|
 | 1 | **B 合并通告** | Leo 9/16 12:22 [`aqp73SxO78o7LJTs`](https://lore.kernel.org/linux-arm-kernel/aqp73SxO78o7LJTs@LeoBrasDK/) | Oliver + Leo | 下周 HDBSS v5 随系列合并发布(dirty ring + bitmap 已适配);请求 SoB/pickup;性能分工 | **先发**(回应 maintainer 点名) |
-| 2 | **A NV revert 提议** | Leo 9/16 14:25 [`aqqY1QiB0ZBAQkwc`](https://lore.kernel.org/linux-arm-kernel/aqqY1QiB0ZBAQkwc@LeoBrasDK/) | Leo(cc Marc/Oliver) | 同样没找到 RES0 条文;NV 联合读先 revert 回 S2AP[1]-only | 与 B 同日 |
+| 2 | **A NV revert 提议** | Leo 9/16 14:25 [`aqqY1QiB0ZBAQkwc`](https://lore.kernel.org/linux-arm-kernel/aqqY1QiB0ZBAQkwc@LeoBrasDK/) | Leo(cc Marc/Oliver) | 条文问题让 Marc;KVM 已限 L1 AF-only → NV 联合读先 revert 回 S2AP[1]-only | 与 B 同日 |
 | 3 | **C 技术细节 review** | Leo 9/15 18:33 [`aqmBY_v74r4GMttY`](https://lore.kernel.org/linux-arm-kernel/aqmBY_v74r4GMttY@LeoBrasDK/)(PATCH 2/5 线程) | Leo(cc Oliver/Marc) | #1–#5 / N1 / N2+N7 / N9 / N10 + 0014 实证 | 随系列或前一天 |
 | 4 | D(可选)pKVM 跟帖 | Leo 9/17 14:40 [`aqvt2gnlBZeNsaf4`](https://lore.kernel.org/linux-arm-kernel/aqvt2gnlBZeNsaf4@LeoBrasDK/) | Leo(cc Oliver) | HDBSS 寄存器 EL2-only / hyp 管道;编码本身 pKVM 中性 | 任意 |
 
@@ -180,10 +180,11 @@ hunk,cover letter 已声明),可顺手移交给 Leo。
 - 语义链(正文措辞已收敛,论据留档):L1 被告知"你的 S2 脏状态永无硬件更新"
   → bit 51 对 L1 无硬件语义 → L1 无理由预期硬件消费它,当软件元数据也无约束
   → L0 联合读误判可写。
-- **v2 相对 v1 的删减**:正文移除 D8.4.2.1 Table D8-76 段(不替 Leo/Marc 裁决
-  架构之争)与"内存损坏"渲染;新增 AF-only 代码锚点。**v1 全文保留在下方正文区
-  备选**——若 v2 发出后讨论继续,可升级为 v1 的论证火力(Table D8-76 论据也
-  保留在上方记录中)。
+- **v2 相对 v1 的删减**:正文移除"我也找不到条文"整段(改为半句 "I'll leave
+  the citation question to Marc",核查细节不进正文)、D8.4.2.1 Table D8-76 段
+  (不替 Leo/Marc 裁决架构之争)与"内存损坏"渲染;新增 AF-only 代码锚点。
+  **v1 全文保留在下方正文区备选**——若 v2 发出后讨论继续,可升级为 v1 的
+  论证火力(Table D8-76 论据也保留在上方记录中)。
 
 **头信息**:
 
@@ -196,7 +197,7 @@ In-Reply-To: <aqqY1QiB0ZBAQkwc@LeoBrasDK>
 
 **挂靠邮件**(lore):[aqqY1QiB0ZBAQkwc@LeoBrasDK](https://lore.kernel.org/linux-arm-kernel/aqqY1QiB0ZBAQkwc@LeoBrasDK/)
 
-**正文 v2(定稿,待发)**:
+**正文 v2(定稿——实际发送版)**:
 
 ```
 On Wed, Sep 16, 2026 at 02:25:41PM +0100, Leonardo Bras wrote:
@@ -204,19 +205,15 @@ On Wed, Sep 16, 2026 at 02:25:41PM +0100, Leonardo Bras wrote:
 > Could you please share that with me so I can improve and maybe avoid being 
 > a inconvenience in the future?
 
-Hi Leo,
+Hi Leo, Marc,
 
-I'm afraid I can't find that either — I went through the Stage 2
-descriptor field table, D8.4.2.1, D8.5.2 and the VTCR_EL2.HD field
-description, and none of them states it. Looking forward to Marc's
-pointer.
-
-On the NV side, KVM itself already limits the L1-visible
-ID_AA64MMFR1_EL1.HAFDBS to AF-only (limit_nv_id_reg() in
-arch/arm64/kvm/nested.c), so bit 51 has no hardware meaning to L1. I
-must admit my understanding of nested virtualization is limited as
-well, so to stay on the safe side I'd just revert this hunk for now
-and keep reading writability from S2AP[1] alone:
+I'll leave the citation question to Marc. On the NV side, KVM itself
+already limits the L1-visible ID_AA64MMFR1_EL1.HAFDBS to AF-only
+(limit_nv_id_reg() in arch/arm64/kvm/nested.c), so bit 51 has no
+hardware meaning to L1. I must admit my understanding of nested
+virtualization is limited as well, so to stay on the safe side I'd
+just revert this hunk for now and keep reading writability from
+S2AP[1] alone:
 
 	out->writable = desc & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
 
@@ -275,17 +272,17 @@ Thanks,
 Tian
 ```
 
-**中文要点**(v2 为定稿;v1 完整版保留于上,差异见内核核查记录末条):
+**中文要点**(v2 为定稿——实际发送版;v1 完整版保留于上,差异见内核核查记录末条):
 
-1. 第一段:同样找不到条文(四处已核,一句话带过),期待 Marc 的 pointer——
-   **不抢答架构出处**。
-2. 第二段:KVM 代码本身就已把 L1 可见 HAFDBS 限为 AF-only(带 nested.c 锚点)
+1. 开场半句:"I'll leave the citation question to Marc."——明示不抢答条文
+   出处(四处核查已做、结果与页码留档 §2 核查记录,正文不展开),直击要害。
+2. 第一段:KVM 代码本身就已把 L1 可见 HAFDBS 限为 AF-only(带 nested.c 锚点)
    → bit 51 对 L1 无硬件语义;顺势坦承"我对 NV 的了解也有限",**保险起见**
    先 revert,只读 S2AP[1]。谦逊版措辞:不渲染"内存损坏"场景(那是 Marc 的
    定性,不必替他重复),也不展开软件元数据误读论据链。
-3. 第三段:回来条件一句话——等嵌套 HAFDBS 真实支持起来再说(gate 在 L1 的
+3. 第二段:回来条件一句话——等嵌套 HAFDBS 真实支持起来再说(gate 在 L1 的
    effective VTCR_EL2.HD 的细节不进正文)。
-4. 第四段:我们 0001 已这么做(drop nested.c hunk + cover letter 声明),
+4. 第三段:我们 0001 已这么做(drop nested.c hunk + cover letter 声明),
    愿意移交 hunk。
 
 **与 leo_review_reply_draft.md N5 处置的关系**:N5 原判定"闭环不再发"指
