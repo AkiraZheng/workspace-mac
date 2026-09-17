@@ -1,6 +1,6 @@
 # 回复 Leo DBM RFC:发送稿定案(2026-09-17)
 
-> **定位**:对外发送的动作稿。三封可直接粘贴的英文邮件(B/A/C)+ 一个可选跟帖(D)
+> **定位**:对外发送的动作稿。四封可直接粘贴的英文邮件(B/A/C/E)+ 一个可选跟帖(D)
 > + 发送/发系列前清单。深度分析不在此重复,权威依据是
 > [leo_review_reply_draft.md](leo_review_reply_draft.md)(§0.5 maintainer 对账、§0.6 一页总览)。
 > **线程状态(对账至 9/17)**:最后一封是 Leo 9/17 14:40(`<aqvt2gnlBZeNsaf4@LeoBrasDK>`,
@@ -19,12 +19,15 @@
 |---|---|---|---|---|---|
 | 1 | **B 合并通告** | Leo 9/16 12:22 [`aqp73SxO78o7LJTs`](https://lore.kernel.org/linux-arm-kernel/aqp73SxO78o7LJTs@LeoBrasDK/) | Oliver + Leo | 下周 HDBSS v5 随系列合并发布(dirty ring + bitmap 已适配);请求 SoB/pickup;性能分工 | **先发**(回应 maintainer 点名) |
 | 2 | **A NV revert 提议** | Leo 9/16 14:25 [`aqqY1QiB0ZBAQkwc`](https://lore.kernel.org/linux-arm-kernel/aqqY1QiB0ZBAQkwc@LeoBrasDK/) | Leo(cc Marc/Oliver) | 条文问题让 Marc;KVM 已限 L1 AF-only → NV 联合读先 revert 回 S2AP[1]-only | 与 B 同日 |
-| 3 | **C 技术细节 review** | Leo 9/15 18:33 [`aqmBY_v74r4GMttY`](https://lore.kernel.org/linux-arm-kernel/aqmBY_v74r4GMttY@LeoBrasDK/)(PATCH 2/5 线程) | Leo(cc Oliver/Marc) | #1–#5 / N1 / N2+N7 / N9 / N10 + 0014 实证 | 随系列或前一天 |
-| 4 | D(可选)pKVM 跟帖 | Leo 9/17 14:40 [`aqvt2gnlBZeNsaf4`](https://lore.kernel.org/linux-arm-kernel/aqvt2gnlBZeNsaf4@LeoBrasDK/) | Leo(cc Oliver) | HDBSS 寄存器 EL2-only / hyp 管道;编码本身 pKVM 中性 | 任意 |
+| 3 | **E HD\|HA + derived mode** | Leo patch 5 原邮件 [`20260901171558.2674031-6`](https://lore.kernel.org/linux-arm-kernel/20260901171558.2674031-6-leo.bras@arm.com/)(PATCH 5/5 线程) | Leo(cc Oliver/Marc) | HD 单设 = 架构空操作(D24.2.223 引文);kvm_set_hafdbs + HDBSS 双钩子 → 单一 derived mode(HA 按构造成对、VMID flush、race 消失) | B 后或同日,C 之前 |
+| 4 | **C 技术细节 review** | Leo 9/15 18:33 [`aqmBY_v74r4GMttY`](https://lore.kernel.org/linux-arm-kernel/aqmBY_v74r4GMttY@LeoBrasDK/)(PATCH 2/5 线程) | Leo(cc Oliver/Marc) | 拆账+收割 / 静态判断 / N1 / N2+N7 / N9 / N10 + 0014 实证(HD\|HA、TLBI、推导式 HD 已移邮件 E) | 随系列或前一天 |
+| 5 | D(可选)pKVM 跟帖 | Leo 9/17 14:40 [`aqvt2gnlBZeNsaf4`](https://lore.kernel.org/linux-arm-kernel/aqvt2gnlBZeNsaf4@LeoBrasDK/) | Leo(cc Oliver) | HDBSS 寄存器 EL2-only / hyp 管道;编码本身 pKVM 中性 | 任意 |
 
-**顺序理由**:B 先回答 Oliver 的 combined-series 点名(唯一 maintainer 行动项,也是 A/C
-的语境);A 直接响应 Leo 的求助并给出我们已做的修复;C 承载 B 里提到的
-"details in my reply on patch 2",须在系列定稿后发(内容引用了 0014 实证)。
+**顺序理由**:B 先回答 Oliver 的 combined-series 点名(唯一 maintainer 行动项,也是
+A/C/E 的语境);A 直接响应 Leo 的求助并给出我们已做的修复;E 在 B 后或同日,把
+patch-5 的 VTCR flip(HD|HA、TLBI、derived mode)在 patch 5 线程讲透;C 承载 B 里
+提到的 "details in my reply on patch 2",聚焦 patch 2/3/4 与静态判断,须在系列定稿
+后发(内容引用了 0014 实证)。
 
 **公共 Cc 列表**(各邮件沿用线程原样,去掉自己):
 
@@ -121,11 +124,11 @@ Tian
 - **SoB 礼仪**:按内核惯例,pickup 他人 patch 保留原 SoB、追加自己的 SoB 即可
   (我们 0001–0004 已是双 SoB + `[zhengtian: ...]` 注记 + Link)。即使 Leo 不回,
   合并也成立;但他在场,问一句更稳,也给他在"v2 自含"与"并入 HDBSS"之间选边。
-- **"next week" 是硬承诺**:发出即倒计时,§6 工程清单必须在下周前完成。
+- **"next week" 是硬承诺**:发出即倒计时,§7 工程清单必须在下周前完成。
 - 第三段顺带把 N8(性能)的分工当众定下来,呼应 Oliver 的
   "not expecting the performance gains to justify the behavior change"——
   我们补的正是他要看的数据(HDBSS 这个 meaningful user)。
-- 不提 bit51/RES0、不提 vcpu_has_nv:那是 Leo/Marc 的架构讨论(见 §5)。
+- 不提 bit51/RES0、不提 vcpu_has_nv:那是 Leo/Marc 的架构讨论(见 §6)。
 
 ---
 
@@ -290,22 +293,23 @@ Tian
 我们有现成修复的顺水推舟:确认困惑 + 提出短期动作 + 移交已验证的 hunk,
 三者都是增量信息。注意范围:只谈 NV 这一个 hunk 的 revert,**不**对
 "HD=0 时 DBM 能否当软件编码位"(patch 1 全局 always-set-DBM)表态——那是
-Leo/Marc 之间未决的架构讨论,Oliver 已引 stage-1 先例,见 §5。
+Leo/Marc 之间未决的架构讨论,Oliver 已引 stage-1 先例,见 §6。
 
 ---
 
 ## 3. 邮件 C:回 Leo——技术细节 review(随系列发)
 
-**与旧稿的关系**:`leo_review_reply_draft.md` 附录 A 邮件二的**终版**,两处增量:
+**与旧稿的关系**:`leo_review_reply_draft.md` 附录 A 邮件二的**终版**,三处变更:
 
 1. 开头改为衔接邮件 B("下周发系列"的通告),替代原来的
    "We've had this series under our HDBSS tree for a while";
 2. Minor 第二条(RELOAD 顺序注释)追加 **0014 实证**:RELOAD 只重载 stage-2
    翻译寄存器,HDBSSBR/HDBSSPROD_EL2 跨 mid-run 使能陈旧、脏状态静默丢失——
-   "RELOAD 管什么不管什么"需要文档化的最强新证据。
+   "RELOAD 管什么不管什么"需要文档化的最强新证据;
+3. **HD|HA(#2)、TLBI(#3)、推导式 HD(#5)三段移至邮件 E**(PATCH 5/5 线程,
+   VTCR flip 的完整论述归 E),本邮件聚焦 patch 2/3/4 与静态判断。
 
-其余段落与旧稿一致(内容依据:leo_review_reply_draft.md 第一、二部分,
-对应 §0.6 一页总览 #1–#5 / N1 / N2+N7 / N9 / N10)。
+其余段落与旧稿一致(内容依据:leo_review_reply_draft.md 第一、二部分)。
 
 **头信息**:
 
@@ -349,22 +353,6 @@ fault side; the account still needs closing on the way out —
 zap_present_folio_ptes() does folio_mark_dirty() on pte_dirty(), and
 the S2 unmap/wp walkers want the same treatment for S2AP_W/DBM.
 
-On the VTCR flip: HD alone is architecturally a no-op. The VTCR_EL2.HD
-field description reads "When the Effective value of VTCR_EL2.HA is 0,
-this field behaves as 0 for all purposes other than a direct read of
-the value of this bit" — so as it stands, patch 5 never enables
-stage-2 dirty management at all. HA has to come along regardless:
-FEAT_HDBSS requires VTCR_EL2.{HDBSS,HA,HD} = {1,1,1} (D8.5.2.3,
-ITMYVQ).
-
-Also on the flip: cpu_enable_hw_dbm() pairs it with isb() +
-local_flush_tlb_all(). The enable-logging direction happens to be
-covered by the subsequent wp+flush, but that ordering is implicit, and
-the disable-logging direction keeps faulting through stale RO
-translations page by page. A kvm_flush_remote_tlbs() in
-kvm_set_hafdbs() — or at least a comment on the caller's TLBI
-responsibility — would make both directions robust.
-
 kvm_s2_fault_compute_prot() gates WC on the static
 kvm_supports_hafdbs(), which stays true once HD is flipped off. A
 single logging memslot does that: QEMU keeps LOG_DIRTY_PAGES on the
@@ -373,11 +361,6 @@ common non-migrating case, not an edge. Every new read fault then
 installs WC, which is RO under HD=0 — one extra fault per page,
 indefinitely. Reading vtcr & VTCR_EL2_HD instead keeps the
 optimization honest.
-
-On the setup_vcpu vs set_hafdbs race: rather than adding slots_lock to
-kvm_setup_vcpu(), making HD a derived value (capability &&
-!nr_memslots_dirty_logging, recomputed on each event) gets rid of the
-RMW window entirely, with no lock ordering to audit.
 
 Minor:
 
@@ -412,8 +395,8 @@ Tian
 ```
 
 **内容对照**(段落 → leo_review_reply_draft.md 条目):拆账+收割 → #1;
-HD|HA → #2;TLBI → #3;静态判断 → #4;推导式 HD → #5;walker → N1;
-RELOAD 顺序 + 0014 → N2+N7;SMMU → N9;selftests → N10。
+静态判断 → #4;walker → N1;RELOAD 顺序 + 0014 → N2+N7;SMMU → N9;
+selftests → N10。HD|HA(#2)、TLBI(#3)、推导式 HD(#5)已移邮件 E(§5)。
 
 ---
 
@@ -472,7 +455,114 @@ Tian
 
 ---
 
-## 5. 明确不发 / 不接的话头(及理由)
+## 5. 邮件 E:回 Leo——HD|HA 空操作与 derived mode 替换
+
+**背景**:HD 不带 HA 是我们自查问题(#2,spec 已定案:VTCR_EL2.HD 字段描述
+D24.2.223 明文 "HA=0 时 HD behaves as 0"),kvm_set_hafdbs() 是 Leo patch 5 的
+代码;patch-5 线程此前只有 Oliver 的 perf/VHE/NV review,VTCR flip 无人碰。
+本邮件直击要害:HD 单设 = 架构空操作 → 合并系列里 kvm_set_hafdbs() + 我们原
+HDBSS enable/disable 双钩子 → 单一 derived mode(= 0011 的实际内容)。
+
+**与 B/C 的关系**:B 已在高阶预告("rework patch 5 into a derived hardware dirty
+mode"),E 给 patch-5 线程的技术细节;**E 发出后,C 已删去 HD|HA(#2)、TLBI(#3)、
+推导式 HD(#5)三段**(VTCR flip 的完整论述归 E,避免两处重复)。
+
+**头信息**:
+
+```
+To: Leonardo Bras <leo.bras@arm.com>
+Cc: Oliver Upton <oupton@kernel.org>, Marc Zyngier <maz@kernel.org>, <§0 公共 Cc 列表>
+Subject: Re: [RFC PATCH 5/5] KVM: arm64: Enable HAFDBS for guests not on migration
+In-Reply-To: <20260901171558.2674031-6-leo.bras@arm.com>
+```
+
+**挂靠邮件**(lore):[20260901171558.2674031-6-leo.bras@arm.com](https://lore.kernel.org/linux-arm-kernel/20260901171558.2674031-6-leo.bras@arm.com/)
+—— Leo patch 5 原邮件(直接回复 patch 本体,与 Oliver 的 review 同一线程结构)。
+
+**正文**:
+
+```
+On Tue, Sep 01, 2026 at 06:15:56PM +0100, Leonardo Bras wrote:
+> +static void kvm_set_hafdbs(struct kvm *kvm, bool set)
+> +{
+> +	/* Check if no action required */
+> +	if (!!(kvm->arch.mmu.vtcr & VTCR_EL2_HD) == set)
+> +		return;
+> +
+> +	if (set)
+> +		kvm->arch.mmu.vtcr |= VTCR_EL2_HD;
+> +	else
+> +		kvm->arch.mmu.vtcr &= ~VTCR_EL2_HD;
+> +
+> +	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
+> +}
+
+Hi Leo,
+
+HD alone is architecturally a no-op. The VTCR_EL2.HD field description
+reads "When the Effective value of VTCR_EL2.HA is 0, this field
+behaves as 0 for all purposes other than a direct read of the value
+of this bit", so as it stands patch 5 never enables stage-2 dirty
+management at all — HA has to come along. FEAT_HDBSS requires
+VTCR_EL2.{HDBSS,HA,HD} to be {1,1,1} anyway (D8.5.2.3, ITMYVQ), which
+is worth settling before the two series meet.
+
+That is also how I'd like to handle it in the combined series: I'm
+replacing both kvm_set_hafdbs() and our earlier HDBSS enable/disable
+hooks with a single derived mode, a pure function of the static
+capabilities and the number of logging memslots — recomputed on every
+event, so there is no RMW window to race and no lock ordering to
+audit:
+
+	/*
+	 *   logging && HDBSS-capable  ->  HDBSS  (HD|HA|HDBSS)
+	 *   logging, no HDBSS         ->  off
+	 *   !logging, HAFDBS-capable  ->  HAFDBS (HD|HA)
+	 */
+	void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
+	{
+		bool logging = atomic_read(&kvm->nr_memslots_dirty_logging) != 0;
+		unsigned long target;
+
+		if (logging && kvm_supports_hdbss(kvm))
+			target = VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS;
+		else if (logging || !kvm_supports_hafdbs(kvm))
+			target = 0;
+		else
+			target = VTCR_EL2_HD | VTCR_EL2_HA;
+		...
+	}
+
+HA is always set alongside HD by construction, so the no-op issue
+goes away with the rework. The mode switch also flushes the VMID:
+cpu_enable_hw_dbm() pairs its HD flip with local_flush_tlb_all(), and
+while the enable-logging direction happens to be covered by the
+subsequent wp+flush, that ordering is implicit — the disable-logging
+direction would otherwise keep faulting through stale read-only
+translations page by page.
+
+Happy to hand any of this over if you'd rather keep it in your v2.
+
+Thanks,
+Tian
+```
+
+**中文要点**:
+
+1. 第一段:HD 单设 = 架构空操作(D24.2.223 引文逐字);后果 = patch 5 的优化
+   整体归零,HA 必须成对;ITMYVQ({HDBSS,HA,HD} = {1,1,1})把 HAFDBS 与
+   HDBSS 两个系列拴在一起——"worth settling before the two series meet"。
+2. 第二段:合并系列的动作:kvm_set_hafdbs() + 我们原 HDBSS 双钩子 → 单一
+   derived mode;纯函数、事件重算 → **race(#5)按构造消失**;三行状态表 +
+   **真实 target 计算**(不是空壳,Leo 能直接看到机制)。
+3. 第三段:HA 按构造成对(no-op 问题随 rework 消失)+ **VMID flush(#3 自 C
+   移入)**:cpu_enable_hw_dbm 先例;开方向靠后续 wp+flush 兜底是隐式顺序,
+   关方向否则逐页白付 fault——flush 已是 0011 rework 的一部分。
+4. 结尾:任何部分可移交 Leo 的 v2(呼应 B 的分工表态)。
+
+---
+
+## 6. 明确不发 / 不接的话头(及理由)
 
 | 话头 | 为什么不接 |
 |---|---|
@@ -485,9 +575,9 @@ Tian
 
 ---
 
-## 6. 发送与发系列前清单(下周前必须完成)
+## 7. 发送与发系列前清单(下周前必须完成)
 
-### 6.1 工程动作(发系列硬前置)
+### 7.1 工程动作(发系列硬前置)
 
 | # | 动作 | 说明 |
 |---|---|---|
@@ -497,13 +587,14 @@ Tian
 | 4 | **复验** | 改动后 patch 跑 checkpatch;干净 worktree `git am` 全系列;编译检查点(0007/0011/HEAD) |
 | 5 | **文档同步** | readme.md "验证状态"段更新;发送后将 leo_review_reply_draft.md §0.6 表外跟踪标记 B/A/C 已发、附录 A 标注已被本文取代 |
 
-### 6.2 内容动作
+### 7.2 内容动作
 
 - 邮件 B/A 可立即发(不依赖系列定稿;B 的"下周"承诺开始计时);
+- 邮件 E 在 B 之后或同日发(patch 5 线程,不依赖系列定稿);
 - 邮件 C 引用 0014 实证,**必须在 0014 折入完成后发**,建议随系列当天或前一天;
 - 邮件 D 自主决定(见 §4 发送判断)。
 
-### 6.3 性能数据认领的兑现(B 发出后即为承诺)
+### 7.3 性能数据认领的兑现(B 发出后即为承诺)
 
 | 数据组 | 形态 | 说明 |
 |---|---|---|
