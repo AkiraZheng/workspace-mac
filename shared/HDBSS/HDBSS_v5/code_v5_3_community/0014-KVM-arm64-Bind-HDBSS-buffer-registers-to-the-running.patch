@@ -1,0 +1,120 @@
+From df4620f0f5e85f3cd33952ce0a7cd7f3f71ed458 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Thu, 17 Sep 2026 08:33:17 +0800
+Subject: [PATCH] KVM: arm64: Bind HDBSS buffer registers to the running vCPU
+
+HDBSS is enabled by flipping VTCR_EL2.HDBSS (kvm_arch_update_hw_dirty_mode())
+and issuing KVM_REQ_RELOAD_STAGE2, whose handler reloads VTCR/VTTBR through
+__load_stage2(). HDBSSBR_EL2/HDBSSPROD_EL2 are per-CPU registers binding
+the hardware dirty-state buffer to the running vCPU, but __load_hdbss()
+skipped programming them while HDBSS was disabled -- so a vCPU that was
+mid-KVM_RUN when dirty logging started re-entered the guest with HDBSS
+active but a stale buffer address: the reset value after a cold boot, or
+the freed (and possibly reused) buffer page of a vCPU from a previous VM
+on this host.
+
+Hardware dirty-state updates are silent writable-clean to writable-dirty
+promotions: the MMU writes the dirtied IPA to HDBSSBR_EL2.BADDR +
+HDBSSPROD_EL2.INDEX * 8 without any fault, so the entries landed in
+unrelated physical memory while kvm_flush_hdbss_buffer() read the vCPU's
+own software page -- the real entries were lost forever, and with them
+any chance of the pages being write-protected again. Everything written
+after the migration bulk snapshot was silently lost and the destination
+VM ran on stale memory.
+
+Fix it in the loader itself rather than at each VTCR-flipping site:
+__load_hdbss() now programs the registers whenever the vCPU owns a
+buffer (hdbss_pg), regardless of HDBSS enablement. Since kvm_arch_vcpu_load()
+runs on every KVM_RUN entry and every sched-in, the registers always hold
+the running vCPU's buffer by the time the guest can execute -- including
+the moment KVM_REQ_RELOAD_STAGE2 turns HDBSS on mid-KVM_RUN, which
+therefore needs no special handling. The registers are plain storage
+while the feature is off, and this is off the hot path. Save the
+producer index in kvm_vcpu_put_vhe() under the same ownership condition,
+so the software copy stays live across VTCR_EL2.HDBSS epochs instead of
+freezing with a stale index from a previous one.
+
+Also zero the HDBSS buffer pages at allocation, so a stale
+HDBSSPROD_EL2.INDEX can only ever observe invalid entries instead of
+pushing leftover page contents into the dirty ring as GFNs.
+
+This manifests with 4K stage-2 mappings plus the dirty ring (eager
+write-protect leaves level-3 PTEs writable-clean, and the dirty-ring
+QEMU path does not enable KVM_DIRTY_LOG_INITIALLY_SET); the dirty-bitmap
+path skips the eager write-protect and huge pages fault in software
+before any writable-clean page exists. The equivalent fix on the
+code_v5_2_tested branch (d52cdc8ea269: program the registers in the
+RELOAD handler) was validated empirically: the crash no longer
+reproduces.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/dirty_bit.c      |  8 +++++++-
+ arch/arm64/kvm/hyp/vhe/switch.c | 22 +++++++++++++++++++---
+ 2 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 923f9301ca99..205b5f7a2805 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -35,7 +35,13 @@ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu)
+ 	buddy_order = get_order(size);
+ 	sz_encoded = ilog2(size) - 12;
+ 
+-	hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT, buddy_order);
++	/*
++	 * The hardware fills this buffer based on HDBSSPROD_EL2.INDEX and
++	 * the flush reads as many entries: zero it so a stale index can
++	 * only ever observe invalid entries (bit 0 clear) instead of
++	 * pushing leftover page contents into the dirty ring as GFNs.
++	 */
++	hdbss_pg = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO, buddy_order);
+ 	if (!hdbss_pg)
+ 		return -ENOMEM;
+ 
+diff --git a/arch/arm64/kvm/hyp/vhe/switch.c b/arch/arm64/kvm/hyp/vhe/switch.c
+index c575ee1e0c8b..e4dfe439740a 100644
+--- a/arch/arm64/kvm/hyp/vhe/switch.c
++++ b/arch/arm64/kvm/hyp/vhe/switch.c
+@@ -220,9 +220,19 @@ static void __vcpu_put_deactivate_traps(struct kvm_vcpu *vcpu)
+ 	local_irq_restore(flags);
+ }
+ 
++/*
++ * Program the buffer registers whenever the vCPU owns a buffer,
++ * regardless of whether HDBSS is currently enabled: the registers are
++ * plain storage while the feature is off, and keeping them bound to
++ * the running vCPU across VTCR_EL2.HDBSS transitions means any path
++ * that flips the VTCR bits (KVM_REQ_RELOAD_STAGE2) finds them already
++ * pointing at the right buffer -- stale cross-VM addresses, or the
++ * reset value after a cold boot, can never be observed with HDBSS
++ * active.
++ */
+ static void __load_hdbss(struct kvm_vcpu *vcpu)
+ {
+-	if (!vcpu_hdbss_enabled(vcpu))
++	if (!vcpu->arch.hdbss.hdbss_pg)
+ 		return;
+ 
+ 	write_sysreg_s(vcpu->arch.hdbss.hdbssbr_el2, SYS_HDBSSBR_EL2);
+@@ -243,8 +253,14 @@ void kvm_vcpu_load_vhe(struct kvm_vcpu *vcpu)
+ 
+ void kvm_vcpu_put_vhe(struct kvm_vcpu *vcpu)
+ {
+-	/* The producer index is per-CPU state, reprogrammed on next load. */
+-	if (vcpu_hdbss_enabled(vcpu))
++	/*
++	 * The producer index is per-CPU state, reprogrammed on next load.
++	 * Save it symmetrically with __load_hdbss(): both test buffer
++	 * ownership, not HDBSS enablement, so the software copy stays
++	 * live across VTCR_EL2.HDBSS transitions instead of freezing
++	 * with a stale index from a previous epoch.
++	 */
++	if (vcpu->arch.hdbss.hdbss_pg)
+ 		vcpu->arch.hdbss.hdbssprod_el2 = read_sysreg_s(SYS_HDBSSPROD_EL2);
+ 
+ 	__vcpu_put_deactivate_traps(vcpu);
+-- 
+2.43.0
+
