@@ -75,6 +75,7 @@ Leo 系列在无 HDBSS 机器上的完整生命周期验证（四阶段状态机
 Leo 系列全部待沟通问题的中文分析（看懂后自行翻译成英文回复 lkml 线程）：
 
 - §0 总览表：15 项问题 + sashiko 其余条目对账，来源/回应/处置三列标注（sashiko 重复项显式标记）
+- §0.5 maintainer 意见对账（9/16）+ §0.6 一页总览表（9/17）："问题 patch/代码 → 问题所在 → 解决方法"三列对照表，已吸收 9/16–17 增量邮件（Leo 同意 combined series、Oliver 定性 micro-optimization、Leo 认领性能测试/问 pKVM）与 code_v5_3_community 的 0014 修复
 - 第一部分（5 项，Leo 已回应）：folio 两种脏账（sashiko 5 连问完整复盘，含 Leo 逐条回应与对错评价）、HD 缺 HA、TLBI、静态判断（VGA 悬崖）、vtcr 竞态——每条带我们的修复 commit 与拟问 Leo 的一句话
 - 第二部分（10 项新问题 N1-N10）：wrprotect 并发原语降级、硬件竞态静默化假设、vcpu_has_nv 粒度、always-on 设计、嵌套 bit51 短期处置、v2 边界协作、RELOAD 顺序文档化、性能数据、SMMU S2 共享前瞻、selftests——统一模板（问题/证据/影响/建议/拟问）
 - 附录 A：英文邮件原稿（翻译时复用措辞）

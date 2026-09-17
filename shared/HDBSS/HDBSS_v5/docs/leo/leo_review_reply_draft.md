@@ -9,6 +9,9 @@
 > **maintainer 对账（2026-09-16 新增）**：Marc（9/12–13）与 Oliver（9/15）的 review 已并入
 > 考量——N5 被 maintainer 定性闭环（不再发）、N6 升级为合并行动项、N3 暂停；仍值得发回
 > Leo 的问题清单见 §0.5，英文精简稿（maintainer 风格）见附录 A。
+> **一页总览（2026-09-17 新增）**：§0.6 汇总"问题 patch/代码 → 问题所在 → 解决方法"对照表，
+> 已吸收 9/16–17 增量邮件（Leo 当众同意 combined series、Oliver 定性 micro-optimization、
+> Leo 认领性能测试并公开问 pKVM）与 code_v5_3_community 新增的 0014 修复。
 
 ## 0. 总览表
 
@@ -81,6 +84,45 @@ Marc（9/12–13）与 Oliver（9/15）的 review 落地后，本清单按"是�
   performance numbers?"——我们在**回 Oliver 的邮件**中认领数据产出
   （headless server 形态受益、desktop 形态被 VGA 悬崖拖累，两态都测），
   不再作为问 Leo 的问题。
+
+## 0.6 一页总览表：问题 patch/代码 → 问题所在 → 解决方法（2026-09-17 对账）
+
+> patch 号指 `code_v5_3_community/`（Leo 原系列 p1–p5 对应我们的 0001–0004 + 0011；
+> F1–F4/R1/harvest 六个 fixup 已全部折入，原始 commit 号见第一、二部分正文）。
+> 状态图例：**[已修]** = 已折入社区系列；**[待问]** = 随邮件二发 Leo；
+> **[闭环/转移/暂停/归我们]** = 见 §0.5，不再单独发。
+
+| # | 问题 patch 与问题代码 | 问题所在 | 解决方法 |
+|---|---|---|---|
+| 1 | p2 `kvm_s2_fault_map()`：`bool dirty = prot & KVM_PGTABLE_PROT_DIRTY` 一个变量同时门控 `kvm_release_faultin_page()`（folio 账）和 `mark_page_dirty_in_slot()`（bitmap 账） | 两本精度要求相反的账被一个门控。folio 账必须**投机**——WC 映射可被硬件免 exit 写脏，fault 时就得标（`kvm_release_faultin_page` 现有注释即此合同，x86 靠同一条活着）；bitmap 账必须**精确**——读 fault 的干净页进位图 = 预拷贝白运。丢数据链条：读 fault 建 WC → release clean → 硬件免锁升 WD → 回收判干净直接丢页 → swap 回旧数据，**静默数据损坏** | **[已修]** F2 拆账折入 **0002**：folio 改用 `prot & PROT_W`（投机），bitmap 保持 DIRTY（精确）；收割端 **0005**（harvest）：wp 清位前 / unmap 拆映射前把 S2AP_W 折算回 folio（对齐 stage-1 `zap_present_folio_ptes()` 样板）。fault 端 + 收割端合起来才闭环 |
+| 2 | p5 `kvm_set_hafdbs()`：`vtcr |= VTCR_EL2_HD`，不带 HA | **架构性空操作**（不是风险，是不工作）：VTCR_EL2.HD 字段描述（DDI 0487 M.b D24.2.223）明文 "HA=0 时 HD behaves as 0"——合规硬件上 stage-2 硬件脏管理根本没开启，patch 5 收益整体归零。佐证：SMMU 驱动同场景永远成对开（arm-smmu-v3.c:1676）、内核 stage-1 先 HA 后 HD、HDBSS 要求 {HDBSS,HA,HD} 全 1（ITMYVQ, D8.5.2.3） | **[已修]** F1 折入 **0011**：`kvm_arch_update_hw_dirty_mode()` 的 target 恒为 `HD\|HA`（HAFDBS 腿）或 `HD\|HA\|HDBSS`（HDBSS 腿），成对设置；附带收益：mmu-notifier 老化页的 AF fault exit 消失 |
+| 3 | p5 翻 HD 后只发 KVM_REQ_RELOAD_STAGE2，无 VMID TLBI | VTCR 属可被 TLB/context cache 缓存的翻译体系寄存器。开 logging 方向靠后续 wp 的 `kvm_flush_remote_tlbs_memslot()` 兜底——顺序依赖**隐式**且零注释；关 logging 方向（HD 回 1）旧 TLB 缓存 WC 页的 RO 翻译，每页再付一次 fault 才回免 fault 世外桃源，收益打折 | **[已修]** F3 折入 **0011**：模式翻转后 `kvm_flush_remote_tlbs(kvm)`（inner-shareable 广播，单 CPU 执行即可），对齐 stage-1 `cpu_enable_hw_dbm()` 翻 HD 配 `isb()+local_flush_tlb_all()` 的先例 |
+| 4 | p5 `kvm_s2_fault_compute_prot()`：用**静态** `kvm_supports_hafdbs(kvm)` 决定读 fault 是否建 WC | 单 memslot 开 logging 即全局关 HD，静态判断却仍为 true → 非 logging slot 的**新**读 fault 仍建 WC → HD=0 下 WC=RO → 每页一 fault 无限持续（不止存量页）。QEMU std VGA 对 VRAM slot **常年** LOG_DIRTY_PAGES：带显示的桌面 VM 全中，"优化非迁移 VM"反而让最常见的非迁移 VM 全体退化 | **[已修]** F4 折入 **0011**：新增 `kvm_hw_dirty_enabled()`（读动态 `vtcr & VTCR_EL2_HD`）替换静态判断；竞态良性（最坏一页多 fault 或多标一次 folio） |
+| 5 | p5 `kvm_setup_vcpu()`（持 config_lock）与 `kvm_set_hafdbs()`（持 slots_lock）对 `kvm->arch.mmu.vtcr` 交错无锁 RMW | vCPU 创建与开 logging 并发时 HD 可能错误留在 1 → 硬件静默置脏绕过软件标脏 → **迁移丢脏页**。Leo 认了加 slots_lock 方向但未验证死锁 | **[已修]** R1 折入 **0011**：HD 改纯推导量（`cap && nr_memslots_dirty_logging == 0`，三态 OFF/HAFDBS/HDBSS），每次事件重算——RMW 覆盖窗口直接消失，不用审计锁序；顺带统一 HDBSS enable/disable 双钩子 |
+| N1 | p3 `stage2_wrprotect_walker()`：裸 `WRITE_ONCE(*ctx->ptep, new)` | 旧路径（`stage2_try_set_pte`）对 SHARED walk 走 `cmpxchg + EAGAIN` 重试；专属 walker 静默丢掉该保护，API 契约收紧为 exclusive-only 却零注释。今天唯一调用方持 mmu 写锁所以安全，但将来 read lock + SHARED 语境调用（如 HDBSS drain 后批量重武装）就是丢失更新竞态 | **[待问]** 恢复 cmpxchg+EAGAIN 或函数头注释声明 exclusive-only 契约（我们 0003 原样 pickup 未改）；随邮件二发 |
+| N2+N7 | p3/p4：wp 的 WRITE_ONCE 不与硬件 WC→WD 更新竞态，靠 "RELOAD(KVM_REQUEST_WAIT) 返回后无 vCPU 在 guest" 这个静默化假设 | 该顺序是 enable-logging 方向正确性的承重墙，从 KVM_REQUEST_WAIT 语义推导而来，代码零注释；将来重构 `commit_memory_region` 的人不知道顺序不能动，HD=1 语境新增软件清位路径会直接踩雷 | **[待问]** `kvm_arch_commit_memory_region()` 与 walker 两处注释固化；随邮件二发。**新实证（0014）**：HDBSS buffer 寄存器跨 mid-run RELOAD 陈旧导致静默丢脏——RELOAD "只重载 VTCR、不管其它 EL2 状态" 的语义亟需文档化 |
+| N5 | p1 `walk_nested_s2_pgd()`：`out->writable = desc & (DBM \| S2AP_W)` 联合判断 | L1 可见 HAFDBS 被 L0 限为 AF-only（nested.c `ID_REG_LIMIT_FIELD_ENUM`），bit51 对 L1 是 RES0；联合判断把 L1 只读页读成可写 → L2 写穿 L1 设定的只读页（L1→L2 安全边界击穿），L1 自己的脏跟踪失效 | **[闭环不再发]** Marc "Absolutely NOT" 定性 + Oliver 机理（guest 设 VTCR_EL2.HD=0 时 shadow S2 必须把 bit51 按 RES0 处理）+ Marc 9/16 补规则号（R_XZFQH/R_BRFGY/I_MHJZP）；短期修复已折入 **0001**（保留只读 S2AP[1]，cover letter 已声明） |
+| N6 | fixup 边界：我们带 F1–F4/R1/harvest，Leo v2 收不收 | 系列合流方式未定 | **[已确认行动项]** Leo 9/16 12:22 当众同意（"本来就是给 Tian 做 HDBSS 地基的"）；fixup 已全部折入 0002/0005/0011 随 HDBSS v5 发出，剩余动作 = 回 Oliver 邮件一确认 + 发系列 |
+| N8 | p5 无性能数据 | Oliver 已直接问数据并定性 "micro-optimization……不指望性能收益能 justify 行为改变"；Leo 9/17 认领找机器测 | **[转移]** 不再作为问题问 Leo；我们在回 Oliver 的邮件中认领互补数据：desktop/VGA 悬崖形态（F4 修复前后）+ HDBSS 腿——后者才是 Oliver 要的 meaningful user |
+| N3 | p5 `vcpu_has_nv(vcpu)` 重构为 `kvm_vcpu_has_nv(kvm)`（per-KVM 粒度） | vcpu feature 混配 VM 语义变化；Oliver 更指出 NV gate 本身不该存在（canonical S2 可独立用 HAFDBS） | **[暂停]** 等 v2 形态；Leo 9/17 已主动提出改名 `kvm_has_nv()`，gate 删否由 v2 决定 |
+| N4 | p5 对合格 VM 无条件开 HAFDBS，无用户可见开关 | always-on vs opt-in 的设计取舍 | **[归我们]** 合并后由 0011 的事件驱动状态机承担（HDBSS enable/disable），不再问 Leo |
+| N9 | （前瞻）S2 与 SMMU 共享落地后：WC 页（S2AP[1]=0、DBM=1）对无 HTTU-dirty 的 SMMU（IDR0.HTTU<2，存量大量）是 RO | 设备 DMA 写直接失败且无 CPU 那种 relax 兜底；SVA 先例（CD.TCR.HA\|HD 成对开）说明共享表必须把对方拉进 DBM 契约 | **[讨论]** 前瞻提醒随邮件二发：`kvm_supports_hafdbs()` 预留 "无直通设备或 SMMU dbm_capable" gate；详析 dbm_blindspots_and_risks.md §5 |
+| N10 | 全系列零 selftests | 三态编码、状态机翻转、CLEAR 竞态均可测（ptdump D/C 列、wrprotect round-trip、HD 翻转、nr_dirty 观察） | **[讨论]** 提出可贡献三态用例，随邮件二发 |
+| 新 | （我们自己的 0007 领域）`__load_hdbss()` 仅在 `vcpu_hdbss_enabled()` 时编程 HDBSSBR/HDBSSPROD_EL2 | vCPU 在 mid-KVM_RUN 时开 dirty logging → RELOAD 只重载 VTCR → HDBSS 已激活但 buffer 寄存器是陈旧地址（冷启动复位值 / 前一 VM 已释放复用的页）→ 硬件把脏 IPA 写进无关物理内存 → 快照后写入全部静默丢失，目的 VM 跑在旧内存上 | **[已修]** **0014**：`__load_hdbss()` 改按 buffer 所有权（`hdbss_pg`）编程寄存器（与使能态解耦，vcpu_load 每次 KVM_RUN/sched-in 都执行）；`kvm_vcpu_put_vhe()` 对称保存 prod index；分配加 `__GFP_ZERO`。等价修复在 code_v5_2_tested（d52cdc8ea269）已实测验证 |
+
+### 表外跟踪（2026-09-16～17 线程增量，不属于 patch 问题）
+
+- **Leo 公开问 Oliver：pKVM 下 HAFDBS 是否 make sense（9/17，未答）**——我们有素材可回：
+  pKVM 下 host 不拥有 VTCR_EL2（hyp 拥有），HDBSSBR/HDBSSPROD 又是 EL2-only，需要 hyp 侧
+  显式管道（dbm_blindspots_and_risks.md §4）；我们系列已显式排除 pKVM。可作简短跟帖或
+  邮件一 P.S.。
+- **Leo 公开问 Marc：bit51 在 HD=0 时 RES0 的条文出处（9/16 14:25，未答）**——Marc 已给
+  规则号（R_XZFQH/R_BRFGY/I_MHJZP），让 Marc 回；我们未在 ARM ARM 核实到该条文前不抢答
+  （我们已定案的是 HD↔HA 那条 D24.2.223，不是这条）。
+- **发系列前动作**：① 折入 0014（squash 进 0007 或独立 fix），清理其
+  `Co-Authored-By: Claude` 行（社区提交规范），重生成 cover letter（14 个 patch）；
+  ② 按上表更新附录 A 两封邮件稿：邮件一改为"确认 + 通告"稿（Leo 已同意，无需再问），
+  性能段改为与 Leo 分工；邮件二补 0014 实证。
 
 ---
 
