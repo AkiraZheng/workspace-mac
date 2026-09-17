@@ -8,10 +8,10 @@
 > 本文的 B 取代旧邮件一,C 在旧邮件二基础上定稿。
 > **发送人署名**:Tian Zheng \<zhengtian10@huawei.com\>(下文邮件落款统一 Tian)。
 > **spec 核查(2026-09-17,kunpeng MCP / DDI 0487 M.b 全文)**:邮件 A 首段升级为第一手
-> 核实——四处定位均无 "HD=0 时 bit51 为 RES0" 明文。**邮件 A 已按 v2 定稿**(更简洁
+> 核实——四处定位均无 "HD=0 时 bit51 为 RES0" 明文。**邮件 A 定稿 v2**(更简洁
 > 谦逊:期待 pointer → KVM 已限 L1 AF-only[nested.c:1781 锚点,commit d5bbb76f4474
-> 为 Oliver 亲手封顶] → 保险起见先 revert → 等真实支持再回来);D8.4.2.1 Table
-> D8-76 移出正文留作弹药。详见 §2 核查记录。
+> 为 Oliver 亲手封顶] → 保险起见先 revert → 等真实支持再回来);**v1 完整论证版
+> 保留备选**(含 D8-76 段)。详见 §2 核查记录。
 
 ## 0. 发送计划总览
 
@@ -181,8 +181,9 @@ hunk,cover letter 已声明),可顺手移交给 Leo。
   → bit 51 对 L1 无硬件语义 → L1 无理由预期硬件消费它,当软件元数据也无约束
   → L0 联合读误判可写。
 - **v2 相对 v1 的删减**:正文移除 D8.4.2.1 Table D8-76 段(不替 Leo/Marc 裁决
-  架构之争,论据保留在上方记录中作跟进弹药)与"内存损坏"渲染;新增 AF-only
-  代码锚点。
+  架构之争)与"内存损坏"渲染;新增 AF-only 代码锚点。**v1 全文保留在下方正文区
+  备选**——若 v2 发出后讨论继续,可升级为 v1 的论证火力(Table D8-76 论据也
+  保留在上方记录中)。
 
 **头信息**:
 
@@ -195,7 +196,7 @@ In-Reply-To: <aqqY1QiB0ZBAQkwc@LeoBrasDK>
 
 **挂靠邮件**(lore):[aqqY1QiB0ZBAQkwc@LeoBrasDK](https://lore.kernel.org/linux-arm-kernel/aqqY1QiB0ZBAQkwc@LeoBrasDK/)
 
-**正文**:
+**正文 v2(定稿,待发)**:
 
 ```
 On Wed, Sep 16, 2026 at 02:25:41PM +0100, Leonardo Bras wrote:
@@ -230,7 +231,51 @@ Thanks,
 Tian
 ```
 
-**中文要点**(v2,按"更简洁 + 更谦逊"定稿):
+**正文 v1(完整论证版,保留备选——火力更足:含 D8.4.2.1 Table D8-76 段与 Marc 的
+"内存损坏"定性;若 v2 发出后讨论继续,可升级使用)**:
+
+```
+On Wed, Sep 16, 2026 at 02:25:41PM +0100, Leonardo Bras wrote:
+> So I am possibly missing the proper place to look for that information. 
+> Could you please share that with me so I can improve and maybe avoid being 
+> a inconvenience in the future?
+
+Hi Leo,
+
+I'm afraid I can't find that either: I checked the Stage 2 descriptor
+field table, D8.4.2.1, D8.5.2, and the VTCR_EL2.HD field description —
+none of them says bit 51 is RES0 when VTCR_EL2.HD == 0; the descriptor
+table only picks between DBM and PIIndex[1] based on Indirect
+permissions. Looking forward to Marc's pointer.
+
+For what it's worth, D8.4.2.1 already settles the permission side of
+the NV discussion: stage 2 write permission is determined by S2AP
+alone (Table D8-76 in the M.b release), so a software walker reading
+DBM as writability is wrong regardless of HD — which is the
+walk_nested_s2_pgd() issue in disguise.
+
+Either way, the NV side does not need to wait for that answer.
+KVM limits the L1-visible ID_AA64MMFR1_EL1.HAFDBS to AF-only, so bit 51
+has no architectural meaning to L1, and an L1 using it as software
+metadata would have its read-only pages misread as writable by the
+union read in walk_nested_s2_pgd() — the memory corruption Marc
+described. Since NV has no HAFDBS emulation today, I'd suggest simply
+reverting this hunk for now and keep reading writability from S2AP[1]
+alone:
+
+	out->writable = desc & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+
+The union read can come back once nested HAFDBS emulation exists,
+gated on the L1's effective VTCR_EL2.HD. That's what I did when
+picking the series up for HDBSS v5 (patch 1 in our tree drops the
+nested.c hunk and says so in the cover letter) — happy to hand the
+hunk over if you want it for your v2.
+
+Thanks,
+Tian
+```
+
+**中文要点**(v2 为定稿;v1 完整版保留于上,差异见内核核查记录末条):
 
 1. 第一段:同样找不到条文(四处已核,一句话带过),期待 Marc 的 pointer——
    **不抢答架构出处**。
