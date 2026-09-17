@@ -8,8 +8,10 @@
 > 本文的 B 取代旧邮件一,C 在旧邮件二基础上定稿。
 > **发送人署名**:Tian Zheng \<zhengtian10@huawei.com\>(下文邮件落款统一 Tian)。
 > **spec 核查(2026-09-17,kunpeng MCP / DDI 0487 M.b 全文)**:邮件 A 首段升级为第一手
-> 核实——四处定位均无 "HD=0 时 bit51 为 RES0" 明文;并新增 D8.4.2.1 Table D8-76
-> (stage 2 写权限只由 S2AP 决定)作为 NV revert 的直接条文依据。详见 §2 核查记录。
+> 核实——四处定位均无 "HD=0 时 bit51 为 RES0" 明文。**邮件 A 已按 v2 定稿**(更简洁
+> 谦逊:期待 pointer → KVM 已限 L1 AF-only[nested.c:1781 锚点,commit d5bbb76f4474
+> 为 Oliver 亲手封顶] → 保险起见先 revert → 等真实支持再回来);D8.4.2.1 Table
+> D8-76 移出正文留作弹药。详见 §2 核查记录。
 
 ## 0. 发送计划总览
 
@@ -161,6 +163,27 @@ hunk,cover letter 已声明),可顺手移交给 Leo。
 - caveat:核查基于 **M.b**;Leo 查的是 M.cc(表号体系不同,M.b 中上述 Stage 2 表
   不叫 "D8-53")。若 Marc 引的是更新修订版的条文,此处未覆盖。
 
+**内核源码核查(2026-09-17,~/code/linux/linux,与上游 master 同行号)——"KVM 限制 L1 可见 HAFDBS 为 AF-only" 的出处**:
+
+- `arch/arm64/kvm/nested.c:1781`,函数 `limit_nv_id_reg()`(NV guest ID 寄存器
+  净化:"Our emulated CPU doesn't support all the possible features..."):
+  `val = ID_REG_LIMIT_FIELD_ENUM(val, ID_AA64MMFR1_EL1, HAFDBS, AF);`
+- 宏 `ID_REG_LIMIT_FIELD_ENUM`(`sys_regs.h:279`):`min(当前值, AF)`,钳到
+  AF 封顶。
+- 枚举编码(`arch/arm64/tools/sysreg:2239`):`0b0000 NI / 0b0001 AF(仅 AF
+  更新,无脏状态)/ 0b0010 DBM / 0b0011 HAFT / 0b0100 HDBSS`——"AF-only"
+  即枚举名 AF。
+- 出处 commit:**d5bbb76f4474** "KVM: arm64: nv: Expose hardware access flag
+  management to NV guests",作者 **Oliver Upton**,Reviewed-by Marc Zyngier
+  (2025-11-24)——本轮 review 的 maintainer 亲手写的封顶:当时只给 NV guest
+  放开 AF 档,刻意未开 DBM。
+- 语义链(正文措辞已收敛,论据留档):L1 被告知"你的 S2 脏状态永无硬件更新"
+  → bit 51 对 L1 无硬件语义 → L1 无理由预期硬件消费它,当软件元数据也无约束
+  → L0 联合读误判可写。
+- **v2 相对 v1 的删减**:正文移除 D8.4.2.1 Table D8-76 段(不替 Leo/Marc 裁决
+  架构之争,论据保留在上方记录中作跟进弹药)与"内存损坏"渲染;新增 AF-only
+  代码锚点。
+
 **头信息**:
 
 ```
@@ -182,52 +205,43 @@ On Wed, Sep 16, 2026 at 02:25:41PM +0100, Leonardo Bras wrote:
 
 Hi Leo,
 
-I'm afraid I can't find that either: I checked the Stage 2 descriptor
-field table, D8.4.2.1, D8.5.2, and the VTCR_EL2.HD field description —
-none of them says bit 51 is RES0 when VTCR_EL2.HD == 0; the descriptor
-table only picks between DBM and PIIndex[1] based on Indirect
-permissions. Looking forward to Marc's pointer.
+I'm afraid I can't find that either — I went through the Stage 2
+descriptor field table, D8.4.2.1, D8.5.2 and the VTCR_EL2.HD field
+description, and none of them states it. Looking forward to Marc's
+pointer.
 
-For what it's worth, D8.4.2.1 already settles the permission side of
-the NV discussion: stage 2 write permission is determined by S2AP
-alone (Table D8-76 in the M.b release), so a software walker reading
-DBM as writability is wrong regardless of HD — which is the
-walk_nested_s2_pgd() issue in disguise.
-
-Either way, the NV side does not need to wait for that answer.
-KVM limits the L1-visible ID_AA64MMFR1_EL1.HAFDBS to AF-only, so bit 51
-has no architectural meaning to L1, and an L1 using it as software
-metadata would have its read-only pages misread as writable by the
-union read in walk_nested_s2_pgd() — the memory corruption Marc
-described. Since NV has no HAFDBS emulation today, I'd suggest simply
-reverting this hunk for now and keep reading writability from S2AP[1]
-alone:
+On the NV side, KVM itself already limits the L1-visible
+ID_AA64MMFR1_EL1.HAFDBS to AF-only (limit_nv_id_reg() in
+arch/arm64/kvm/nested.c), so bit 51 has no hardware meaning to L1. I
+must admit my understanding of nested virtualization is limited as
+well, so to stay on the safe side I'd just revert this hunk for now
+and keep reading writability from S2AP[1] alone:
 
 	out->writable = desc & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
 
-The union read can come back once nested HAFDBS emulation exists,
-gated on the L1's effective VTCR_EL2.HD. That's what I did when
-picking the series up for HDBSS v5 (patch 1 in our tree drops the
-nested.c hunk and says so in the cover letter) — happy to hand the
-hunk over if you want it for your v2.
+The union read can come back later, once nested HAFDBS is actually
+supported.
+
+That's what I did when picking the series up for HDBSS v5 — patch 1
+drops the nested.c hunk and says so in the cover letter. Happy to
+hand it over if you want it for your v2.
 
 Thanks,
 Tian
 ```
 
-**中文要点**:
+**中文要点**(v2,按"更简洁 + 更谦逊"定稿):
 
-1. 第一段(**已升级为第一手核实**):四个位置(Stage 2 descriptor 字段表 /
-   D8.4.2.1 / D8.5.2 / VTCR_EL2.HD 字段描述)都查过,均无 "HD=0 时 bit51 RES0"
-   明文——只陈述已核实的事实,**不抢答 RES0 出处**(等 Marc 指针)。
-2. 第二段(新增,建设性输入):D8.4.2.1 Table D8-76——stage 2 写权限只由 S2AP
-   决定,DBM 不是权限位 → 软件 walker 读 DBM 为可写在任何 HD 值下都是错的,正是
-   walk_nested_s2_pgd() 的问题本身——revert 提议的最直接条文依据。
-3. 第三段:NV 部分不必等答案。论据链:HAFDBS 对 L1 限 AF-only → bit51 对 L1
-   无架构含义 → 联合读会把"L1 拿 bit51 当软件元数据的只读页"误判可写
-   (= Marc 说的内存损坏)。NV 无 HAFDBS 模拟 → 先 revert,只看 S2AP[1]。
-4. 第四段:回来条件(嵌套 HAFDBS 模拟落地 + gate 在 L1 的 effective
-   VTCR_EL2.HD);我们 0001 已这么做,愿意移交 hunk。
+1. 第一段:同样找不到条文(四处已核,一句话带过),期待 Marc 的 pointer——
+   **不抢答架构出处**。
+2. 第二段:KVM 代码本身就已把 L1 可见 HAFDBS 限为 AF-only(带 nested.c 锚点)
+   → bit 51 对 L1 无硬件语义;顺势坦承"我对 NV 的了解也有限",**保险起见**
+   先 revert,只读 S2AP[1]。谦逊版措辞:不渲染"内存损坏"场景(那是 Marc 的
+   定性,不必替他重复),也不展开软件元数据误读论据链。
+3. 第三段:回来条件一句话——等嵌套 HAFDBS 真实支持起来再说(gate 在 L1 的
+   effective VTCR_EL2.HD 的细节不进正文)。
+4. 第四段:我们 0001 已这么做(drop nested.c hunk + cover letter 声明),
+   愿意移交 hunk。
 
 **与 leo_review_reply_draft.md N5 处置的关系**:N5 原判定"闭环不再发"指
 **不重复报问题**(Marc/Oliver 已定性)。本邮件不是报问题,而是 Leo 主动求助 +
@@ -420,7 +434,7 @@ Tian
 
 | 话头 | 为什么不接 |
 |---|---|
-| bit51 RES0 条文出处(Leo 9/16 14:25 问 Marc,R_XZFQH/R_BRFGY/I_MHJZP) | 让 Marc 回。已在 DDI 0487 M.b 四处定位核查(§2 核查记录:D8-7735/7736、D8-7757、D8-777x、D24-10139),均无该明文;邮件 A 陈述已核实事实并引 D8.4.2.1 Table D8-76,但不替 Marc 下结论(M.b ≠ M.cc,修订版条文未覆盖) |
+| bit51 RES0 条文出处(Leo 9/16 14:25 问 Marc,R_XZFQH/R_BRFGY/I_MHJZP) | 让 Marc 回。已在 DDI 0487 M.b 四处定位核查(§2 核查记录:D8-7735/7736、D8-7757、D8-777x、D24-10139),均无该明文;邮件 A(v2)只陈述已核实事实、不引 D8-76、不替 Marc 下结论(M.b ≠ M.cc,修订版条文未覆盖;D8-76 论据留作跟进弹药) |
 | "HD=0 时 DBM 能否当软件编码位"(patch 1 always-set-DBM 的架构合法性) | Leo/Marc 之间未决;Oliver 已引 stage-1 先例。我们没有增量论据,不带立场 |
 | vcpu_has_nv 粒度(N3) | 暂停等 v2:Oliver 已指出 NV gate 本身不该存在(canonical S2 可独立用 HAFDBS),Leo 9/17 已提议改名 kvm_has_nv();v2 若删 gate,问题消失 |
 | HAFDBS always-on vs opt-in(N4) | 归我们设计:合并后由 0011 事件驱动状态机承担,不是问 Leo 的问题 |
