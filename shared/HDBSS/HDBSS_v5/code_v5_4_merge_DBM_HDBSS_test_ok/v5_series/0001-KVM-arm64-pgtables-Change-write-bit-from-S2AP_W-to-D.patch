@@ -1,0 +1,104 @@
+From 208890ec42d71e64dfafd3d9b2b43232eb63bd9e Mon Sep 17 00:00:00 2001
+From: Leonardo Bras <leo.bras@arm.com>
+Date: Fri, 18 Sep 2026 18:21:27 +0800
+Subject: [PATCH 01/14] KVM: arm64: pgtables: Change write bit from S2AP_W to
+ DBM
+
+As a first step of changing the encoding for the Stage2 PTE descriptor,
+introduce the DBM bit, and adapt every usage of writable to use the DBM bit
+(51) instead of S2AP[1]/Dirty bit (7).
+
+For this step, we convert usages of RW(Dirty) -> WD(DBM|Dirty).
+
+[zhengtian: keep reading writability from S2AP[1] only in
+walk_nested_s2_pgd(). KVM hides HAFDBS.DBM from L1 (its visible
+ID_AA64MMFR1_EL1.HAFDBS is limited to AF-only), so bit 51 is RES0 from
+L1's perspective, and an L1 using it as software metadata would have
+its read-only pages misread as writable by L0. Restore the union
+reading once nested HAFDBS emulation exists.]
+
+Link: https://lore.kernel.org/all/20260901171558.2674031-2-leo.bras@arm.com/
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 3 +++
+ arch/arm64/kvm/hyp/pgtable.c         | 8 +++++---
+ arch/arm64/kvm/ptdump.c              | 4 ++--
+ 3 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 41a8687938eb..37baa86d6fd8 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -93,10 +93,13 @@ typedef u64 kvm_pte_t;
+ 
+ #define KVM_PTE_LEAF_ATTR_HI_S2_XN	GENMASK(54, 53)
+ 
++#define KVM_PTE_LEAF_ATTR_HI_S2_DBM	BIT(51)
++
+ #define KVM_PTE_LEAF_ATTR_HI_S1_GP	BIT(50)
+ 
+ #define KVM_PTE_LEAF_ATTR_S2_PERMS	(KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R | \
+ 					 KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W | \
++					 KVM_PTE_LEAF_ATTR_HI_S2_DBM | \
+ 					 KVM_PTE_LEAF_ATTR_HI_S2_XN)
+ 
+ /* pKVM invalid pte encodings */
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index b74dd5ce1efd..ca49f1bd7c34 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -732,7 +732,8 @@ static int stage2_set_prot_attr(struct kvm_pgtable *pgt, enum kvm_pgtable_prot p
+ 		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+ 
+ 	if (prot & KVM_PGTABLE_PROT_W)
+-		attr |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++		attr |= KVM_PTE_LEAF_ATTR_HI_S2_DBM | KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++
+ 
+ 	if (!kvm_lpa2_is_enabled())
+ 		attr |= FIELD_PREP(KVM_PTE_LEAF_ATTR_LO_S2_SH, sh);
+@@ -753,7 +754,7 @@ enum kvm_pgtable_prot kvm_pgtable_stage2_pte_prot(kvm_pte_t pte)
+ 
+ 	if (pte & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R)
+ 		prot |= KVM_PGTABLE_PROT_R;
+-	if (pte & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W)
++	if (pte & KVM_PTE_LEAF_ATTR_HI_S2_DBM)
+ 		prot |= KVM_PGTABLE_PROT_W;
+ 
+ 	switch (FIELD_GET(KVM_PTE_LEAF_ATTR_HI_S2_XN, pte)) {
+@@ -1288,6 +1289,7 @@ static int stage2_update_leaf_attrs(struct kvm_pgtable *pgt, u64 addr,
+ int kvm_pgtable_stage2_wrprotect(struct kvm_pgtable *pgt, u64 addr, u64 size)
+ {
+ 	return stage2_update_leaf_attrs(pgt, addr, size, 0,
++					KVM_PTE_LEAF_ATTR_HI_S2_DBM |
+ 					KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
+ 					NULL, NULL,
+ 					KVM_PGTABLE_WALK_IGNORE_EAGAIN);
+@@ -1368,7 +1370,7 @@ int kvm_pgtable_stage2_relax_perms(struct kvm_pgtable *pgt, u64 addr,
+ 		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+ 
+ 	if (prot & KVM_PGTABLE_PROT_W)
+-		set |= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++		set |= KVM_PTE_LEAF_ATTR_HI_S2_DBM | KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+ 
+ 	if (prot & KVM_PGTABLE_PROT_X) {
+ 		ret = stage2_set_xn_attr(prot, &xn);
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index 69899797dbad..b0cb8d84a9e9 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -40,8 +40,8 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+ 		.clear	= " ",
+ 	},
+ 	{
+-		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
+-		.val	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
++		.mask	= KVM_PTE_LEAF_ATTR_HI_S2_DBM,
++		.val	= KVM_PTE_LEAF_ATTR_HI_S2_DBM,
+ 		.set	= "W",
+ 		.clear	= " ",
+ 	},
+-- 
+2.43.0
+

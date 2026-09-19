@@ -1,0 +1,65 @@
+From MAILER-DAEMON Fri Sep 18 18:21:30 2026
+From: Tian Zheng <zhengtian10@huawei.com>
+Cc: liuyonglong@huawei.com, tangchengchang@huawei.com, virt@openeuler.org
+Subject: [Virt] [PATCH 04/15] KVM: arm64: Add KVM_REQ_RELOAD_STAGE2
+Date: Fri, 18 Sep 2026 18:21:30 +0800
+Message-ID: <20260918102141.345025-4-zhengtian10@huawei.com>
+In-Reply-To: <20260918102141.345025-1-zhengtian10@huawei.com>
+References: <20260918102141.345025-1-zhengtian10@huawei.com>
+
+From: Leonardo Bras <leo.bras@arm.com>
+
+Add a vcpu request to exit guest, reload Stage2, and then come back to
+guest.
+
+This will be used on future patches that enable S2 HAFDBS and HDBSS, as
+they may need to change VTCR bits for enabling/disabling the feature when
+the vcpus are still running.
+
+Link: https://lore.kernel.org/all/20260901171558.2674031-5-leo.bras@arm.com/
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_host.h | 2 ++
+ arch/arm64/kvm/arm.c              | 8 ++++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
+index 27fe0cd5b2d7..00fe169f239f 100644
+--- a/arch/arm64/include/asm/kvm_host.h
++++ b/arch/arm64/include/asm/kvm_host.h
+@@ -55,6 +55,8 @@
+ #define KVM_REQ_GUEST_HYP_IRQ_PENDING	KVM_ARCH_REQ(9)
+ #define KVM_REQ_MAP_L1_VNCR_EL2		KVM_ARCH_REQ(10)
+ #define KVM_REQ_VGIC_PROCESS_UPDATE	KVM_ARCH_REQ(11)
++#define KVM_REQ_RELOAD_STAGE2 \
++	KVM_ARCH_REQ_FLAGS(12, KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
+ 
+ #define KVM_DIRTY_LOG_MANUAL_CAPS   (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE | \
+ 				     KVM_DIRTY_LOG_INITIALLY_SET)
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 8b080804bc90..1e528d53d093 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1171,6 +1171,14 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
+ 		if (kvm_dirty_ring_check_request(vcpu))
+ 			return 0;
+ 
++		if (kvm_check_request(KVM_REQ_RELOAD_STAGE2, vcpu)) {
++			unsigned long flags;
++
++			local_irq_save(flags);
++			__load_stage2(vcpu->arch.hw_mmu);
++			local_irq_restore(flags);
++		}
++
+ 		check_nested_vcpu_requests(vcpu);
+ 	}
+ 
+-- 
+2.33.0
+
+_______________________________________________
+Virt mailing list -- virt@openeuler.org
+To unsubscribe send an email to virt-leave@openeuler.org
+

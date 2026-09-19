@@ -1,0 +1,65 @@
+From 32683d31003cea34272b54ae93ed500e332ffe51 Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Fri, 18 Sep 2026 18:21:35 +0800
+Subject: [PATCH 09/14] KVM: Add kvm_arch_dirty_ring_size_updated() hook
+
+An architecture that keeps a CPU-side dirty log buffer drained
+into the dirty ring must size that buffer with the ring in mind,
+as the ring reserves room for a full buffer flush. Give
+architectures a chance to react when kvm->dirty_ring_size is set:
+call a new kvm_arch_dirty_ring_size_updated() hook right after
+the size is recorded, with a __weak no-op default so this changes
+nothing for existing architectures.
+
+arm64 will use this to pin its HDBSS buffer size in dirty-ring
+mode.
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ include/linux/kvm_dirty_ring.h | 1 +
+ virt/kvm/dirty_ring.c          | 4 ++++
+ virt/kvm/kvm_main.c            | 1 +
+ 3 files changed, 6 insertions(+)
+
+diff --git a/include/linux/kvm_dirty_ring.h b/include/linux/kvm_dirty_ring.h
+index eb10d87adf7d..c2b922791530 100644
+--- a/include/linux/kvm_dirty_ring.h
++++ b/include/linux/kvm_dirty_ring.h
+@@ -73,6 +73,7 @@ static inline void kvm_dirty_ring_free(struct kvm_dirty_ring *ring)
+ #else /* CONFIG_HAVE_KVM_DIRTY_RING */
+ 
+ int kvm_cpu_dirty_log_size(struct kvm *kvm);
++void kvm_arch_dirty_ring_size_updated(struct kvm *kvm);
+ bool kvm_use_dirty_bitmap(struct kvm *kvm);
+ bool kvm_arch_allow_write_without_running_vcpu(struct kvm *kvm);
+ u32 kvm_dirty_ring_get_rsvd_entries(struct kvm *kvm);
+diff --git a/virt/kvm/dirty_ring.c b/virt/kvm/dirty_ring.c
+index 572b854edf74..784f53c95b54 100644
+--- a/virt/kvm/dirty_ring.c
++++ b/virt/kvm/dirty_ring.c
+@@ -16,6 +16,10 @@ int __weak kvm_cpu_dirty_log_size(struct kvm *kvm)
+ 	return 0;
+ }
+ 
++void __weak kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
++{
++}
++
+ u32 kvm_dirty_ring_get_rsvd_entries(struct kvm *kvm)
+ {
+ 	return KVM_DIRTY_RING_RSVD_ENTRIES + kvm_cpu_dirty_log_size(kvm);
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 65eb26a0520d..7d574fb29a8f 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -4988,6 +4988,7 @@ static int kvm_vm_ioctl_enable_dirty_log_ring(struct kvm *kvm, u32 size)
+ 		r = -EINVAL;
+ 	} else {
+ 		kvm->dirty_ring_size = size;
++		kvm_arch_dirty_ring_size_updated(kvm);
+ 		r = 0;
+ 	}
+ 
+-- 
+2.43.0
+

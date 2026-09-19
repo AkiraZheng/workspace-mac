@@ -1,0 +1,181 @@
+From e96354422064833ca776e2fd70630897cacdbc4b Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 18 Sep 2026 02:20:50 +0800
+Subject: [PATCH 1/4] KVM: arm64: Allow HAFDBS on the canonical stage-2 of
+ nested VMs
+
+kvm_supports_hafdbs() disqualified any VM with nested virtualization
+enabled, so an NV VM never got hardware access/dirty management in any
+state: its dirty tracking was entirely software, and a read fault on
+the canonical stage-2 still paid a second fault on the first write.
+
+The exclusion is unnecessary for the canonical stage-2. Shadow stage-2
+MMUs build their own VTCR through kvm_get_vtcr(), which never carries
+the HD bit, so L2 translations keep their software-managed behaviour
+regardless of what the canonical VTCR does; and a guest hypervisor
+cannot reach for the feature either, since nested.c limits the
+L1-visible ID_AA64MMFR1_EL1.HAFDBS to AF-only and the guest's virtual
+VTCR_EL2.HD is never consumed by the nested walker. Drop the NV gate
+from kvm_supports_hafdbs(), along with the now-unused kvm argument.
+
+With the gate gone, kvm_s2_fault_compute_prot() must stop consulting
+the canonical VTCR when installing into a shadow: a nested read fault
+would otherwise install a writable-clean entry, which under the
+HD-less shadow VTCR behaves as read-only and costs L2 an extra
+permission fault on the first write (and relies on DBM being RES0
+under HD=0). Reshape kvm_hw_dirty_enabled() into a per-MMU predicate
+and query vcpu->arch.hw_mmu, the MMU the entry is actually installed
+into: non-nested behaviour is unchanged (hw_mmu is the canonical MMU),
+L1 runs under hardware management as intended, and shadow installs
+are always writable-dirty, exactly as before the gate removal.
+
+HDBSS keeps its NV exclusion for now: enabling it on the canonical
+stage-2 of a nested VM would record L1 dirtiness into the HDBSS
+buffer while L2 runs against a shadow, and those exit-flush/harvest
+paths are unaudited. Revisit once nested dirty tracking lands.
+
+Also rename kvm_vcpu_has_nv(kvm) to kvm_has_nv(kvm): the predicate is
+per-KVM (the KVM_ARM_VCPU_HAS_EL2 feature is a property of the VM),
+so the "vcpu" in the name was a lie about its argument.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_mmu.h    | 33 ++++++++++++++++++++---------
+ arch/arm64/include/asm/kvm_nested.h |  4 ++--
+ arch/arm64/kvm/mmu.c                | 23 +++++++++++---------
+ 3 files changed, 38 insertions(+), 22 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index c9bc38478f0a..c5b2f45fb1d5 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -390,35 +390,48 @@ static inline bool kvm_supports_cacheable_pfnmap(void)
+ 	       cpus_have_final_cap(ARM64_HAS_CACHE_DIC);
+ }
+ 
+-static inline bool kvm_supports_hafdbs(struct kvm *kvm)
++/*
++ * Whether the hardware can manage the access and dirty state of a
++ * stage-2 (FEAT_HAFDBS). Nested virtualization does not disqualify:
++ * shadow stage-2 MMUs build their own VTCR via kvm_get_vtcr(), which
++ * never carries the HD bit, so L2 translations keep their
++ * software-managed behaviour while the canonical stage-2 runs under
++ * hardware management.
++ */
++static inline bool kvm_supports_hafdbs(void)
+ {
+ 	return IS_ENABLED(CONFIG_ARM64_HW_AFDBM) && has_vhe() &&
+-		!kvm_vcpu_has_nv(kvm) && cpus_have_final_cap(ARM64_HW_DBM);
++		cpus_have_final_cap(ARM64_HW_DBM);
+ }
+ 
+ /*
+  * Whether this VM can use FEAT_HDBSS for hardware dirty tracking:
+  * system support (VHE-only, the buffer registers are EL2-only and are
+- * programmed from host context) and no nested virtualization, whose
+- * shadow stage-2 MMUs do not carry the HDBSS bits.
++ * programmed from host context). Nested virtualization disqualifies for
++ * now: the L2 exit paths would flush and harvest HDBSS entries into
++ * the wrong dirty accounting (shadow stage-2 MMUs do not carry the
++ * HDBSS bits, so only L1 dirtiness would be recorded), and those paths
++ * have not been audited. Revisit once nested dirty tracking lands.
+  */
+ static inline bool kvm_supports_hdbss(struct kvm *kvm)
+ {
+-	return system_supports_hdbss() && !kvm_vcpu_has_nv(kvm);
++	return system_supports_hdbss() && !kvm_has_nv(kvm);
+ }
+ 
+ void kvm_arch_update_hw_dirty_mode(struct kvm *kvm);
+ 
+ /*
+  * Live counterpart of kvm_supports_hafdbs(): reports whether hardware
+- * dirty management is actually enabled for this VM right now. The HD
+- * bit is flipped on/off with dirty logging (and HDBSS), so decisions
+- * that depend on it must observe the dynamic state, not the static
++ * dirty management is enabled for a given stage-2 MMU right now. The
++ * HD bit is flipped on/off with dirty logging (and HDBSS) on the
++ * canonical MMU; shadow (nested) MMUs never carry it, so anything
++ * installed into a shadow is always writable-dirty. Decisions that
++ * depend on it must observe this dynamic state, not the static
+  * capability.
+  */
+-static inline bool kvm_hw_dirty_enabled(struct kvm *kvm)
++static inline bool kvm_hw_dirty_enabled(struct kvm_s2_mmu *mmu)
+ {
+-	return kvm->arch.mmu.vtcr & VTCR_EL2_HD;
++	return mmu->vtcr & VTCR_EL2_HD;
+ }
+ 
+ #ifdef CONFIG_PTDUMP_STAGE2_DEBUGFS
+diff --git a/arch/arm64/include/asm/kvm_nested.h b/arch/arm64/include/asm/kvm_nested.h
+index 9242b5d665af..d54f8fe4674d 100644
+--- a/arch/arm64/include/asm/kvm_nested.h
++++ b/arch/arm64/include/asm/kvm_nested.h
+@@ -7,7 +7,7 @@
+ #include <asm/kvm_emulate.h>
+ #include <asm/kvm_pgtable.h>
+ 
+-static inline bool kvm_vcpu_has_nv(const struct kvm *kvm)
++static inline bool kvm_has_nv(const struct kvm *kvm)
+ {
+ 	return (!__is_defined(__KVM_NVHE_HYPERVISOR__) &&
+ 		cpus_have_final_cap(ARM64_HAS_NESTED_VIRT) &&
+@@ -16,7 +16,7 @@ static inline bool kvm_vcpu_has_nv(const struct kvm *kvm)
+ 
+ static inline bool vcpu_has_nv(const struct kvm_vcpu *vcpu)
+ {
+-	return kvm_vcpu_has_nv(vcpu->kvm);
++	return kvm_has_nv(vcpu->kvm);
+ }
+ 
+ /* Translation helpers from non-VHE EL2 to EL1 */
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 473de0f0b01b..6c67eba2dea4 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2031,19 +2031,22 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
+ 		*prot |= KVM_PGTABLE_PROT_W;
+ 
+ 		/*
+-		 * Check the *live* HD state, not the static capability: HD
+-		 * is turned off for the whole VM as soon as any single
+-		 * memslot starts logging, and QEMU keeps
+-		 * KVM_MEM_LOG_DIRTY_PAGES on the VGA VRAM slot for the
+-		 * entire runtime of a desktop VM. With HD off but the static
+-		 * check still true, every read fault on the non-logged RAM
+-		 * slots would install writable-clean - which is read-only
+-		 * under HD=0 - and pay an extra permission fault per page.
++		 * Check the *live* HD state of the MMU being installed
++		 * into, not the static capability: HD is turned off as
++		 * soon as any single memslot starts logging, and QEMU
++		 * keeps KVM_MEM_LOG_DIRTY_PAGES on the VGA VRAM slot for
++		 * the entire runtime of a desktop VM. With HD off but the
++		 * static check still true, every read fault on the
++		 * non-logged RAM slots would install writable-clean -
++		 * which is read-only under HD=0 - and pay an extra
++		 * permission fault per page. Shadow (nested) MMUs never
++		 * carry HD, so nested installs are always writable-dirty.
+ 		 * A racing flip is benign: at worst one page is mapped
+ 		 * writable-dirty one last time or takes one extra fault.
+ 		 */
+ 		if (s2vi->device ||
+-		    !(memslot_is_logging(s2fd->memslot) || kvm_hw_dirty_enabled(kvm)) ||
++		    !(memslot_is_logging(s2fd->memslot) ||
++		      kvm_hw_dirty_enabled(s2fd->vcpu->arch.hw_mmu)) ||
+ 		    kvm_is_write_fault(s2fd->vcpu))
+ 			*prot |= KVM_PGTABLE_PROT_DIRTY;
+ 	}
+@@ -2667,7 +2670,7 @@ void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
+ 		kvm_info("HDBSS enabled (buffer_size=%u bytes)\n",
+ 			kvm_hdbss_buffer_size(kvm));
+ 	}
+-	else if (logging || !kvm_supports_hafdbs(kvm))
++	else if (logging || !kvm_supports_hafdbs())
+ 		target = 0;
+ 	else
+ 		target = VTCR_EL2_HD | VTCR_EL2_HA;
+-- 
+2.43.0
+

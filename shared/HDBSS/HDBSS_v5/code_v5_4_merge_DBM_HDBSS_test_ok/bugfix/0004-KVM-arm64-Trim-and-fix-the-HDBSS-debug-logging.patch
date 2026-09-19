@@ -1,0 +1,95 @@
+From 0c62e8b8be80ab32b865e8a003f84b8f2e46c009 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sat, 19 Sep 2026 10:42:09 +0800
+Subject: [PATCH 4/4] KVM: arm64: Trim and fix the HDBSS debug logging
+
+The HDBSS logging added in 3613da7b6466 has four problems:
+
+- "HDBSS enabled" was printed while merely computing the target mode,
+  before the cur == target early return, so every vCPU hot-plug and
+  every memslot commit during migration printed an "enabled" line
+  without any transition having happened. Print it only after a real
+  transition into the HDBSS mode is confirmed.
+
+- The per-vCPU buffer alloc/free success messages (two lines per
+  vCPU, 32 for a 16-vCPU VM) are far too chatty for mainline; drop
+  them. The allocation-failure kvm_err() stays, as do the one-shot
+  events (mode transitions, buffer size configuration). Dropping the
+  free message also removes a -Wformat warning: it printed
+  PAGE_SIZE << buddy_order, an unsigned long, with %u.
+
+- A trailing tab after the "HDBSS disabled" printk fails checkpatch.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/dirty_bit.c | 10 +---------
+ arch/arm64/kvm/mmu.c       |  9 +++++----
+ 2 files changed, 6 insertions(+), 13 deletions(-)
+
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index ae5acfc4fd5b..4f11f4d13f54 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -55,9 +55,6 @@ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu)
+ 		.buddy_order = buddy_order,
+ 	};
+ 
+-	kvm_info("VCPU%u HDBSS buffer allocated (size=%u bytes, order=%u)\n",
+-		 vcpu->vcpu_id, size, buddy_order);
+-
+ 	return 0;
+ }
+ 
+@@ -66,11 +63,6 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ 	if (!vcpu->arch.hdbss.hdbss_pg)
+ 		return;
+ 
+-	kvm_info("VCPU%u HDBSS buffer freed (size=%u bytes, order=%u)\n",
+-		 vcpu->vcpu_id,
+-		 PAGE_SIZE << vcpu->arch.hdbss.buddy_order,
+-		 vcpu->arch.hdbss.buddy_order);
+-
+ 	__free_pages(vcpu->arch.hdbss.hdbss_pg, vcpu->arch.hdbss.buddy_order);
+ 
+ 	vcpu->arch.hdbss.hdbss_pg = NULL;
+@@ -180,7 +172,7 @@ void kvm_arm_disable_hdbss_global(struct kvm *kvm)
+ 	kvm->arch.mmu.vtcr &= ~dirty_bits;
+ 
+ 	kvm_info("HDBSS disabled\n");
+-	
++
+ 	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
+ 	kvm_flush_remote_tlbs(kvm);
+ }
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 6c67eba2dea4..ff17e3a52d2f 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2665,11 +2665,8 @@ void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
+ 	unsigned long cur, target;
+ 	bool logging = atomic_read(&kvm->nr_memslots_dirty_logging) != 0;
+ 
+-	if (logging && kvm_supports_hdbss(kvm)) {
++	if (logging && kvm_supports_hdbss(kvm))
+ 		target = VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS;
+-		kvm_info("HDBSS enabled (buffer_size=%u bytes)\n",
+-			kvm_hdbss_buffer_size(kvm));
+-	}
+ 	else if (logging || !kvm_supports_hafdbs())
+ 		target = 0;
+ 	else
+@@ -2679,6 +2676,10 @@ void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
+ 	if (cur == target)
+ 		return;
+ 
++	if (target & VTCR_EL2_HDBSS)
++		kvm_info("HDBSS enabled (buffer_size=%u bytes)\n",
++			 kvm_hdbss_buffer_size(kvm));
++
+ 	kvm->arch.mmu.vtcr = (kvm->arch.mmu.vtcr &
+ 			      ~(VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS)) |
+ 			     target;
+-- 
+2.43.0
+

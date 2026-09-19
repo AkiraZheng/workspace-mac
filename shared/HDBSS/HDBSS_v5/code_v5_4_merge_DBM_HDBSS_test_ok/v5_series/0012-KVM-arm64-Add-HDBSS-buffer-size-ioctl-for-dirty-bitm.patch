@@ -1,0 +1,107 @@
+From 8b2734a950d7595ef04e35484914ea98a18f2f48 Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Fri, 18 Sep 2026 18:21:38 +0800
+Subject: [PATCH 12/14] KVM: arm64: Add HDBSS buffer size ioctl for
+ dirty-bitmap mode
+
+In dirty-bitmap mode, a larger HDBSS buffer lets the guest dirty
+more pages between VM exits, trading memory for fewer buffer
+drains during live migration. The default of one page per vCPU is
+a reasonable starting point, so allow userspace to opt into a
+larger buffer with KVM_CAP_ARM_HDBSS_BUFFER_SIZE.
+
+The size is specified in bytes via KVM_ENABLE_CAP and must be a
+power of two in the range [PAGE_SIZE, SZ_2M]: the upper bound is
+the largest HDBSSBR_EL2.SZ encoding, and the power-of-two
+requirement matches the buddy allocator. The setting must be
+applied before any vCPU is created, as the buffers are allocated
+per vCPU; attempts to change it after vCPUs exist or after it has
+already been set return -EINVAL and -EBUSY respectively.
+
+The capability is rejected in dirty-ring mode, where the buffer
+size is pinned to the default by kvm_arch_dirty_ring_size_updated().
+
+KVM_CHECK_EXTENSION returns the configured size for a specific VM,
+or the maximum supported size (SZ_2M) when queried globally with a
+NULL kvm argument.
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/arm.c     | 34 ++++++++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h |  1 +
+ 2 files changed, 35 insertions(+)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 74e67d37ab6f..ac82ed1bfde4 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -19,6 +19,7 @@
+ #include <linux/kvm.h>
+ #include <linux/kvm_irqfd.h>
+ #include <linux/irqbypass.h>
++#include <linux/log2.h>
+ #include <linux/sched/stat.h>
+ #include <linux/psci.h>
+ #include <trace/events/kvm.h>
+@@ -203,6 +204,31 @@ int kvm_vm_ioctl_enable_cap(struct kvm *kvm,
+ 		r = 0;
+ 		set_bit(KVM_ARCH_FLAG_EXIT_SEA, &kvm->arch.flags);
+ 		break;
++	case KVM_CAP_ARM_HDBSS_BUFFER_SIZE: {
++		u64 size = cap->args[0];
++
++		if (!system_supports_hdbss())
++			break;
++		if (kvm->dirty_ring_size)
++			break;
++		if (size < KVM_ARM_HDBSS_DEFAULT_SIZE ||
++		    size > KVM_ARM_HDBSS_MAX_SIZE)
++			break;
++		if (!is_power_of_2(size))
++			break;
++
++		mutex_lock(&kvm->lock);
++		if (kvm->created_vcpus) {
++			r = -EINVAL;
++		} else if (kvm->arch.hdbss_buffer_size) {
++			r = -EBUSY;
++		} else {
++			kvm->arch.hdbss_buffer_size = size;
++			r = 0;
++		}
++		mutex_unlock(&kvm->lock);
++		break;
++	}
+ 	default:
+ 		break;
+ 	}
+@@ -510,6 +536,14 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+ 		else
+ 			r = KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT;
+ 		break;
++	case KVM_CAP_ARM_HDBSS_BUFFER_SIZE:
++		if (!system_supports_hdbss())
++			r = 0;
++		else if (kvm)
++			r = kvm->arch.hdbss_buffer_size ?: KVM_ARM_HDBSS_DEFAULT_SIZE;
++		else
++			r = KVM_ARM_HDBSS_MAX_SIZE;
++		break;
+ 	case KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES:
+ 		r = kvm_supported_block_sizes();
+ 		break;
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index ac2d77d14963..59eb211494e4 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -999,6 +999,7 @@ struct kvm_enable_cap {
+ #define KVM_CAP_S390_HPAGE_2G 249
+ #define KVM_CAP_PPC_COMPAT_CAPS 250
+ #define KVM_CAP_ARM_PMU_V3_STRICT 251
++#define KVM_CAP_ARM_HDBSS_BUFFER_SIZE 252
+ 
+ struct kvm_irq_routing_irqchip {
+ 	__u32 irqchip;
+-- 
+2.43.0
+

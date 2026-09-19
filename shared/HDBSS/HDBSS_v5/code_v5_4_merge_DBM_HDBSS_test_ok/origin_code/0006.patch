@@ -1,0 +1,106 @@
+From MAILER-DAEMON Fri Sep 18 18:21:32 2026
+From: Tian Zheng <zhengtian10@huawei.com>
+Cc: liuyonglong@huawei.com, tangchengchang@huawei.com, virt@openeuler.org
+Subject: [Virt] [PATCH 06/15] KVM: arm64: Add support for FEAT_HDBSS
+Date: Fri, 18 Sep 2026 18:21:32 +0800
+Message-ID: <20260918102141.345025-6-zhengtian10@huawei.com>
+In-Reply-To: <20260918102141.345025-1-zhengtian10@huawei.com>
+References: <20260918102141.345025-1-zhengtian10@huawei.com>
+
+Armv9.5 introduces the hardware dirty state tracking structure
+(HDBSS), with which hardware updates stage-2 descriptors from
+writable-clean to writable-dirty without a permission fault, and
+records the dirtied IPAs into an in-memory buffer. The rest of this
+series uses HDBSS for hardware-assisted dirty page tracking during
+live migration: instead of write-protecting guest pages and taking
+a fault on every first write, KVM leaves the pages writable-clean
+and drains the buffer on VM exit.
+
+Add CPU capability detection for the feature, advertised through
+ID_AA64MMFR1_EL1.HAFDBS (0b0100). Because the buffer registers
+(HDBSSBR_EL2, HDBSSPROD_EL2) are EL2-only and are programmed
+directly from host context, restrict the capability to VHE systems
+with a custom matches() callback that also checks
+is_kernel_in_hyp_mode(). Also add a system_supports_hdbss() helper,
+which the rest of the series uses to check hardware support.
+
+Suggested-by: Zhou Wang <wangzhou1@hisilicon.com>
+Co-developed-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/cpufeature.h |  5 +++++
+ arch/arm64/kernel/cpufeature.c      | 17 +++++++++++++++++
+ arch/arm64/tools/cpucaps            |  1 +
+ 3 files changed, 23 insertions(+)
+
+diff --git a/arch/arm64/include/asm/cpufeature.h b/arch/arm64/include/asm/cpufeature.h
+index 4f04ad82ea34..0592e6f6b4d7 100644
+--- a/arch/arm64/include/asm/cpufeature.h
++++ b/arch/arm64/include/asm/cpufeature.h
+@@ -856,6 +856,11 @@ static inline bool system_supports_haft(void)
+ 	return cpus_have_final_cap(ARM64_HAFT);
+ }
+ 
++static inline bool system_supports_hdbss(void)
++{
++	return cpus_have_final_cap(ARM64_HAS_HDBSS);
++}
++
+ static __always_inline bool system_supports_mpam(void)
+ {
+ 	return alternative_has_cap_unlikely(ARM64_MPAM);
+diff --git a/arch/arm64/kernel/cpufeature.c b/arch/arm64/kernel/cpufeature.c
+index 32102c3912fa..df401b678860 100644
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@ -2158,6 +2158,16 @@ static bool hvhe_possible(const struct arm64_cpu_capabilities *entry,
+ 	return arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_HVHE);
+ }
+ 
++/*
++ * HDBSS is only usable with VHE: the buffer registers (HDBSSBR_EL2,
++ * HDBSSPROD_EL2) are EL2-only and are programmed directly from host
++ * context, which requires the kernel to run at EL2.
++ */
++static bool has_vhe_hdbss(const struct arm64_cpu_capabilities *entry, int scope)
++{
++	return is_kernel_in_hyp_mode() && has_cpuid_feature(entry, scope);
++}
++
+ bool cpu_supports_bbml3(void)
+ {
+ 	/* CPUs that support BBML3 but dont advertise through ID_AA64MMFR2_EL1 */
+@@ -2816,6 +2826,13 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
+ 		ARM64_CPUID_FIELDS(ID_AA64MMFR1_EL1, HAFDBS, HAFT)
+ 	},
+ #endif
++	{
++		.desc = "Hardware Dirty state tracking structure (HDBSS)",
++		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
++		.capability = ARM64_HAS_HDBSS,
++		.matches = has_vhe_hdbss,
++		ARM64_CPUID_FIELDS(ID_AA64MMFR1_EL1, HAFDBS, HDBSS)
++	},
+ 	{
+ 		.desc = "CRC32 instructions",
+ 		.capability = ARM64_HAS_CRC32,
+diff --git a/arch/arm64/tools/cpucaps b/arch/arm64/tools/cpucaps
+index 2775ba3359cf..8acb3db980c9 100644
+--- a/arch/arm64/tools/cpucaps
++++ b/arch/arm64/tools/cpucaps
+@@ -71,6 +71,7 @@ HAS_VA52
+ HAS_VIRT_HOST_EXTN
+ HAS_WFXT
+ HAS_XNX
++HAS_HDBSS
+ HAFT
+ HW_DBM
+ KVM_HVHE
+-- 
+2.33.0
+
+_______________________________________________
+Virt mailing list -- virt@openeuler.org
+To unsubscribe send an email to virt-leave@openeuler.org
+

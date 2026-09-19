@@ -1,0 +1,59 @@
+From 7dea22048839c4618b6d111937e272a87d5eed6a Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Fri, 18 Sep 2026 02:50:45 +0800
+Subject: [PATCH 2/4] KVM: arm64: Derive the hardware dirty mode only from the
+ first vCPU
+
+kvm_setup_vcpu() calls kvm_arch_update_hw_dirty_mode() on every vCPU
+creation, but the mode is a per-VM property: the software vtcr field
+is shared by all vCPUs and each new vCPU programs the physical
+VTCR_EL2 from it at its first vcpu_load(). The call was only ever
+needed to establish the mode for a VM where nothing else had, i.e.
+before the first memslot update - kvm_arch_commit_memory_region()
+derives the mode on every memslot change and maintains it from then
+on.
+
+Limit the call to the first vCPU (created_vcpus is incremented before
+kvm_arch_vcpu_create() under the same kvm->lock). This also removes
+the recurring vtcr RMW from later creations: that write ran under
+kvm->lock while the memslot-update path writes under slots_lock, and
+a vCPU hot-plug racing a memslot logging change could interleave the
+two RMWs and transiently revert the mode - back to HAFDBS while
+migration expects HDBSS, the silent dirty-loss class. With the guard,
+the remaining exposure is a first-vCPU creation racing a memslot
+update, which cannot happen before the VM has any memslot to migrate.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/arm.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index e053edf8387d..dbc23731a04b 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1767,8 +1767,19 @@ static int kvm_setup_vcpu(struct kvm_vcpu *vcpu)
+ 	 * or off during migration). Being a pure function of the logging
+ 	 * state and the static capabilities, a vCPU created while the VM
+ 	 * is migrating keeps the current mode instead of clobbering it.
++	 *
++	 * Only the first vCPU needs this: with no memslot update having
++	 * happened yet, nothing has turned the mode bits on for a fresh
++	 * VM. Later vCPUs inherit the current mode at their first
++	 * vcpu_load() and the mode is maintained from then on by
++	 * kvm_arch_commit_memory_region(). Skipping them also keeps this
++	 * unlocked vtcr RMW away from the kvm->lock vs slots_lock
++	 * mismatch with a concurrent memslot update: hot-plugging vCPUs
++	 * into a VM that is starting to migrate could otherwise interleave
++	 * the two RMWs and transiently flip the mode back.
+ 	 */
+-	kvm_arch_update_hw_dirty_mode(kvm);
++	if (kvm->created_vcpus == 1)
++		kvm_arch_update_hw_dirty_mode(kvm);
+ 
+ 	return ret;
+ }
+-- 
+2.43.0
+

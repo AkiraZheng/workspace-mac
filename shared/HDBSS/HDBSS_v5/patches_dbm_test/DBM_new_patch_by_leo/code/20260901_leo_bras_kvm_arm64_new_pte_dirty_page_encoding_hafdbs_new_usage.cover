@@ -1,0 +1,60 @@
+Subject: [PATCH RFC 0/5] KVM: arm64: New PTE dirty-page encoding, HAFDBS
+ new usage
+From: Leonardo Bras <leo.bras@arm.com>
+Date: Tue, 01 Sep 2026 18:15:51 +0100
+Message-Id: <20260901171558.2674031-1-leo.bras@arm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+This series have 2 main goals:
+
+1 - Patches #1,#2,#3 : Change the PTE descriptor to use WD/WC/RO encodings
+    making use of the DBM bit, adapting all usages, and
+2 - Patches #4,#5 are an RFC on using HAFDBS on a guest to avoid resetting
+    all PTEs to WC when dirty-logging starts, speeding-up startup.
+
+(1) will also introduce a new walker for cleaning the dirty-bit, which will
+clear the DBM bit if it's a block mapping (hugepage). This is needed as on
+lazy-splitting we need to fault a write so we can do the lazy splitting.
+This is needed for both the next patches, and for HDBSS & HACDBS
+enablement.
+
+On (2), I really just want feedback to understand if it's worth pursuing.
+My main idea is that we can use HAFDBS _outside_ dirty-logging to only mark
+dirty the pages that were actually written to. That is supposed to make it
+faster to transverse the pagetables when we need to clean the dirty-bit, as
+there is potentially less atomic writes to perform. The price paid for that
+is disabling HAFDBS on every vcpu before we can start cleaning the pages,
+done by a (new) vcpu request.
+
+Please let me know of what do you think!
+
+Thanks!
+Leo
+
+Leonardo Bras (5):
+  KVM: arm64: pgtables: Change write bit from S2AP_W to DBM
+  KVM: arm64: Add KVM_PGTABLE_PROT_DIRTY
+  KVM: arm64: Introduce a dedicated walker for stage2 write-protect
+  KVM: arm64: Add KVM_REQ_RELOAD_STAGE2
+  KVM: arm64: Enable HAFDBS for guests not on migration
+
+ arch/arm64/include/asm/kvm_host.h    |  2 ++
+ arch/arm64/include/asm/kvm_mmu.h     |  6 ++++
+ arch/arm64/include/asm/kvm_nested.h  |  9 +++--
+ arch/arm64/include/asm/kvm_pgtable.h | 12 +++++--
+ arch/arm64/kvm/arm.c                 | 15 ++++++++
+ arch/arm64/kvm/hyp/pgtable.c         | 49 +++++++++++++++++++++-----
+ arch/arm64/kvm/mmu.c                 | 51 ++++++++++++++++++++++------
+ arch/arm64/kvm/nested.c              |  4 ++-
+ arch/arm64/kvm/ptdump.c              | 10 ++++--
+ 9 files changed, 130 insertions(+), 28 deletions(-)
+
+
+base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
+-- 
+2.55.0
+
+
+

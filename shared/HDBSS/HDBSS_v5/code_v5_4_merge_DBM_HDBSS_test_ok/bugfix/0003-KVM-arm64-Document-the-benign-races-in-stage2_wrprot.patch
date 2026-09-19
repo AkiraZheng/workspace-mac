@@ -1,0 +1,94 @@
+From 8225880a9f60e1d62576bcfd887cd83310d33709 Mon Sep 17 00:00:00 2001
+From: AkiraZheng <1428384878@qq.com>
+Date: Sat, 19 Sep 2026 09:06:51 +0800
+Subject: [PATCH 3/4] KVM: arm64: Document the benign races in
+ stage2_wrprotect_walker()
+
+The dedicated write-protect walker updates stage-2 entries with a
+plain WRITE_ONCE, concurrent with two hardware updates; neither can
+lose information, but nothing in the code said so.
+
+The access-flag race was already documented in the attr walker this
+one was derived from and the comment was lost in the rewrite: at
+worst an AF update is lost and the next access faults it in again.
+
+The dirty-state race never touches the same entry state: hardware
+only promotes a writable-clean entry (S2AP[1] clear) while this
+walker only writes entries whose old value had S2AP[1] set. The one
+window is the DBM removal on writable-clean blocks, where a promotion
+landing between our read and our write is discarded by the demotion
+back to read-only. That is safe twice over: the promotion recorded an
+HDBSS buffer entry, which preserves the dirty information for the
+migration bitmap, and the folio account is already covered by the
+speculative fault-in dirtying that accompanies every write-permitting
+installation. The next write faults (DBM now clear) and takes the
+software path.
+
+Also state why harvesting the block base PA is sufficient: block
+mappings are backed by a single hugetlbfs/THP folio.
+
+No functional change.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/hyp/pgtable.c | 37 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 32 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 08cfce90396c..9d34f9b596b2 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -1318,17 +1318,44 @@ static int stage2_wrprotect_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 		new &= ~KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+ 
+ 	/*
+-	 * A writable-dirty page is about to lose its dirty state. If
+-	 * hardware promoted it (HAFDBS/HDBSS), the pending buffer entry
+-	 * has not been drained yet and the CLEAR ioctl can race with an
+-	 * unmap that follows; harvest the folio account now so the dirty
+-	 * information survives the transition regardless.
++	 * A writable-dirty entry is about to lose its dirty state.  If
++	 * hardware promoted it (HAFDBS/HDBSS), the pending HDBSS buffer
++	 * entry has not been drained yet and this write-protect can race
++	 * with an unmap that follows; harvest the folio account now so
++	 * the dirty information survives the transition regardless.
++	 *
++	 * A block mapping is backed by a single (hugetlbfs/THP) folio, so
++	 * dirtying the folio containing the block base PA covers the
++	 * whole mapping.
+ 	 */
+ 	if (kvm_pte_valid(ctx->old) && ctx->old != new &&
+ 	    (ctx->old & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W) &&
+ 	    ctx->mm_ops->mark_page_dirty)
+ 		ctx->mm_ops->mark_page_dirty(kvm_pte_to_phys(ctx->old));
+ 
++	/*
++	 * The plain WRITE_ONCE races with two hardware updates while the
++	 * entry is being written; both are benign, but for different
++	 * reasons:
++	 *
++	 * - The access flag.  We might race with the CPU trying to set
++	 *   AF, worst-case the AF update is lost and will be set on the
++	 *   next access instead.
++	 *
++	 * - The dirty state.  Hardware only promotes a writable-clean
++	 *   entry (S2AP[1] clear) to writable-dirty; this walker only
++	 *   writes entries whose old value had S2AP[1] set, so the two
++	 *   never touch the same entry state.  The one window is the DBM
++	 *   removal on blocks, which produces a non-identity write for a
++	 *   writable-clean block: if hardware promotes it after our read
++	 *   but before our write, our write demotes the entry back to
++	 *   read-only and discards the promotion.  That is safe: the
++	 *   promotion already recorded an HDBSS buffer entry, so the
++	 *   dirty information survives, and the folio account is covered
++	 *   by the speculative fault-in dirtying that accompanies every
++	 *   write-permitting installation.  The next write to the entry
++	 *   faults (DBM now clear) and takes the software path.
++	 */
+ 	if (kvm_pte_valid(ctx->old) && ctx->old != new)
+ 		WRITE_ONCE(*ctx->ptep, new);
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,73 @@
+From 5ed7d187c132eff25032a3ab2c207f3a9667670e Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Fri, 18 Sep 2026 18:21:36 +0800
+Subject: [PATCH 10/14] KVM: arm64: Reserve dirty ring space for the HDBSS
+ buffer
+
+The dirty ring reserves room for CPU-side dirty buffers:
+rsvd = KVM_DIRTY_RING_RSVD_ENTRIES + kvm_cpu_dirty_log_size(),
+which the framework subtracts from the ring size to obtain the
+soft_limit - the fill level at which the vCPU exits to userspace
+to have the ring harvested. Wire HDBSS into this scheme by
+reporting the buffer entry count through a new
+kvm_cpu_dirty_log_size() implementation, so a full buffer flush
+always finds room in the ring.
+
+Pin the HDBSS buffer size to PAGE_SIZE in dirty-ring mode, using
+the kvm_arch_dirty_ring_size_updated() hook: the ring-side
+reservation means a larger buffer would only shrink the soft_limit
+and force more frequent userspace drains, so the smallest buffer
+gives the best drain interval. The pin is unconditional - a
+buffer size configured before the ring was enabled is reset to
+the default, and the buffer-size capability is rejected once the
+ring is enabled.
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/arm.c | 13 +++++++++++++
+ arch/arm64/kvm/mmu.c |  8 ++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 8e5af2e3958c..facc53991998 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -215,6 +215,19 @@ static int kvm_arm_default_max_vcpus(void)
+ 	return vgic_present ? kvm_vgic_get_max_vcpus() : KVM_MAX_VCPUS;
+ }
+ 
++/*
++ * A larger buffer takes more reserved room in the ring, so the
++ * ring reports full and forces a userspace drain sooner: the
++ * smallest buffer drains the least often.
++ */
++void kvm_arch_dirty_ring_size_updated(struct kvm *kvm)
++{
++	if (!system_supports_hdbss())
++		return;
++
++	kvm->arch.hdbss_buffer_size = KVM_ARM_HDBSS_DEFAULT_SIZE;
++}
++
+ /**
+  * kvm_arch_init_vm - initializes a VM data structure
+  * @kvm:	pointer to the KVM struct
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index a9b35adf962f..2b915468521c 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2839,3 +2839,11 @@ void kvm_toggle_cache(struct kvm_vcpu *vcpu, bool was_enabled)
+ 
+ 	trace_kvm_toggle_cache(*vcpu_pc(vcpu), was_enabled, now_enabled);
+ }
++
++int kvm_cpu_dirty_log_size(struct kvm *kvm)
++{
++	if (!system_supports_hdbss())
++		return 0;
++
++	return kvm_hdbss_buffer_size(kvm) / sizeof(u64);
++}
+-- 
+2.43.0
+

@@ -1,0 +1,166 @@
+From MAILER-DAEMON Fri Sep 18 18:21:31 2026
+From: Tian Zheng <zhengtian10@huawei.com>
+Cc: liuyonglong@huawei.com, tangchengchang@huawei.com, virt@openeuler.org
+Subject: [Virt] [PATCH 05/15] KVM: arm64: Harvest stage-2 dirty state into the host
+ folio account
+Date: Fri, 18 Sep 2026 18:21:31 +0800
+Message-ID: <20260918102141.345025-5-zhengtian10@huawei.com>
+In-Reply-To: <20260918102141.345025-1-zhengtian10@huawei.com>
+References: <20260918102141.345025-1-zhengtian10@huawei.com>
+
+With VTCR_EL2.HD set, hardware promotes writable-clean descriptors to
+writable-dirty without any VM exit, and nothing in the arm64 KVM unmap
+paths harvests the stage-2 dirty bit - stage2_unmap_walker() only puts
+the page-table page. A folio whose only dirty state lives in a
+hardware-promoted stage-2 PTE is therefore invisible to the host MM,
+and reclaim can discard written guest data (silent corruption). The
+fault paths mark the folio speculatively at fault-in time, but the
+mapping lifecycle still needs exact harvesting, mirroring
+zap_present_folio_ptes() in the generic mm:
+
+  - stage2_unmap_walker(): before tearing down a valid leaf with
+    S2AP[1] set, harvest its output address into the folio account.
+    Exact accounting: the walk runs under the mmu write lock, so the
+    PTE being removed is the one being harvested.
+
+  - stage2_wrprotect_walker(): a writable-dirty page losing its dirty
+    state (WD -> WC during CLEAR) is harvested before the clear, so
+    the information survives even if the mapping is torn down before
+    the dirty state is observed anywhere else.
+
+Both hooks go through a new kvm_pgtable_mm_ops::mark_page_dirty
+callback: the walkers live in the dual-compiled hyp/pgtable.c, while
+SetPageDirty() is host-only and must not be reached for pKVM's host
+stage-2 page tables, whose mm_ops leave the callback NULL.
+
+Block mappings always map a folio-aligned head page, so dirtying the
+head covers the whole block. MMIO/PFNMAP ranges and reserved pages are
+excluded, mirroring kvm_is_ad_tracked_page() in virt/kvm/kvm_main.c.
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 10 ++++++++++
+ arch/arm64/kvm/hyp/pgtable.c         | 30 ++++++++++++++++++++++++++--
+ arch/arm64/kvm/mmu.c                 | 26 ++++++++++++++++++++++++
+ 3 files changed, 64 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 379031c74cbc..6535f56db127 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -246,6 +246,16 @@ struct kvm_pgtable_mm_ops {
+ 	phys_addr_t	(*virt_to_phys)(void *addr);
+ 	void		(*dcache_clean_inval_poc)(void *addr, size_t size);
+ 	void		(*icache_inval_pou)(void *addr, size_t size);
++	/*
++	 * Harvest the dirty state of a leaf mapping into the host folio
++	 * account before the mapping (or its write permission) goes away.
++	 * Called for valid leaf entries with S2AP[1] set, whose dirty state
++	 * may have been set by hardware (HAFDBS/HDBSS) without KVM ever
++	 * observing a write fault. Takes the output address of the mapping
++	 * (physical). Host-only; implementations that do not track folios
++	 * leave it NULL.
++	 */
++	void		(*mark_page_dirty)(u64 pa);
+ };
+ 
+ /**
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 2849c136f366..1e7583c5abf9 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -1183,8 +1183,22 @@ static int stage2_unmap_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 
+ 		if (mm_ops->page_count(childp) != 1)
+ 			return 0;
+-	} else if (stage2_pte_cacheable(pgt, ctx->old)) {
+-		need_flush = !cpus_have_final_cap(ARM64_HAS_STAGE2_FWB);
++	} else {
++		if (stage2_pte_cacheable(pgt, ctx->old))
++			need_flush = !cpus_have_final_cap(ARM64_HAS_STAGE2_FWB);
++
++		/*
++		 * Harvest the dirty state into the host folio account
++		 * before the mapping goes away, mirroring
++		 * zap_present_folio_ptes() in the generic mm: S2AP[1] may
++		 * have been set by hardware (FEAT_HAFDBS) without KVM ever
++		 * observing a write fault, so this is the last chance to
++		 * account it. Block mappings always map a folio-aligned
++		 * head page, so dirtying the head covers the whole block.
++		 */
++		if ((ctx->old & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W) &&
++		    mm_ops->mark_page_dirty)
++			mm_ops->mark_page_dirty(kvm_pte_to_phys(ctx->old));
+ 	}
+ 
+ 	/*
+@@ -1303,6 +1317,18 @@ static int stage2_wrprotect_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 	if (ctx->level < KVM_PGTABLE_LAST_LEVEL)
+ 		new &= ~KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+ 
++	/*
++	 * A writable-dirty page is about to lose its dirty state. If
++	 * hardware promoted it, S2AP[1] is the only record of the write
++	 * outside the PTE: harvest the folio account before the clear so
++	 * the dirty information survives the transition regardless of
++	 * what happens to the mapping afterwards.
++	 */
++	if (kvm_pte_valid(ctx->old) && ctx->old != new &&
++	    (ctx->old & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W) &&
++	    ctx->mm_ops->mark_page_dirty)
++		ctx->mm_ops->mark_page_dirty(kvm_pte_to_phys(ctx->old));
++
+ 	if (kvm_pte_valid(ctx->old) && ctx->old != new)
+ 		WRITE_ONCE(*ctx->ptep, new);
+ 
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index e01db87daa97..b1a6f743be7b 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -888,6 +888,31 @@ static int get_user_mapping_size(struct kvm *kvm, u64 addr)
+ 	return BIT(ARM64_HW_PGTABLE_LEVEL_SHIFT(level));
+ }
+ 
++/*
++ * Harvest the stage-2 dirty state of a mapping into the host folio
++ * account, wired into kvm_s2_mm_ops::mark_page_dirty for the unmap and
++ * write-protect walkers. The dirty bit may have been set by hardware
++ * (FEAT_HAFDBS) without KVM ever observing a write fault, so this is
++ * the exact accounting, unlike the speculative folio dirtying at
++ * fault-in time. MMIO/PFNMAP ranges and reserved pages are outside the
++ * page-dirty machinery (mirrors kvm_is_ad_tracked_page() in
++ * virt/kvm/kvm_main.c).
++ */
++static void kvm_s2_mark_page_dirty(u64 pa)
++{
++	unsigned long pfn = pa >> PAGE_SHIFT;
++	struct page *page;
++
++	if (!pfn_valid(pfn))
++		return;
++
++	page = pfn_to_page(pfn);
++	if (PageReserved(page))
++		return;
++
++	SetPageDirty(page);
++}
++
+ static struct kvm_pgtable_mm_ops kvm_s2_mm_ops = {
+ 	.zalloc_page		= stage2_memcache_zalloc_page,
+ 	.zalloc_pages_exact	= kvm_s2_zalloc_pages_exact,
+@@ -900,6 +925,7 @@ static struct kvm_pgtable_mm_ops kvm_s2_mm_ops = {
+ 	.virt_to_phys		= kvm_host_pa,
+ 	.dcache_clean_inval_poc	= clean_dcache_guest_page,
+ 	.icache_inval_pou	= invalidate_icache_guest_page,
++	.mark_page_dirty	= kvm_s2_mark_page_dirty,
+ };
+ 
+ static int kvm_init_ipa_range(struct kvm_s2_mmu *mmu, unsigned long type)
+-- 
+2.33.0
+
+_______________________________________________
+Virt mailing list -- virt@openeuler.org
+To unsubscribe send an email to virt-leave@openeuler.org
+

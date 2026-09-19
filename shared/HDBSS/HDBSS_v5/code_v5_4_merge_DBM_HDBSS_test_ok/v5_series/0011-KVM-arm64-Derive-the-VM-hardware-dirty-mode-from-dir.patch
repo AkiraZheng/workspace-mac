@@ -1,0 +1,489 @@
+From 73d1ba52a5c24fd12ed1ad41b8b8d5b3080750b3 Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Fri, 18 Sep 2026 18:21:37 +0800
+Subject: [PATCH 11/14] KVM: arm64: Derive the VM hardware dirty mode from
+ dirty logging
+
+Hardware dirty management of the stage-2 descriptors is currently
+enabled or disabled by two independent paths that pull VTCR_EL2 in
+opposite directions. Leonardo Bras' "Enable HAFDBS for guests not on
+migration" turns HD on outside of migration and off once any memslot
+starts logging, so the write-protect permission fault remains the dirty
+tracking signal. The HDBSS enablement turns HD|HA|HDBSS on when logging
+starts, so hardware promotes writable-clean pages and records the
+dirtied IPAs into the per-vCPU buffers instead. Both hooks run from
+kvm_arch_commit_memory_region(), so whichever runs second wins, and the
+two independent read-modify-write cycles also race against the vCPU
+setup path, which could leave HDBSS set with HD clear - an illegal
+VTCR_EL2 combination.
+
+Replace both with kvm_arch_update_hw_dirty_mode(), a single derived
+mode that is a pure function of the static capabilities and the number
+of logging memslots:
+
+  - logging && HDBSS-capable  -> HD|HA|HDBSS (hardware tracking)
+  - logging, no HDBSS         -> off (classic write-protect faults)
+  - !logging && HAFDBS-cap.   -> HD|HA (only written pages go dirty)
+
+Because the mode is recomputed rather than toggled, there is no
+lost-update window to lock against, and a vCPU created while the VM is
+migrating inherits the current mode instead of clobbering it.
+
+Only the first vCPU computes the mode from kvm_setup_vcpu(): with no
+memslot update having happened yet, nothing else turns the mode bits
+on for a fresh VM, while later vCPUs inherit the current mode at their
+first vcpu_load() and kvm_arch_commit_memory_region() maintains it
+from then on. Skipping them also keeps the vtcr read-modify-write
+away from a kvm->lock vs slots_lock mismatch with a concurrent
+memslot update.
+
+The HAFDBS leg is not gated on nested virtualization: shadow stage-2
+MMUs build their own VTCR through kvm_get_vtcr(), which never carries
+the HD bit, so L2 translations keep their software-managed behaviour
+while the canonical stage-2 of the guest hypervisor runs under
+hardware management. A guest hypervisor cannot reach for the feature
+either, as the nested ID registers limit ID_AA64MMFR1_EL1.HAFDBS to
+AF-only and the virtual VTCR_EL2.HD is never consumed by the nested
+walker. The HDBSS leg stays gated for now: enabling it on the
+canonical stage-2 of a nested VM would record L1 dirtiness into the
+HDBSS buffer while L2 runs against a shadow, and those exit-flush and
+harvest paths are unaudited.
+
+Accordingly, kvm_s2_fault_compute_prot() consults the live HD state of
+the MMU being installed into rather than the canonical VTCR: a nested
+read fault would otherwise install a writable-clean shadow entry,
+which under the HD-less shadow VTCR behaves as read-only and costs L2
+an extra permission fault on the first write. kvm_hw_dirty_enabled()
+is reshaped into a per-MMU predicate for this.
+
+Always set HA together with HD: FEAT_HDBSS requires
+VTCR_EL2.{HDBSS,HA,HD} to be all set, and neither the kernel's own
+stage-1 enablement (cpu_enable_hw_dbm()) nor the SMMUv3 driver ever
+enables dirty updates without access-flag updates. Hardware-managed AF
+also removes the access-flag exits on mmu-notifier aged pages.
+
+The mode switch issues a single KVM_REQ_RELOAD_STAGE2 followed by a
+VMID-wide TLB invalidation: the request only reloads VTCR_EL2, while
+cached translations created under the old mode survive until
+invalidated, mirroring cpu_enable_hw_dbm()'s pairing of the TCR_EL1.HD
+flip with local_flush_tlb_all(). In the logging-stop direction (HD
+back on) stale read-only translations of writable-clean pages would
+otherwise keep faulting until each page takes its next fault.
+
+Turning HD on also makes the hardware promotion of writable-clean
+descriptors race with the write-protect walker, so document why the
+walker's plain WRITE_ONCE is safe there: hardware only promotes
+entries with S2AP[1] clear while the walker only writes entries whose
+old value had S2AP[1] set, and the one overlapping window (DBM
+removal on writable-clean blocks) discards at most a promotion whose
+HDBSS buffer entry and speculative fault-in folio dirtying both
+survive the demotion.
+
+kvm_arch_destroy_vm() forces every bit off via
+kvm_arm_disable_hdbss_global(), as userspace may destroy the VM without
+ever stopping dirty logging.
+
+Also rename kvm_vcpu_has_nv(kvm) to kvm_has_nv(kvm): the predicate is
+per-KVM, so the "vcpu" in the name was a lie about its argument.
+
+This is a rework of Leonardo Bras' "Enable HAFDBS for guests not on
+migration", which introduced the VHE-only HAFDBS enablement, the
+vcpu-setup hook and kvm_set_hafdbs().
+
+Link: https://lore.kernel.org/all/20260901171558.2674031-6-leo.bras@arm.com/
+Co-developed-by: Claude <noreply@anthropic.com>
+Signed-off-by: Claude <noreply@anthropic.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h |  1 +
+ arch/arm64/include/asm/kvm_mmu.h       | 44 ++++++++++++
+ arch/arm64/include/asm/kvm_nested.h    |  9 ++-
+ arch/arm64/kvm/arm.c                   | 28 ++++++++
+ arch/arm64/kvm/dirty_bit.c             | 30 +++++++-
+ arch/arm64/kvm/hyp/pgtable.c           | 38 +++++++---
+ arch/arm64/kvm/mmu.c                   | 98 ++++++++++++++++++++++++--
+ 7 files changed, 229 insertions(+), 19 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index 7319bae2d14e..e334b2c3657c 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -52,5 +52,6 @@ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu);
++void kvm_arm_disable_hdbss_global(struct kvm *kvm);
+ 
+ #endif /* __ARM64_KVM_DIRTY_BIT_H__ */
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index 6eae7e7e2a68..c5b2f45fb1d5 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -390,6 +390,50 @@ static inline bool kvm_supports_cacheable_pfnmap(void)
+ 	       cpus_have_final_cap(ARM64_HAS_CACHE_DIC);
+ }
+ 
++/*
++ * Whether the hardware can manage the access and dirty state of a
++ * stage-2 (FEAT_HAFDBS). Nested virtualization does not disqualify:
++ * shadow stage-2 MMUs build their own VTCR via kvm_get_vtcr(), which
++ * never carries the HD bit, so L2 translations keep their
++ * software-managed behaviour while the canonical stage-2 runs under
++ * hardware management.
++ */
++static inline bool kvm_supports_hafdbs(void)
++{
++	return IS_ENABLED(CONFIG_ARM64_HW_AFDBM) && has_vhe() &&
++		cpus_have_final_cap(ARM64_HW_DBM);
++}
++
++/*
++ * Whether this VM can use FEAT_HDBSS for hardware dirty tracking:
++ * system support (VHE-only, the buffer registers are EL2-only and are
++ * programmed from host context). Nested virtualization disqualifies for
++ * now: the L2 exit paths would flush and harvest HDBSS entries into
++ * the wrong dirty accounting (shadow stage-2 MMUs do not carry the
++ * HDBSS bits, so only L1 dirtiness would be recorded), and those paths
++ * have not been audited. Revisit once nested dirty tracking lands.
++ */
++static inline bool kvm_supports_hdbss(struct kvm *kvm)
++{
++	return system_supports_hdbss() && !kvm_has_nv(kvm);
++}
++
++void kvm_arch_update_hw_dirty_mode(struct kvm *kvm);
++
++/*
++ * Live counterpart of kvm_supports_hafdbs(): reports whether hardware
++ * dirty management is enabled for a given stage-2 MMU right now. The
++ * HD bit is flipped on/off with dirty logging (and HDBSS) on the
++ * canonical MMU; shadow (nested) MMUs never carry it, so anything
++ * installed into a shadow is always writable-dirty. Decisions that
++ * depend on it must observe this dynamic state, not the static
++ * capability.
++ */
++static inline bool kvm_hw_dirty_enabled(struct kvm_s2_mmu *mmu)
++{
++	return mmu->vtcr & VTCR_EL2_HD;
++}
++
+ #ifdef CONFIG_PTDUMP_STAGE2_DEBUGFS
+ void kvm_s2_ptdump_create_debugfs(struct kvm *kvm);
+ void kvm_nested_s2_ptdump_create_debugfs(struct kvm_s2_mmu *mmu);
+diff --git a/arch/arm64/include/asm/kvm_nested.h b/arch/arm64/include/asm/kvm_nested.h
+index 1ed708335809..d54f8fe4674d 100644
+--- a/arch/arm64/include/asm/kvm_nested.h
++++ b/arch/arm64/include/asm/kvm_nested.h
+@@ -7,11 +7,16 @@
+ #include <asm/kvm_emulate.h>
+ #include <asm/kvm_pgtable.h>
+ 
+-static inline bool vcpu_has_nv(const struct kvm_vcpu *vcpu)
++static inline bool kvm_has_nv(const struct kvm *kvm)
+ {
+ 	return (!__is_defined(__KVM_NVHE_HYPERVISOR__) &&
+ 		cpus_have_final_cap(ARM64_HAS_NESTED_VIRT) &&
+-		vcpu_has_feature(vcpu, KVM_ARM_VCPU_HAS_EL2));
++		kvm_vcpu_has_feature(kvm, KVM_ARM_VCPU_HAS_EL2));
++}
++
++static inline bool vcpu_has_nv(const struct kvm_vcpu *vcpu)
++{
++	return kvm_has_nv(vcpu->kvm);
+ }
+ 
+ /* Translation helpers from non-VHE EL2 to EL1 */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index facc53991998..74e67d37ab6f 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -343,6 +343,15 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
+ 	if (is_protected_kvm_enabled())
+ 		pkvm_destroy_hyp_vm(kvm);
+ 
++	/*
++	 * Userspace may destroy the VM without disabling dirty
++	 * logging, so the auto-disable path is never reached. Force
++	 * disable HDBSS before the stage-2 MMU and the vCPU buffers
++	 * go away.
++	 */
++	if (kvm_hdbss_enabled(kvm))
++		kvm_arm_disable_hdbss_global(kvm);
++
+ 	kvm_uninit_stage2_mmu(kvm);
+ 	kvm_destroy_mpidr_data(kvm);
+ 
+@@ -1714,6 +1723,25 @@ static int kvm_setup_vcpu(struct kvm_vcpu *vcpu)
+ 	if (!ret && vcpu_has_nv(vcpu))
+ 		ret = kvm_vcpu_init_nested(vcpu);
+ 
++	/*
++	 * Derive the hardware dirty mode (HAFDBS while not logging, HDBSS
++	 * or off during migration). Being a pure function of the logging
++	 * state and the static capabilities, a vCPU created while the VM
++	 * is migrating keeps the current mode instead of clobbering it.
++	 *
++	 * Only the first vCPU needs this: with no memslot update having
++	 * happened yet, nothing has turned the mode bits on for a fresh
++	 * VM. Later vCPUs inherit the current mode at their first
++	 * vcpu_load() and the mode is maintained from then on by
++	 * kvm_arch_commit_memory_region(). Skipping them also keeps this
++	 * unlocked vtcr RMW away from the kvm->lock vs slots_lock
++	 * mismatch with a concurrent memslot update: hot-plugging vCPUs
++	 * into a VM that is starting to migrate could otherwise interleave
++	 * the two RMWs and transiently flip the mode back.
++	 */
++	if (kvm->created_vcpus == 1)
++		kvm_arch_update_hw_dirty_mode(kvm);
++
+ 	return ret;
+ }
+ 
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index 30f0593b1d62..205b5f7a2805 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -90,7 +90,15 @@ void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
+ 
+ 	entries = kvm_hdbss_buffer_size(kvm) / sizeof(u64);
+ 
+-	/* kvm_vcpu_mark_page_dirty() resolves the memslot under SRCU. */
++	/*
++	 * kvm_vcpu_mark_page_dirty() resolves the memslot under SRCU. The
++	 * host folio account is deliberately not touched here: with the
++	 * speculative folio dirtying at fault-in time and the unmap /
++	 * write-protect walkers harvesting the stage-2 dirty bit, every
++	 * exit from the writable-dirty state is already covered, so a
++	 * folio harvest in the drain would be redundant - and keeping
++	 * this path free of mmu_lock preserves its SRCU-only design.
++	 */
+ 	srcu_idx = srcu_read_lock(&kvm->srcu);
+ 	for (idx = 0; idx < min_t(u32, curr_idx, entries); idx++) {
+ 		u64 gpa;
+@@ -143,3 +151,23 @@ int kvm_handle_hdbss_fault(struct kvm_vcpu *vcpu)
+ 	write_sysreg_s(prod & ~HDBSSPROD_EL2_FSC_MASK, SYS_HDBSSPROD_EL2);
+ 	return -EFAULT;
+ }
++
++/*
++ * VM teardown path: userspace may destroy the VM without ever
++ * stopping dirty logging, in which case kvm_arch_update_hw_dirty_mode()
++ * would keep deriving the logging-based mode. Force every hardware
++ * dirty bit off before the stage-2 MMU and the vCPU buffers go away.
++ */
++void kvm_arm_disable_hdbss_global(struct kvm *kvm)
++{
++	unsigned long dirty_bits =
++		VTCR_EL2_HD | VTCR_EL2_HDBSS | VTCR_EL2_HA;
++
++	if (!(kvm->arch.mmu.vtcr & dirty_bits))
++		return;
++
++	kvm->arch.mmu.vtcr &= ~dirty_bits;
++
++	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
++	kvm_flush_remote_tlbs(kvm);
++}
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index fe35d81e5dd5..9d34f9b596b2 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -1191,9 +1191,9 @@ static int stage2_unmap_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 		 * Harvest the dirty state into the host folio account
+ 		 * before the mapping goes away, mirroring
+ 		 * zap_present_folio_ptes() in the generic mm: S2AP[1] may
+-		 * have been set by hardware (FEAT_HAFDBS) without KVM ever
+-		 * observing a write fault, so this is the last chance to
+-		 * account it. Block mappings always map a folio-aligned
++		 * have been set by hardware (HAFDBS/HDBSS) without KVM
++		 * ever observing a write fault, so this is the last chance
++		 * to account it. Block mappings always map a folio-aligned
+ 		 * head page, so dirtying the head covers the whole block.
+ 		 */
+ 		if ((ctx->old & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W) &&
+@@ -1319,10 +1319,10 @@ static int stage2_wrprotect_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 
+ 	/*
+ 	 * A writable-dirty entry is about to lose its dirty state.  If
+-	 * hardware promoted it, S2AP[1] is the only record of the write
+-	 * outside the PTE: harvest the folio account before the clear so
+-	 * the dirty information survives the transition regardless of
+-	 * what happens to the mapping afterwards.
++	 * hardware promoted it (HAFDBS/HDBSS), the pending HDBSS buffer
++	 * entry has not been drained yet and this write-protect can race
++	 * with an unmap that follows; harvest the folio account now so
++	 * the dirty information survives the transition regardless.
+ 	 *
+ 	 * A block mapping is backed by a single (hugetlbfs/THP) folio, so
+ 	 * dirtying the folio containing the block base PA covers the
+@@ -1334,9 +1334,27 @@ static int stage2_wrprotect_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 		ctx->mm_ops->mark_page_dirty(kvm_pte_to_phys(ctx->old));
+ 
+ 	/*
+-	 * We might race with the CPU trying to set the access flag here,
+-	 * but worst-case the AF update is lost and will be set on the
+-	 * next access instead.
++	 * The plain WRITE_ONCE races with two hardware updates while the
++	 * entry is being written; both are benign, but for different
++	 * reasons:
++	 *
++	 * - The access flag.  We might race with the CPU trying to set
++	 *   AF, worst-case the AF update is lost and will be set on the
++	 *   next access instead.
++	 *
++	 * - The dirty state.  Hardware only promotes a writable-clean
++	 *   entry (S2AP[1] clear) to writable-dirty; this walker only
++	 *   writes entries whose old value had S2AP[1] set, so the two
++	 *   never touch the same entry state.  The one window is the DBM
++	 *   removal on blocks, which produces a non-identity write for a
++	 *   writable-clean block: if hardware promotes it after our read
++	 *   but before our write, our write demotes the entry back to
++	 *   read-only and discards the promotion.  That is safe: the
++	 *   promotion already recorded an HDBSS buffer entry, so the
++	 *   dirty information survives, and the folio account is covered
++	 *   by the speculative fault-in dirtying that accompanies every
++	 *   write-permitting installation.  The next write to the entry
++	 *   faults (DBM now clear) and takes the software path.
+ 	 */
+ 	if (kvm_pte_valid(ctx->old) && ctx->old != new)
+ 		WRITE_ONCE(*ctx->ptep, new);
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 2b915468521c..f92dceb990db 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -893,7 +893,7 @@ static int get_user_mapping_size(struct kvm *kvm, u64 addr)
+  * Harvest the stage-2 dirty state of a mapping into the host folio
+  * account, wired into kvm_s2_mm_ops::mark_page_dirty for the unmap and
+  * write-protect walkers. The dirty bit may have been set by hardware
+- * (FEAT_HAFDBS) without KVM ever observing a write fault, so this is
++ * (HAFDBS/HDBSS) without KVM ever observing a write fault, so this is
+  * the exact accounting, unlike the speculative folio dirtying at
+  * fault-in time. MMIO/PFNMAP ranges and reserved pages are outside the
+  * page-dirty machinery (mirrors kvm_is_ad_tracked_page() in
+@@ -1712,10 +1712,17 @@ static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
+ out_unlock:
+ 	/*
+ 	 * Two distinct dirty ledgers with different precision requirements:
+-	 * the host folio account (SetPageDirty) must be speculative, as a
+-	 * writable-clean mapping can be hardware-promoted to writable-dirty
+-	 * without any VM exit once VTCR_EL2.HD is set; the dirty bitmap must
+-	 * remain exact, or pre-copy will ship clean pages.
++	 *
++	 * - the host folio account (SetPageDirty) must be *speculative*:
++	 *   a writable-clean mapping can be hardware-promoted to writable
++	 *   dirty without any VM exit once VTCR_EL2.HD is set, so any
++	 *   mapping that grants write permission must dirty the folio at
++	 *   fault-in time. Over-marking is safe, it only causes a spurious
++	 *   writeback.
++	 *
++	 * - the KVM dirty bitmap must remain *exact*: a read-faulted
++	 *   writable-clean page must not enter the bitmap or pre-copy will
++	 *   ship clean pages.
+ 	 */
+ 	kvm_release_faultin_page(kvm, page, !!ret, prot & KVM_PGTABLE_PROT_W);
+ 	kvm_fault_unlock(kvm);
+@@ -2023,7 +2030,23 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
+ 	if (s2vi->map_writable) {
+ 		*prot |= KVM_PGTABLE_PROT_W;
+ 
+-		if (s2vi->device || !memslot_is_logging(s2fd->memslot) ||
++		/*
++		 * Check the *live* HD state of the MMU being installed
++		 * into, not the static capability: HD is turned off as
++		 * soon as any single memslot starts logging, and QEMU
++		 * keeps KVM_MEM_LOG_DIRTY_PAGES on the VGA VRAM slot for
++		 * the entire runtime of a desktop VM. With HD off but the
++		 * static check still true, every read fault on the
++		 * non-logged RAM slots would install writable-clean -
++		 * which is read-only under HD=0 - and pay an extra
++		 * permission fault per page. Shadow (nested) MMUs never
++		 * carry HD, so nested installs are always writable-dirty.
++		 * A racing flip is benign: at worst one page is mapped
++		 * writable-dirty one last time or takes one extra fault.
++		 */
++		if (s2vi->device ||
++		    !(memslot_is_logging(s2fd->memslot) ||
++		      kvm_hw_dirty_enabled(s2fd->vcpu->arch.hw_mmu)) ||
+ 		    kvm_is_write_fault(s2fd->vcpu))
+ 			*prot |= KVM_PGTABLE_PROT_DIRTY;
+ 	}
+@@ -2615,6 +2638,66 @@ int __init kvm_mmu_init(u32 hyp_va_bits)
+ 	return err;
+ }
+ 
++/*
++ * The VM's hardware dirty-management mode is a *derived* value, never
++ * an independently managed one: it depends only on the static
++ * capabilities and the number of logging memslots, so recomputing it
++ * on every event (vCPU setup, logging start/stop) cannot lose an
++ * update and needs no extra locking against racing writers:
++ *
++ *   logging && HDBSS-capable  ->  HDBSS   (HD|HA|HDBSS): hardware
++ *                                   promotes writable-clean pages and
++ *                                   records the dirtied IPAs into the
++ *                                   per-vCPU buffers, which replace
++ *                                   the write-fault as the tracking
++ *                                   signal.
++ *   logging, no HDBSS         ->  off: the write-protect fault is the
++ *                                   tracking signal, so HD must be off
++ *                                   or hardware would promote
++ *                                   writable-clean pages silently.
++ *   !logging, HAFDBS-capable  ->  HAFDBS (HD|HA): read faults install
++ *                                   writable-clean pages, and only
++ *                                   pages actually written to become
++ *                                   dirty.
++ */
++void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
++{
++	unsigned long cur, target;
++	bool logging = atomic_read(&kvm->nr_memslots_dirty_logging) != 0;
++
++	if (logging && kvm_supports_hdbss(kvm))
++		target = VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS;
++	else if (logging || !kvm_supports_hafdbs())
++		target = 0;
++	else
++		target = VTCR_EL2_HD | VTCR_EL2_HA;
++
++	cur = kvm->arch.mmu.vtcr & (VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS);
++	if (cur == target)
++		return;
++
++	kvm->arch.mmu.vtcr = (kvm->arch.mmu.vtcr &
++			      ~(VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS)) |
++			     target;
++
++	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
++
++	/*
++	 * The request above only reloads VTCR_EL2; cached translations
++	 * created under the old mode survive until invalidated. In the
++	 * logging-start direction the subsequent write-protect +
++	 * kvm_flush_remote_tlbs_memslot() happens to cover the logging
++	 * memslot, but in the logging-stop direction (HD back on) stale
++	 * read-only translations of writable-clean pages would keep
++	 * faulting until each page takes its next fault. Mirror the
++	 * kernel's own stage-1 enablement (cpu_enable_hw_dbm() pairs the
++	 * TCR_EL1.HD flip with local_flush_tlb_all()) and flush the VMID
++	 * once every vCPU has reloaded the new VTCR. __kvm_tlb_flush_vmid
++	 * broadcasts inner-shareable, so one CPU executing it suffices.
++	 */
++	kvm_flush_remote_tlbs(kvm);
++}
++
+ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 				   struct kvm_memory_slot *old,
+ 				   const struct kvm_memory_slot *new,
+@@ -2622,6 +2705,9 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ {
+ 	bool log_dirty_pages = new && new->flags & KVM_MEM_LOG_DIRTY_PAGES;
+ 
++	/* Derive the hardware dirty mode from the new logging state. */
++	kvm_arch_update_hw_dirty_mode(kvm);
++
+ 	/*
+ 	 * At this point memslot has been committed and there is an
+ 	 * allocated dirty_bitmap[], dirty pages will be tracked while the
+-- 
+2.43.0
+

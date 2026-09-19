@@ -1,0 +1,66 @@
+From b75166b50fb449ea2cc1c81033a34d69428cc35e Mon Sep 17 00:00:00 2001
+From: Leonardo Bras <leo.bras@arm.com>
+Date: Fri, 18 Sep 2026 18:21:29 +0800
+Subject: [PATCH 03/14] KVM: arm64: Introduce a dedicated walker for stage2
+ write-protect
+
+The new walker cleans the dirty bit on leaf entries, as well as clean
+the DBM bit in blocks so it still faults for lazy hugepage splitting when
+we enable FEAT_HDBSS in future patches.
+
+With disabled HDBSS, there should be no change in faulting behavior.
+
+Link: https://lore.kernel.org/all/20260901171558.2674031-4-leo.bras@arm.com/
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/hyp/pgtable.c | 31 +++++++++++++++++++++++++++----
+ 1 file changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 2ff33d3e371e..dc46ea539fe9 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -1294,12 +1294,35 @@ static int stage2_update_leaf_attrs(struct kvm_pgtable *pgt, u64 addr,
+ 	return 0;
+ }
+ 
++static int stage2_wrprotect_walker(const struct kvm_pgtable_visit_ctx *ctx,
++				   enum kvm_pgtable_walk_flags visit)
++{
++	kvm_pte_t new = ctx->old & ~KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
++
++	/* We remove DBM on blocks so they can fault and get split */
++	if (ctx->level < KVM_PGTABLE_LAST_LEVEL)
++		new &= ~KVM_PTE_LEAF_ATTR_HI_S2_DBM;
++
++	/*
++	 * We might race with the CPU trying to set the access flag here,
++	 * but worst-case the AF update is lost and will be set on the
++	 * next access instead.
++	 */
++	if (kvm_pte_valid(ctx->old) && ctx->old != new)
++		WRITE_ONCE(*ctx->ptep, new);
++
++	return 0;
++}
++
++
+ int kvm_pgtable_stage2_wrprotect(struct kvm_pgtable *pgt, u64 addr, u64 size)
+ {
+-	return stage2_update_leaf_attrs(pgt, addr, size, 0,
+-					KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
+-					NULL, NULL,
+-					KVM_PGTABLE_WALK_IGNORE_EAGAIN);
++	struct kvm_pgtable_walker walker = {
++		.cb	= stage2_wrprotect_walker,
++		.flags	= KVM_PGTABLE_WALK_LEAF,
++	};
++
++	return kvm_pgtable_walk(pgt, addr, size, &walker);
+ }
+ 
+ void kvm_pgtable_stage2_mkyoung(struct kvm_pgtable *pgt, u64 addr,
+-- 
+2.43.0
+
