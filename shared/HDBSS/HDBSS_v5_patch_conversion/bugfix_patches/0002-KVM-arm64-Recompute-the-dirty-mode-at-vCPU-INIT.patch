@@ -1,0 +1,47 @@
+From ee37cc920aa36f9c689036d87ea789b704da348d Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Tue, 22 Sep 2026 07:15:38 +0800
+Subject: [PATCH 2/3] KVM: arm64: Recompute the dirty mode at vCPU INIT
+
+kvm_has_nv() only becomes true once the vCPU features are copied at
+the first KVM_ARM_VCPU_INIT. A logging memslot created before that
+point therefore derives the HDBSS mode with kvm_has_nv() still false,
+and a vCPU then initialized with KVM_ARM_VCPU_HAS_EL2 keeps HDBSS
+enabled for a nested guest.
+
+Recompute the mode once the features are fixed.
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/kvm/arm.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index eadbf3a88d31..ef4ca6441eb4 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1793,8 +1793,19 @@ static int kvm_vcpu_set_target(struct kvm_vcpu *vcpu,
+ 	if (ret)
+ 		return ret;
+ 
+-	if (!kvm_vcpu_initialized(vcpu))
+-		return __kvm_vcpu_set_target(vcpu, init);
++	if (!kvm_vcpu_initialized(vcpu)) {
++		ret = __kvm_vcpu_set_target(vcpu, init);
++		if (ret)
++			return ret;
++
++		/*
++		 * The vCPU features have fixed the value of kvm_has_nv(),
++		 * which a logging memslot created before this point
++		 * derived the dirty mode without.
++		 */
++		kvm_arch_update_hw_dirty_mode(vcpu->kvm);
++		return 0;
++	}
+ 
+ 	if (kvm_vcpu_init_changed(vcpu, init))
+ 		return -EINVAL;
+-- 
+2.43.0
+

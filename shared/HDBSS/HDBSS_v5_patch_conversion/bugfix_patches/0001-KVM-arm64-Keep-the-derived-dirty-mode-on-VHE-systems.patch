@@ -1,0 +1,97 @@
+From ea922ccd6ebd360ce16fae40aaca72a123810241 Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Tue, 22 Sep 2026 07:15:38 +0800
+Subject: [PATCH 1/3] KVM: arm64: Keep the derived dirty mode on VHE systems
+
+The derived mode is the only raiser of KVM_REQ_RELOAD_STAGE2, whose
+handler calls the VHE __load_stage2() from host context. Both of the
+mode's enabling capabilities are VHE-only, so on nVHE the derived
+target is always off, which is not the initial state either:
+kvm_get_vtcr() sets VTCR_EL2.HA unconditionally, and the first memslot
+commit of every nVHE VM flips the mode, raises the request, and the
+handler then writes the EL2 registers from EL1, panicking the host.
+
+The same flip also clears the Ampere AC03_CPU_38 workaround, which
+requires VTCR_EL2.HA to stay clear, and turns the HA default off on
+VHE systems without hardware DBM.
+
+Skip the update entirely unless the HAFDBS mode is available, which
+covers all three cases, and mark the VTCR_EL2 accesses on both sides,
+as the fault paths read the value locklessly through
+kvm_hw_dirty_enabled().
+
+Signed-off-by: AkiraZheng <1428384878@qq.com>
+---
+ arch/arm64/include/asm/kvm_mmu.h |  3 ++-
+ arch/arm64/kvm/mmu.c             | 23 +++++++++++++++++------
+ 2 files changed, 19 insertions(+), 7 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index 24407194444a..3821621e8cc1 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -393,6 +393,7 @@ static inline bool kvm_supports_cacheable_pfnmap(void)
+ static inline bool kvm_supports_hafdbs(void)
+ {
+ 	return IS_ENABLED(CONFIG_ARM64_HW_AFDBM) && has_vhe() &&
++		!cpus_have_final_cap(ARM64_WORKAROUND_AMPERE_AC03_CPU_38) &&
+ 		cpus_have_final_cap(ARM64_HW_DBM);
+ }
+ 
+@@ -405,7 +406,7 @@ void kvm_arch_update_hw_dirty_mode(struct kvm *kvm);
+ 
+ static inline bool kvm_hw_dirty_enabled(struct kvm_s2_mmu *mmu)
+ {
+-	return mmu->vtcr & VTCR_EL2_HD;
++	return READ_ONCE(mmu->vtcr) & VTCR_EL2_HD;
+ }
+ 
+ #ifdef CONFIG_PTDUMP_STAGE2_DEBUGFS
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 17786453c004..f0bd1d620f9b 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2641,23 +2641,34 @@ int __init kvm_mmu_init(u32 hyp_va_bits)
+  */
+ void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
+ {
+-	unsigned long cur, target;
++	unsigned long cur, target, vtcr;
+ 	bool logging = atomic_read(&kvm->nr_memslots_dirty_logging) != 0;
+ 
++	/*
++	 * Both dirty modes are VHE-only: the reload request is handled
++	 * in host context and must not run at EL1, and the Ampere
++	 * erratum requires VTCR_EL2.HA to stay clear.  Staying out
++	 * entirely also preserves the HA default on systems without
++	 * hardware DBM.
++	 */
++	if (!kvm_supports_hafdbs())
++		return;
++
+ 	if (logging && kvm_supports_hdbss(kvm))
+ 		target = VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS;
+-	else if (logging || !kvm_supports_hafdbs())
++	else if (logging)
+ 		target = 0;
+ 	else
+ 		target = VTCR_EL2_HD | VTCR_EL2_HA;
+ 
+-	cur = kvm->arch.mmu.vtcr & (VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS);
++	vtcr = READ_ONCE(kvm->arch.mmu.vtcr);
++	cur = vtcr & (VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS);
+ 	if (cur == target)
+ 		return;
+ 
+-	kvm->arch.mmu.vtcr = (kvm->arch.mmu.vtcr &
+-			      ~(VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS)) |
+-			     target;
++	WRITE_ONCE(kvm->arch.mmu.vtcr,
++		   (vtcr & ~(VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS)) |
++		   target);
+ 
+ 	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
+ 
+-- 
+2.43.0
+
