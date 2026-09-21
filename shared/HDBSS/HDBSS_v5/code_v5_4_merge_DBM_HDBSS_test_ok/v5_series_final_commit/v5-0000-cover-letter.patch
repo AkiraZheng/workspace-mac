@@ -1,6 +1,6 @@
-From 515f04fef3e69474dfadbdd5e1a52086722e690b Mon Sep 17 00:00:00 2001
+From f317229127299b8633985104e7797bb7674cf4f9 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
-Date: Mon, 21 Sep 2026 16:34:05 +0800
+Date: Mon, 21 Sep 2026 23:06:36 +0800
 Subject: [PATCH v5 00/15] KVM: arm64: FEAT_HDBSS support for stage-2 dirty
  tracking
 
@@ -98,7 +98,7 @@ Tian Zheng (8):
   KVM: arm64: Derive the VM hardware dirty mode from dirty logging
   KVM: arm64: Add HDBSS buffer size ioctl for dirty-bitmap mode
   KVM: arm64: Document HDBSS buffer size ioctl
-  KVM: selftests: arm64: Add HDBSS buffer size ioctl interface test
+  KVM: arm64: selftests: Add HDBSS buffer size ioctl interface test
 
  Documentation/virt/kvm/api.rst                |  28 +++
  arch/arm64/include/asm/cpufeature.h           |   5 +
