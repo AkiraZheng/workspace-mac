@@ -1,6 +1,6 @@
 From f317229127299b8633985104e7797bb7674cf4f9 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
-Date: Mon, 21 Sep 2026 23:20:27 +0800
+Date: Mon, 21 Sep 2026 23:42:30 +0800
 Subject: [PATCH v5 00/15] KVM: arm64: FEAT_HDBSS support for stage-2 dirty
  tracking
 
@@ -29,42 +29,22 @@ derived hardware-dirty mode so that:
     - migration without     -> HD off, classic write-protect faults
     - no migration          -> HD|HA, only written pages go dirty
 
-A note on nested virtualization: HAFDBS is not gated on NV, since
-shadow stage-2 MMUs build their own VTCR through kvm_get_vtcr(),
-which never carries the HD bit - the canonical stage-2 of a guest
-hypervisor runs under hardware management while L2 keeps its
-software-managed behaviour, and the L1-visible HAFDBS ID field is
-limited to AF-only so a guest kernel never reaches for the feature
-itself. HDBSS, in contrast, stays gated on NV for now: recording L1
-dirtiness into the HDBSS buffer while L2 runs against a shadow needs
-the nested exit-flush and harvest paths audited first. The nested
-walker deliberately consumes only S2AP[1] for writability; DBM (bit
-51) is RES0 from the L1 point of view and must not be interpreted
-regardless of the guest's VTCR_EL2.HD value.
+HAFDBS is not gated on nested virtualization, as shadow stage-2 MMUs
+build their own VTCR through kvm_get_vtcr(), which never carries the
+HD bit. HDBSS stays gated for now, as the nested exit-flush and
+harvest paths are unaudited.
 
-The HDBSS buffer registers are programmed based on buffer ownership
-rather than feature enablement (patch 7): HDBSS can be turned on in
-VTCR_EL2 while a vCPU is mid-KVM_RUN, and hardware dirty-state
-updates write dirtied IPAs to HDBSSBR_EL2.BADDR without any fault,
-so the registers must already point at the running vCPU's buffer by
-then. This was validated the hard way: with the registers only
-programmed while HDBSS was enabled, a 4K-stage2 dirty-ring migration
-under redis load corrupted destination memory through a stale buffer
-address (entries landing in freed-and-reused pages, dirty records
-lost), and the ownership-based programming removes that window
-entirely.
+The HDBSS buffer registers are programmed on buffer ownership rather
+than on feature enablement (patch 7): HDBSS can be turned on while a
+vCPU is mid-KVM_RUN, and hardware dirty-state updates write to
+HDBSSBR_EL2.BADDR without any fault, so the registers must already
+point at the running vCPU's buffer by then. A 4K dirty-ring
+migration validated this under a redis workload.
 
-Functional coverage: the KVM_CAP_ARM_HDBSS_BUFFER_SIZE interface is
-exercised by a new selftest (patch 15), including the contract that
-dirty-ring mode pins the buffer size to the default. The 4K + dirty
-ring migration scenario above was additionally validated under a
-redis workload; performance numbers for the non-migration HAFDBS
-fault-elision path are being collected and will be posted as a
-follow-up to this series.
-
-No userspace changes are required beyond optionally setting
-KVM_CAP_ARM_HDBSS_BUFFER_SIZE; a QEMU tree carrying the adapted
-dirty-ring plumbing exists for testing.
+The KVM_CAP_ARM_HDBSS_BUFFER_SIZE interface is exercised by a new
+selftest (patch 15), including the contract that dirty-ring mode
+pins the buffer size to the default. Performance numbers for the
+non-migration HAFDBS path are being collected and will follow up.
 
 Comments welcome, especially on:
 
@@ -86,31 +66,28 @@ buffer-size UAPI with documentation and a selftest are new.
 
 Changes since v4 [2]:
 
-- Rebased onto Leonardo's descriptor rework [1]: the stage-2 write
-  permission moves to DBM and S2AP[1] becomes the pure dirty state,
-  with KVM_PGTABLE_PROT_DIRTY, a dedicated write-protect walker and
+- Rebased onto Leonardo's descriptor rework [1]: the write permission
+  moves to DBM, S2AP[1] becomes the pure dirty state, with
+  KVM_PGTABLE_PROT_DIRTY, a dedicated write-protect walker and
   KVM_REQ_RELOAD_STAGE2. This replaces v4's auto-DBM patch and drops
-  the mandatory dependency on eager hugepage splitting, as the walker
-  clears DBM on blocks so writes still fault and lazy splitting keeps
-  working.
+  the eager-splitting dependency, as the walker clears DBM on blocks
+  so lazy splitting keeps working.
 
-- New: harvest of the stage-2 dirty state into the host folio account
-  at unmap/write-protect time. Guest writes bypass the host stage-1,
-  so nothing else marks the folio dirty.
+- New: harvest of the stage-2 dirty state into the host folio
+  account at unmap/write-protect time, as guest writes bypass the
+  host stage-1.
 
-- Buffer lifetime reworked per review: buffers are allocated at vCPU
-  creation and freed at destruction, and the registers are programmed
-  on buffer ownership rather than on HDBSS enablement, closing the
+- Buffer lifetime reworked: allocated at vCPU creation, freed at
+  destruction, registers programmed on ownership, closing the
   use-after-free window on a concurrent mode switch.
 
-- The auto enable/disable on dirty-logging change is replaced by a
-  single derived mode, a pure function of the static capabilities and
-  the number of logging memslots: no intermediate illegal VTCR_EL2
-  state, no locking against concurrent updates.
+- The auto enable/disable is replaced by a single derived mode, a
+  pure function of the capabilities and the number of logging
+  memslots: no illegal intermediate VTCR_EL2 state, no locking.
 
 - The buffer flush and the HDBSS fault handling are split into
-  separate patches, and the flush now happens at a single point in
-  the run loop, before the exit reason is handled.
+  separate patches, with the flush at a single point in the run
+  loop, before the exit is handled.
 
 - New: dirty ring mode support, with the ring reserving room for a
   full buffer flush and the buffer size pinned to PAGE_SIZE, and the
