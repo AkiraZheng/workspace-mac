@@ -1509,6 +1509,280 @@ base-commit: cee9395acd8043be0644b25c34bfa86623f2b935
 
 From mboxrd@z Thu Jan  1 00:00:00 1970
 Received: from foss.arm.com (foss.arm.com [217.140.110.172])
+	by smtp.subspace.kernel.org (Postfix) with ESMTP id D6CCC471274
+	for <linux-kernel@vger.kernel.org>; Mon, 21 Sep 2026 14:28:57 +0000 (UTC)
+Authentication-Results: smtp.subspace.kernel.org; arc=none smtp.client-ip=217.140.110.172
+ARC-Seal: i=1; a=rsa-sha256; d=subspace.kernel.org; s=arc-20240116;
+	t=1790000939; cv=none; b=DoxleWxnx3CwpadnJqgv1qUr2x9M+CaKXS6a77biiLlXHv+4JixX3J+CNgjaczLxZPLDMZ6F2Um449xNlnrt3DRQqdqZaHCj7jP8kls67Uh7p72pQ5Kv/E7+PXHrYqbhsdcSCAwBkc+wF461eNt03Tf5n4YLK04fQF5eeRFF0UI=
+ARC-Message-Signature: i=1; a=rsa-sha256; d=subspace.kernel.org;
+	s=arc-20240116; t=1790000939; c=relaxed/simple;
+	bh=GdCBBFERQ2MnZAE4vUIvESlZ/KGfgi3JMauYWLFutKY=;
+	h=From:To:Cc:Subject:Date:Message-ID:In-Reply-To:References:
+	 MIME-Version:Content-Type:Content-Disposition; b=Hpx6RrCo2v24GTz38P23gqS3AU7Tck/m9sFHLUUkBiS929F6kwEpVAfyQrjobpYllRWXL537AH7XvwG/AeAz4KxRC30EySqj7Hi+O1tWXGHAFclvDxzMwjYT6dU252vXnjhtmQydH8sQ1Qurm3j7+1kSOTfGKZrOcKySIpajaSo=
+ARC-Authentication-Results: i=1; smtp.subspace.kernel.org; dmarc=pass (p=none dis=none) header.from=arm.com; spf=pass smtp.mailfrom=arm.com; dkim=pass (1024-bit key) header.d=arm.com header.i=@arm.com header.b=vT9ISrEB; arc=none smtp.client-ip=217.140.110.172
+Authentication-Results: smtp.subspace.kernel.org; dmarc=pass (p=none dis=none) header.from=arm.com
+Authentication-Results: smtp.subspace.kernel.org; spf=pass smtp.mailfrom=arm.com
+Authentication-Results: smtp.subspace.kernel.org;
+	dkim=pass (1024-bit key) header.d=arm.com header.i=@arm.com header.b="vT9ISrEB"
+Received: from usa-sjc-imap-foss1.foss.arm.com (unknown [10.121.207.14])
+	by usa-sjc-mx-foss1.foss.arm.com (Postfix) with ESMTP id B9E3419F0;
+	Mon, 21 Sep 2026 07:28:53 -0700 (PDT)
+Received: from LeoBrasDK.cambridge.arm.com (LeoBrasDK.cambridge.arm.com [10.2.212.21])
+	by usa-sjc-imap-foss1.foss.arm.com (Postfix) with ESMTPSA id 8164F3F86C;
+	Mon, 21 Sep 2026 07:28:56 -0700 (PDT)
+DKIM-Signature: v=1; a=rsa-sha256; c=simple/simple; d=arm.com; s=foss;
+	t=1790000937; bh=GdCBBFERQ2MnZAE4vUIvESlZ/KGfgi3JMauYWLFutKY=;
+	h=From:To:Cc:Subject:Date:In-Reply-To:References:From;
+	b=vT9ISrEB7+Z18zVsimq7PdDh0N9QjdkuO2kUdjV2nTxj6pxb2tT8duNAb44eMm0Tb
+	 PQla5NKFcP4jbzx4/d/tTgWrWui+PHzIhwZvgdT3PBoD+1bYzU8IzQyGHa5jvxteUN
+	 7YZqBzg6zMSI01xinyU83P9XziedpXrJFfiZtPhQ=
+From: Leonardo Bras <leo.bras@arm.com>
+To: Tian Zheng <zhengtian10@huawei.com>
+Cc: Leonardo Bras <leo.bras@arm.com>,
+	linux-arm-kernel@lists.infradead.org,
+	kvmarm@lists.linux.dev,
+	linux-kernel@vger.kernel.org
+Subject: Re: [RFC PATCH 5/5] KVM: arm64: Enable HAFDBS for guests not on migration
+Date: Mon, 21 Sep 2026 15:28:54 +0100
+Message-ID: <arE_Jh4UHiUdjrSi@LeoBrasDK>
+X-Mailer: git-send-email 2.55.0
+In-Reply-To: <497c6239-a75f-4087-83c8-efface3fe3d7@huawei.com>
+References: <20260901171558.2674031-1-leo.bras@arm.com> <20260901171558.2674031-6-leo.bras@arm.com> <497c6239-a75f-4087-83c8-efface3fe3d7@huawei.com>
+Precedence: bulk
+X-Mailing-List: linux-kernel@vger.kernel.org
+List-Id: <linux-kernel.vger.kernel.org>
+List-Subscribe: <mailto:linux-kernel+subscribe@vger.kernel.org>
+List-Unsubscribe: <mailto:linux-kernel+unsubscribe@vger.kernel.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+Content-Transfer-Encoding: 8bit
+
+On Fri, Sep 18, 2026 at 07:58:43PM +0800, Tian Zheng wrote:
+> 
+> 
+> On 9/2/2026 1:15 AM, Leonardo Bras wrote:
+> > @@ -2570,53 +2571,76 @@ int __init kvm_mmu_init(u32 hyp_va_bits)
+> >   out_destroy_pgtable:
+> >   	kvm_pgtable_hyp_destroy(hyp_pgtable);
+> >   out_free_pgtable:
+> >   	kfree(hyp_pgtable);
+> >   	hyp_pgtable = NULL;
+> >   out:
+> >   	return err;
+> >   }
+> > +static void kvm_set_hafdbs(struct kvm *kvm, bool set)
+> > +{
+> > +	/* Check if no action required */
+> > +	if (!!(kvm->arch.mmu.vtcr & VTCR_EL2_HD) == set)
+> > +		return;
+> > +
+> > +	if (set)
+> > +		kvm->arch.mmu.vtcr |= VTCR_EL2_HD;
+> > +	else
+> > +		kvm->arch.mmu.vtcr &= ~VTCR_EL2_HD;
+> > +
+> > +	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
+> > +}
+> > +
+> 
+> Hi Leo,
+> 
+> HD alone is architecturally a no-op. According to the Arm spec, the
+> VTCR_EL2.HD field description reads: "When the Effective value of
+> VTCR_EL2.HA is 0, this field behaves as 0 for all purposes other than a
+> direct read of the value of this bit." So patch 5 as it stands never
+> actually enables stage-2 dirty management.
+
+Oh, right, I missed that. :/
+
+For the above to work it would need to have the HA bit:
+
++	if (set)
++		kvm->arch.mmu.vtcr |= VTCR_EL2_HA | VTCR_EL2_HD;
++	else
++		kvm->arch.mmu.vtcr &= ~(VTCR_EL2_HA |VTCR_EL2_HD);
+
+> 
+> In the combined series, I'm planning to replace both kvm_set_hafdbs()
+> and our earlier enable/disable hooks with a single derived mode:
+> 
+> ```
+> /*
+>  *   logging && HDBSS-capable  ->  HDBSS  (HD|HA|HDBSS)
+>  *   logging, no HDBSS         ->  off
+>  *   !logging, HAFDBS-capable  ->  HAFDBS (HD|HA)
+>  */
+
+Yes, seems correct, if the performance numbers can show patch 5 provides
+performance improvements.
+
+> void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
+> {
+> 	bool logging = atomic_read(&kvm->nr_memslots_dirty_logging) != 0;
+> 	unsigned long target;
+> 
+> 	if (logging && kvm_supports_hdbss(kvm))
+> 		target = VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS;
+> 	else if (logging || !kvm_supports_hafdbs(kvm))
+> 		target = 0;
+> 	else
+> 		target = VTCR_EL2_HD | VTCR_EL2_HA;
+> 	...
+> }
+> ```
+
+Humm, do we actually need the atomic_read being ran when we are enabling 
+dirty_logging? Maybe we can restrain it only to the disabling part.
+
+> 
+> HA is always set alongside HD by construction, so the no-op issue goes
+> away.
+
+Right.
+
+> 
+> I'll fold this into the HDBSS v5 series when I send it out. Let me know
+> if you'd rather keep it in your v2 instead.
+> 
+
+Feel free to merge your part on top of that, I will work on collecting the 
+numbers, though.
+
+Thanks!
+Leo
+
+From mboxrd@z Thu Jan  1 00:00:00 1970
+Received: from canpmsgout11.his.huawei.com (canpmsgout11.his.huawei.com [113.46.200.226])
+	(using TLSv1.2 with cipher ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits))
+	(No client certificate requested)
+	by smtp.subspace.kernel.org (Postfix) with ESMTPS id D08C74BB295
+	for <linux-kernel@vger.kernel.org>; Fri, 18 Sep 2026 11:58:46 +0000 (UTC)
+Authentication-Results: smtp.subspace.kernel.org; arc=none smtp.client-ip=113.46.200.226
+ARC-Seal: i=1; a=rsa-sha256; d=subspace.kernel.org; s=arc-20240116;
+	t=1789732731; cv=none; b=PNVuj4L0N8kJEMGJNR/xxyBJ4wVwu448PpKTviT0DWeWTFAl1QvKKSwu97mz9/i0efEEwbuLkVBJGHNHRr04/Bjt7DCXB1Tc94du0Ej+gjv8bM7Vz27FKWeztx0ryq/kEqdAzqq52R0kRHBRlXFHE/TyJeDRh1WyLBwthA+PeHY=
+ARC-Message-Signature: i=1; a=rsa-sha256; d=subspace.kernel.org;
+	s=arc-20240116; t=1789732731; c=relaxed/simple;
+	bh=jJUrf9jXfQl8W7ClHiyYcAylL94WCjv4zNsEMMLC51Y=;
+	h=Message-ID:Date:MIME-Version:Subject:To:CC:References:From:
+	 In-Reply-To:Content-Type; b=GSRLywPVbavYw6Fj7UKHhL04+OqZHgeSbKIEUo2KZ5SPMUzw2c9yGkLpR8Un4mWOkyj4s5DtOdmfymx2hoRCp/2D/q3+Q9g5Solz7Cba14G9gKUB+yoqRJ28c3tGtKBtwHF6tkn+I3lQC3cb+d+RJtRF8QR8l8u1JnjUBblru30=
+ARC-Authentication-Results: i=1; smtp.subspace.kernel.org; dmarc=pass (p=quarantine dis=none) header.from=huawei.com; spf=pass smtp.mailfrom=huawei.com; dkim=pass (1024-bit key) header.d=huawei.com header.i=@huawei.com header.b=2iI2NGkH; arc=none smtp.client-ip=113.46.200.226
+Authentication-Results: smtp.subspace.kernel.org; dmarc=pass (p=quarantine dis=none) header.from=huawei.com
+Authentication-Results: smtp.subspace.kernel.org; spf=pass smtp.mailfrom=huawei.com
+Authentication-Results: smtp.subspace.kernel.org;
+	dkim=pass (1024-bit key) header.d=huawei.com header.i=@huawei.com header.b="2iI2NGkH"
+dkim-signature: v=1; a=rsa-sha256; d=huawei.com; s=dkim;
+	c=relaxed/relaxed; q=dns/txt;
+	h=From;
+	bh=FTZzu47AOmRxHTR0Eyam8a+mT0R7a/crBOBUb7Y1wmI=;
+	b=2iI2NGkHtsj0pKWN/NSlZVoBkpiYmpnYJ1HMqRg97bQbgDGbJXsYzxrE1RSQE50iT3kZnaZ1r
+	ugnw7eBaUpx7P+dyZXKWjDZw5E3lp1WnMKCHoysh5eRZFpjB0II66WCYY+kvJVlIN1mP3T5YsE/
+	82FZwcek02meXDFkiwiIZGk=
+Received: from mail.maildlp.com (unknown [172.19.163.163])
+	by canpmsgout11.his.huawei.com (SkyGuard) with ESMTPS id 4hmW8D3pYRzKm5t;
+	Fri, 18 Sep 2026 19:47:40 +0800 (CST)
+Received: from kwepemr100010.china.huawei.com (unknown [7.202.195.125])
+	by mail.maildlp.com (Postfix) with ESMTPS id 317A84057A;
+	Fri, 18 Sep 2026 19:58:44 +0800 (CST)
+Received: from [10.67.120.103] (10.67.120.103) by
+ kwepemr100010.china.huawei.com (7.202.195.125) with Microsoft SMTP Server
+ (version=TLS1_2, cipher=TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) id
+ 15.2.2562.45; Fri, 18 Sep 2026 19:58:43 +0800
+Message-ID: <497c6239-a75f-4087-83c8-efface3fe3d7@huawei.com>
+Date: Fri, 18 Sep 2026 19:58:43 +0800
+Precedence: bulk
+X-Mailing-List: linux-kernel@vger.kernel.org
+List-Id: <linux-kernel.vger.kernel.org>
+List-Subscribe: <mailto:linux-kernel+subscribe@vger.kernel.org>
+List-Unsubscribe: <mailto:linux-kernel+unsubscribe@vger.kernel.org>
+MIME-Version: 1.0
+User-Agent: Mozilla Thunderbird
+Subject: Re: [RFC PATCH 5/5] KVM: arm64: Enable HAFDBS for guests not on
+ migration
+To: Leonardo Bras <leo.bras@arm.com>
+CC: <linux-arm-kernel@lists.infradead.org>, <kvmarm@lists.linux.dev>,
+	<linux-kernel@vger.kernel.org>
+References: <20260901171558.2674031-1-leo.bras@arm.com>
+ <20260901171558.2674031-6-leo.bras@arm.com>
+From: Tian Zheng <zhengtian10@huawei.com>
+In-Reply-To: <20260901171558.2674031-6-leo.bras@arm.com>
+Content-Type: text/plain; charset="UTF-8"; format=flowed
+Content-Transfer-Encoding: 7bit
+X-ClientProxiedBy: kwepems100002.china.huawei.com (7.221.188.206) To
+ kwepemr100010.china.huawei.com (7.202.195.125)
+
+
+
+On 9/2/2026 1:15 AM, Leonardo Bras wrote:
+> @@ -2570,53 +2571,76 @@ int __init kvm_mmu_init(u32 hyp_va_bits)
+>   
+>   out_destroy_pgtable:
+>   	kvm_pgtable_hyp_destroy(hyp_pgtable);
+>   out_free_pgtable:
+>   	kfree(hyp_pgtable);
+>   	hyp_pgtable = NULL;
+>   out:
+>   	return err;
+>   }
+>   
+> +static void kvm_set_hafdbs(struct kvm *kvm, bool set)
+> +{
+> +	/* Check if no action required */
+> +	if (!!(kvm->arch.mmu.vtcr & VTCR_EL2_HD) == set)
+> +		return;
+> +
+> +	if (set)
+> +		kvm->arch.mmu.vtcr |= VTCR_EL2_HD;
+> +	else
+> +		kvm->arch.mmu.vtcr &= ~VTCR_EL2_HD;
+> +
+> +	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
+> +}
+> +
+
+Hi Leo,
+
+HD alone is architecturally a no-op. According to the Arm spec, the
+VTCR_EL2.HD field description reads: "When the Effective value of
+VTCR_EL2.HA is 0, this field behaves as 0 for all purposes other than a
+direct read of the value of this bit." So patch 5 as it stands never
+actually enables stage-2 dirty management.
+
+In the combined series, I'm planning to replace both kvm_set_hafdbs()
+and our earlier enable/disable hooks with a single derived mode:
+
+```
+/*
+  *   logging && HDBSS-capable  ->  HDBSS  (HD|HA|HDBSS)
+  *   logging, no HDBSS         ->  off
+  *   !logging, HAFDBS-capable  ->  HAFDBS (HD|HA)
+  */
+void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
+{
+	bool logging = atomic_read(&kvm->nr_memslots_dirty_logging) != 0;
+	unsigned long target;
+
+	if (logging && kvm_supports_hdbss(kvm))
+		target = VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS;
+	else if (logging || !kvm_supports_hafdbs(kvm))
+		target = 0;
+	else
+		target = VTCR_EL2_HD | VTCR_EL2_HA;
+	...
+}
+```
+
+HA is always set alongside HD by construction, so the no-op issue goes
+away.
+
+I'll fold this into the HDBSS v5 series when I send it out. Let me know
+if you'd rather keep it in your v2 instead.
+
+Thanks,
+Tian
+
+From mboxrd@z Thu Jan  1 00:00:00 1970
+Received: from foss.arm.com (foss.arm.com [217.140.110.172])
 	by smtp.subspace.kernel.org (Postfix) with ESMTP id E02EF47DF98
 	for <linux-kernel@vger.kernel.org>; Wed, 16 Sep 2026 14:00:51 +0000 (UTC)
 Authentication-Results: smtp.subspace.kernel.org; arc=none smtp.client-ip=217.140.110.172
@@ -5478,6 +5752,351 @@ Oliver
 
 From mboxrd@z Thu Jan  1 00:00:00 1970
 Received: from foss.arm.com (foss.arm.com [217.140.110.172])
+	by smtp.subspace.kernel.org (Postfix) with ESMTP id A45214A8FC7
+	for <linux-kernel@vger.kernel.org>; Mon, 21 Sep 2026 14:15:49 +0000 (UTC)
+Authentication-Results: smtp.subspace.kernel.org; arc=none smtp.client-ip=217.140.110.172
+ARC-Seal: i=1; a=rsa-sha256; d=subspace.kernel.org; s=arc-20240116;
+	t=1790000151; cv=none; b=r3cey6DyO2hqx0WfHkdTZqq73qHcsfHw5C+NyzqGuo3v7LpKBJOOJMEo3sNJSTM84h7MB79eM4tbm6WHb8KSOTODnIp/h4r5yGbAPPDwy3P98MhGCHV3wjEAUAhB3HUwNuZiClfrzCh4ahH3DPuRQl5u1JzbUD3vjxyxjQ6CWSA=
+ARC-Message-Signature: i=1; a=rsa-sha256; d=subspace.kernel.org;
+	s=arc-20240116; t=1790000151; c=relaxed/simple;
+	bh=GFF0q4XjecnXvt26SXMCNpoTC+BgSNXJBJ9ZFMXMeO4=;
+	h=From:To:Cc:Subject:Date:Message-ID:In-Reply-To:References:
+	 MIME-Version:Content-Type:Content-Disposition; b=PUAMtXnjxfbmGf+lBT2ZZYOIeYZf4207+8pPQToKyEqxNoZPBh/JBmWa1RFJ/k3L/jQ1VMwL9gPRO+dXu6r+0gtXYj4AMoEMhcvMvjBURcEJzqG9V9IHG5VfyRITgj73HbdY0/tmV60Cj+a3TewHozS23Hj/CcKeFOQFs/pOzGQ=
+ARC-Authentication-Results: i=1; smtp.subspace.kernel.org; dmarc=pass (p=none dis=none) header.from=arm.com; spf=pass smtp.mailfrom=arm.com; dkim=pass (1024-bit key) header.d=arm.com header.i=@arm.com header.b=nJ1MVoEu; arc=none smtp.client-ip=217.140.110.172
+Authentication-Results: smtp.subspace.kernel.org; dmarc=pass (p=none dis=none) header.from=arm.com
+Authentication-Results: smtp.subspace.kernel.org; spf=pass smtp.mailfrom=arm.com
+Authentication-Results: smtp.subspace.kernel.org;
+	dkim=pass (1024-bit key) header.d=arm.com header.i=@arm.com header.b="nJ1MVoEu"
+Received: from usa-sjc-imap-foss1.foss.arm.com (unknown [10.121.207.14])
+	by usa-sjc-mx-foss1.foss.arm.com (Postfix) with ESMTP id 84FB819F0;
+	Mon, 21 Sep 2026 07:15:45 -0700 (PDT)
+Received: from LeoBrasDK.cambridge.arm.com (LeoBrasDK.cambridge.arm.com [10.2.212.21])
+	by usa-sjc-imap-foss1.foss.arm.com (Postfix) with ESMTPSA id 144EF3F86C;
+	Mon, 21 Sep 2026 07:15:46 -0700 (PDT)
+DKIM-Signature: v=1; a=rsa-sha256; c=simple/simple; d=arm.com; s=foss;
+	t=1790000149; bh=GFF0q4XjecnXvt26SXMCNpoTC+BgSNXJBJ9ZFMXMeO4=;
+	h=From:To:Cc:Subject:Date:In-Reply-To:References:From;
+	b=nJ1MVoEuIS2S2b3v4/MsCYgyL3+L2ycb3tuEcEo4wIdwkIxtUqibdbHbl0md3gOCh
+	 3PyPr7xV34llOnb87+K4KMB0JoLyNNke5iONl/pyL2ruV30zfjjnm1GsPfscv3Pxeu
+	 QqOiQ4/zuG+aHIQBG4xBv2zHFfN8u6UEEBIRa7Ac=
+From: Leonardo Bras <leo.bras@arm.com>
+To: Tian Zheng <zhengtian10@huawei.com>
+Cc: Leonardo Bras <leo.bras@arm.com>,
+	Oliver Upton <oupton@kernel.org>,
+	Marc Zyngier <maz@kernel.org>,
+	Fuad Tabba <fuad.tabba@linux.dev>,
+	Joey Gouly <joey.gouly@arm.com>,
+	Steffen Eiden <seiden@linux.ibm.com>,
+	Suzuki K Poulose <suzuki.poulose@arm.com>,
+	Zenghui Yu <yuzenghui@huawei.com>,
+	Catalin Marinas <catalin.marinas@arm.com>,
+	Will Deacon <will@kernel.org>,
+	Mark Rutland <mark.rutland@arm.com>,
+	Raghavendra Rao Ananta <rananta@google.com>,
+	linux-arm-kernel@lists.infradead.org,
+	kvmarm@lists.linux.dev,
+	linux-kernel@vger.kernel.org
+Subject: Re: [RFC PATCH 1/5] KVM: arm64: pgtables: Change write bit from S2AP_W to DBM
+Date: Mon, 21 Sep 2026 15:15:44 +0100
+Message-ID: <arE8EOPh1-NWtFIU@LeoBrasDK>
+X-Mailer: git-send-email 2.55.0
+In-Reply-To: <eb629070-a02f-426a-92ee-b2c8f9e2aa9a@huawei.com>
+References: <20260901171558.2674031-1-leo.bras@arm.com> <20260901171558.2674031-2-leo.bras@arm.com> <86bja17cg7.wl-maz@kernel.org> <aql8jY4o8SzjJuFU@LeoBrasDK> <aqnku2TcFzIKhjQl@kernel.org> <aqp73SxO78o7LJTs@LeoBrasDK> <eb629070-a02f-426a-92ee-b2c8f9e2aa9a@huawei.com>
+Precedence: bulk
+X-Mailing-List: linux-kernel@vger.kernel.org
+List-Id: <linux-kernel.vger.kernel.org>
+List-Subscribe: <mailto:linux-kernel+subscribe@vger.kernel.org>
+List-Unsubscribe: <mailto:linux-kernel+unsubscribe@vger.kernel.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=us-ascii
+Content-Disposition: inline
+Content-Transfer-Encoding: 8bit
+
+On Fri, Sep 18, 2026 at 05:39:17PM +0800, Tian Zheng wrote:
+> 
+> 
+> On 9/16/2026 7:22 PM, Leonardo Bras wrote:
+> > On Tue, Sep 15, 2026 at 05:37:15PM -0700, Oliver Upton wrote:
+> > > On Tue, Sep 15, 2026 at 06:12:45PM +0100, Leonardo Bras wrote:
+> > > > > Yes, the HW should ignore it. But we have also
+> > > > > seen quite a few broken designs in this area...
+> > > > > 
+> > > > 
+> > > > I lack experience on what bad thing could happen. So I will expand on what
+> > > > I belive to understand up to here:
+> > > > 
+> > > > - The PTE is in memory, so the DBM bit can be set regardless of being RES0
+> > > > - For SW pagetable walking, I don't think 'bit 51 == 0' is checked
+> > > > - For HW pagetable walking, maybe some faulty implementation may rely on
+> > > >    bit51 being RES0, and fault otherwise.
+> > > > 
+> > > > If that's the case, then we would have to actually support both encodings,
+> > > > and only enable the new one if HAFDBS is available in the system.
+> > > > 
+> > > > I just wonder how high are the chances to have such a broken design,
+> > > > or other broken designs did not come to my mind, and if we have to start
+> > > > with that multiple-encoding option.
+> > > 
+> > > FWIW, the host stage-1 already uses the DBM bit unconditionally,
+> > > treating it as a software bit on implementations without HAFDBS.
+> > > Although given the quality of any garden variety Arm MMU I understand
+> > > where Marc is coming from.
+> > > 
+> > > I don't think the HAFDBS enablement is complicated enough to be done in
+> > > a separate series without any meaningful users, nor would I really be
+> > > interested in taking it without, say, HDBSS.
+> > > 
+> > > Can you please work with Tian to get a combined series out for this?
+> > > 
+> > 
+> > Hi Oliver, thanks for reviewing!
+> > 
+> > Sure, one of the reasons I sent like this is so Tian could use it as a base
+> > for his next version.
+> > 
+> > 
+> 
+> Hi Oliver, Leo,
+> 
+> Works for us. I plan to send HDBSS v5 maybe next week with this series
+> merged in. Both dirty-tracking consumers are already built on top of the
+> DBM approach: dirty ring and dirty bitmap.
+> 
+> Leo, with your blessing, I'd like to pick patches 1-4 into the HDBSS
+> tree with your Signed-off-by preserved and mine added on top, plus some
+> bug fixes on top of this RFC series.
+
+Yeah, no problem on my side. I would just observe the maintainers' comments 
+on those before merging them.
+
+> 
+> For patch 5, I'd like to rework it into a derived hardware dirty mode
+> that replaces both kvm_set_hafdbs() and our earlier HDBSS enable/disable
+> hooks, so the whole thing lands as one series.
+> 
+
+My intention when I wrote that patch was to add a base so you could add 
+HDBSS on kvm_arch_commit_memory_region() with new patch such as:
+
+	/* Disable HAFDBS when dirty-logging starts */
+	if (kvm_supports_hafdbs(kvm))
+		kvm_set_hafdbs(kvm, 0);
++	else
++		kvm_enable_hdbss(kvm);
+...
+
+	/* If dirty-logging was canceled, set HAFDBS back on */
+	if (kvm_supports_hafdbs(kvm) &&
+	    atomic_read(&kvm->nr_memslots_dirty_logging) == 0)
+		kvm_set_hafdbs(kvm, 1);
++	else
++		kvm_disable_hdbss(kvm);
+
+
+That being said, I need to run tests to make sure the usage of HAFDBS 
+outside of dirty_tracking makes any sense in terms of performance, but if 
+that's not the case, it would be fine to rework it so it does not 
+enable/disable HAFDBS there.
+
+> Performance looks good in both dirty ring and dirty bitmap scenarios so
+> far.
+> 
+
+Awesome!
+
+Thanks!
+Leo
+
+From mboxrd@z Thu Jan  1 00:00:00 1970
+Received: from canpmsgout02.his.huawei.com (canpmsgout02.his.huawei.com [113.46.200.217])
+	(using TLSv1.2 with cipher ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits))
+	(No client certificate requested)
+	by smtp.subspace.kernel.org (Postfix) with ESMTPS id 6DB903F5BE3
+	for <linux-kernel@vger.kernel.org>; Fri, 18 Sep 2026 09:39:21 +0000 (UTC)
+Authentication-Results: smtp.subspace.kernel.org; arc=none smtp.client-ip=113.46.200.217
+ARC-Seal: i=1; a=rsa-sha256; d=subspace.kernel.org; s=arc-20240116;
+	t=1789724367; cv=none; b=PImK128LtIzvxi19PEcauGJGL3YujoMzYdyWMV1eBwaeqsn5RwWJBqxpjMC95wec6vwG6llEnTq4jZsjhfM7B76zGC2HTJfaH1r9yhqL9hsFQo27M1jh47ThU2E6CCJikx/+WvnfL7CDQEuz4Phnel5iyhRTm5tcYsOesuKhkzM=
+ARC-Message-Signature: i=1; a=rsa-sha256; d=subspace.kernel.org;
+	s=arc-20240116; t=1789724367; c=relaxed/simple;
+	bh=x30Xff6v9RoHS3rr+aR/zikdov5W8APnTFwkltti0dU=;
+	h=Message-ID:Date:MIME-Version:Subject:To:CC:References:From:
+	 In-Reply-To:Content-Type; b=l1Fk02Fd8sUY+j8xYWxAr7nKKCnxUK9kE6wgYduiEPV6mTcAzu620np/OwNYNX13Pv9iWObBb2F6thXnIyWZiC5f9dLAnyazJe/dJ5twCKEgJd292F8xCIhRaXAT2yVQE9P0H39ibTZ8mpuSFlKR3ZOzGhjQDrMjyrnfArLfJzw=
+ARC-Authentication-Results: i=1; smtp.subspace.kernel.org; dmarc=pass (p=quarantine dis=none) header.from=huawei.com; spf=pass smtp.mailfrom=huawei.com; dkim=pass (1024-bit key) header.d=huawei.com header.i=@huawei.com header.b=yxGnWENT; arc=none smtp.client-ip=113.46.200.217
+Authentication-Results: smtp.subspace.kernel.org; dmarc=pass (p=quarantine dis=none) header.from=huawei.com
+Authentication-Results: smtp.subspace.kernel.org; spf=pass smtp.mailfrom=huawei.com
+Authentication-Results: smtp.subspace.kernel.org;
+	dkim=pass (1024-bit key) header.d=huawei.com header.i=@huawei.com header.b="yxGnWENT"
+dkim-signature: v=1; a=rsa-sha256; d=huawei.com; s=dkim;
+	c=relaxed/relaxed; q=dns/txt;
+	h=From;
+	bh=SYG6Rv7rKoT3HJcrg2i2QELzkrtM2tVPl3fiKJLD4rM=;
+	b=yxGnWENTYn0X7FGHufcyGrNC9lHdsm1QQvV0Qk3LMfvm7yNoH4+MkhoRaS19uC7kBn/EE+lsG
+	pxXRYwaaapCS2zkfc3DvbFMgxYv4VJf4rySxVWtOQ8/uMiKQHaDXyjrjVM+50X7WczZnRA5UQJC
+	7/BsLcMuQfl9/LCfJt8KGcU=
+Received: from mail.maildlp.com (unknown [172.19.163.104])
+	by canpmsgout02.his.huawei.com (SkyGuard) with ESMTPS id 4hmS372yfJzcb4c;
+	Fri, 18 Sep 2026 17:28:03 +0800 (CST)
+Received: from kwepemr100010.china.huawei.com (unknown [7.202.195.125])
+	by mail.maildlp.com (Postfix) with ESMTPS id 83AB14057F;
+	Fri, 18 Sep 2026 17:39:18 +0800 (CST)
+Received: from [10.67.120.103] (10.67.120.103) by
+ kwepemr100010.china.huawei.com (7.202.195.125) with Microsoft SMTP Server
+ (version=TLS1_2, cipher=TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) id
+ 15.2.2562.45; Fri, 18 Sep 2026 17:39:17 +0800
+Message-ID: <eb629070-a02f-426a-92ee-b2c8f9e2aa9a@huawei.com>
+Date: Fri, 18 Sep 2026 17:39:17 +0800
+Precedence: bulk
+X-Mailing-List: linux-kernel@vger.kernel.org
+List-Id: <linux-kernel.vger.kernel.org>
+List-Subscribe: <mailto:linux-kernel+subscribe@vger.kernel.org>
+List-Unsubscribe: <mailto:linux-kernel+unsubscribe@vger.kernel.org>
+MIME-Version: 1.0
+User-Agent: Mozilla Thunderbird
+Subject: Re: [RFC PATCH 1/5] KVM: arm64: pgtables: Change write bit from
+ S2AP_W to DBM
+To: Leonardo Bras <leo.bras@arm.com>, Oliver Upton <oupton@kernel.org>
+CC: Marc Zyngier <maz@kernel.org>, Fuad Tabba <fuad.tabba@linux.dev>, Joey
+ Gouly <joey.gouly@arm.com>, Steffen Eiden <seiden@linux.ibm.com>, Suzuki K
+ Poulose <suzuki.poulose@arm.com>, Zenghui Yu <yuzenghui@huawei.com>, Catalin
+ Marinas <catalin.marinas@arm.com>, Will Deacon <will@kernel.org>, Mark
+ Rutland <mark.rutland@arm.com>, Raghavendra Rao Ananta <rananta@google.com>,
+	<linux-arm-kernel@lists.infradead.org>, <kvmarm@lists.linux.dev>,
+	<linux-kernel@vger.kernel.org>
+References: <20260901171558.2674031-1-leo.bras@arm.com>
+ <20260901171558.2674031-2-leo.bras@arm.com> <86bja17cg7.wl-maz@kernel.org>
+ <aql8jY4o8SzjJuFU@LeoBrasDK> <aqnku2TcFzIKhjQl@kernel.org>
+ <aqp73SxO78o7LJTs@LeoBrasDK>
+From: Tian Zheng <zhengtian10@huawei.com>
+In-Reply-To: <aqp73SxO78o7LJTs@LeoBrasDK>
+Content-Type: text/plain; charset="UTF-8"; format=flowed
+Content-Transfer-Encoding: 7bit
+X-ClientProxiedBy: kwepems100001.china.huawei.com (7.221.188.238) To
+ kwepemr100010.china.huawei.com (7.202.195.125)
+
+
+
+On 9/16/2026 7:22 PM, Leonardo Bras wrote:
+> On Tue, Sep 15, 2026 at 05:37:15PM -0700, Oliver Upton wrote:
+>> On Tue, Sep 15, 2026 at 06:12:45PM +0100, Leonardo Bras wrote:
+>>>> Yes, the HW should ignore it. But we have also
+>>>> seen quite a few broken designs in this area...
+>>>>
+>>>
+>>> I lack experience on what bad thing could happen. So I will expand on what
+>>> I belive to understand up to here:
+>>>
+>>> - The PTE is in memory, so the DBM bit can be set regardless of being RES0
+>>> - For SW pagetable walking, I don't think 'bit 51 == 0' is checked
+>>> - For HW pagetable walking, maybe some faulty implementation may rely on
+>>>    bit51 being RES0, and fault otherwise.
+>>>
+>>> If that's the case, then we would have to actually support both encodings,
+>>> and only enable the new one if HAFDBS is available in the system.
+>>>
+>>> I just wonder how high are the chances to have such a broken design,
+>>> or other broken designs did not come to my mind, and if we have to start
+>>> with that multiple-encoding option.
+>>
+>> FWIW, the host stage-1 already uses the DBM bit unconditionally,
+>> treating it as a software bit on implementations without HAFDBS.
+>> Although given the quality of any garden variety Arm MMU I understand
+>> where Marc is coming from.
+>>
+>> I don't think the HAFDBS enablement is complicated enough to be done in
+>> a separate series without any meaningful users, nor would I really be
+>> interested in taking it without, say, HDBSS.
+>>
+>> Can you please work with Tian to get a combined series out for this?
+>>
+> 
+> Hi Oliver, thanks for reviewing!
+> 
+> Sure, one of the reasons I sent like this is so Tian could use it as a base
+> for his next version.
+> 
+> 
+
+Hi Oliver, Leo,
+
+Works for us. I plan to send HDBSS v5 maybe next week with this series
+merged in. Both dirty-tracking consumers are already built on top of the
+DBM approach: dirty ring and dirty bitmap.
+
+Leo, with your blessing, I'd like to pick patches 1-4 into the HDBSS
+tree with your Signed-off-by preserved and mine added on top, plus some
+bug fixes on top of this RFC series.
+
+For patch 5, I'd like to rework it into a derived hardware dirty mode
+that replaces both kvm_set_hafdbs() and our earlier HDBSS enable/disable
+hooks, so the whole thing lands as one series.
+
+Performance looks good in both dirty ring and dirty bitmap scenarios so
+far.
+
+Thanks,
+Tian
+
+>>>>> diff --git a/arch/arm64/kvm/nested.c b/arch/arm64/kvm/nested.c
+>>>>> index 17123f0b6dab..eb8dfffc32c7 100644
+>>>>> --- a/arch/arm64/kvm/nested.c
+>>>>> +++ b/arch/arm64/kvm/nested.c
+>>>>> @@ -379,21 +379,23 @@ static int walk_nested_s2_pgd(struct kvm_vcpu *vcpu, phys_addr_t ipa,
+>>>>>   	}
+>>>>>   
+>>>>>   	addr_bottom += contiguous_bit_shift(desc, wi, level);
+>>>>>   
+>>>>>   	/* Calculate and return the result */
+>>>>>   	paddr = (desc & GENMASK_ULL(47, addr_bottom)) |
+>>>>>   		(ipa & GENMASK_ULL(addr_bottom - 1, 0));
+>>>>>   	out->output = paddr;
+>>>>>   	out->block_size = 1UL << ((3 - level) * stride + wi->pgshift);
+>>>>>   	out->readable = desc & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+>>>>> -	out->writable = desc & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+>>>>> +	/* Takes care of both RO/RW and RO/WC/WD encodings */
+>>>>> +	out->writable = desc & (KVM_PTE_LEAF_ATTR_HI_S2_DBM |
+>>>>> +				KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W);
+>>>>
+>>>> Absolutely NOT. For a start, NV doesn't support FEAT_HAFDBS. But even
+>>>> if it did, you are now actively corrupting memory by turning a RO
+>>>> mapping with a spurious DBM bit set into a writable mapping.
+>>>> VTCR_EL2.HD exists for a reason.
+>>>>
+>>>> Do you see why your blanket approach of equating DBM with writable is
+>>>> plain wrong?
+>>>
+>>> Sorry, not really... please help me understand it.
+>>>
+>>> When you say a spurious DBM bit, what does it mean?
+>>
+>> You've implemented the exact sort of bug that was alluded to above. In
+>> this case it's a software page table walker consuming DBM regardless of
+>> the value of VTCR_EL2.HD.
+>>
+> 
+> So you mean that DBM being treated as "writable" could _only_ happen if we
+> have VTCR_EL2.HD=1? I was previously under the impression that it could be
+> used regardless of HD value.
+> 
+>> If the guest hypervisor sets VTCR_EL2.HD=0, the expectation is that the
+>> shadow stage-2 MMU treats the corresponding bit in the PTE as RES0.
+>>
+> 
+> Okay, I think I can see it now: since the guest hypervisor could use RO/RW,
+> and has no decoupled concept of dirty and writable, it could think all
+> writable pages are dirty when we run above function.
+> 
+> So.. would it make sense to have an out->dirty, which we would check based
+> on S2AP while out->writable is compared against DBM, and we change the
+> logic that uses out->writable to properly match it, maybe based on the
+> guest having the feature enabled?
+> 
+> Thanks for your patience on explaining this!
+> Leo
+> 
+
+
+From mboxrd@z Thu Jan  1 00:00:00 1970
+Received: from foss.arm.com (foss.arm.com [217.140.110.172])
 	by smtp.subspace.kernel.org (Postfix) with ESMTP id 883084F4755
 	for <linux-kernel@vger.kernel.org>; Wed, 16 Sep 2026 13:25:47 +0000 (UTC)
 Authentication-Results: smtp.subspace.kernel.org; arc=none smtp.client-ip=217.140.110.172
@@ -5836,4 +6455,226 @@ for S2 to have this enabled.
 
 -- 
 Without deviation from the norm, progress is not possible.
+
+From mboxrd@z Thu Jan  1 00:00:00 1970
+Received: from canpmsgout10.his.huawei.com (canpmsgout10.his.huawei.com [113.46.200.225])
+	(using TLSv1.2 with cipher ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits))
+	(No client certificate requested)
+	by smtp.subspace.kernel.org (Postfix) with ESMTPS id 3D8D94E73A4
+	for <linux-kernel@vger.kernel.org>; Fri, 18 Sep 2026 11:43:50 +0000 (UTC)
+Authentication-Results: smtp.subspace.kernel.org; arc=none smtp.client-ip=113.46.200.225
+ARC-Seal: i=1; a=rsa-sha256; d=subspace.kernel.org; s=arc-20240116;
+	t=1789731835; cv=none; b=KYC0I387Wre0K4Z5A3txC/E/vpuxb4rWDLGnelx4Q5/objG7TZIuv2SgwRBe00RXQJFnAqUgm6/h7RQmXzgSbOgwF6K/hW9qNyktSqtnY0VLM4W3HvaC0vRAu9VPuD+sXPI0Olj0di+0NUUeBBaAQLtCoE34k7XO2bO8/ZzbpI0=
+ARC-Message-Signature: i=1; a=rsa-sha256; d=subspace.kernel.org;
+	s=arc-20240116; t=1789731835; c=relaxed/simple;
+	bh=Us8cofqcFXbDtFaXelWJxwYr3mK/i18OI7D5yUMNU3k=;
+	h=Message-ID:Date:MIME-Version:Subject:To:CC:References:From:
+	 In-Reply-To:Content-Type; b=ZKFWASH7jRPd26ZyzLzdeT3ukCIR/dfFD5HdGhV2GhUU9ZqQraTf6UIbIL5NYNSSzjYtEhjqO8OXu66NpMTcT9/98ldMSx7Me6AdnqFo/WApptRP7PJ9OwMc4BH+zZ61ULDAqY4dMom/xn6UuK2G5kKPeYGteot8sAj6YRhyDXE=
+ARC-Authentication-Results: i=1; smtp.subspace.kernel.org; dmarc=pass (p=quarantine dis=none) header.from=huawei.com; spf=pass smtp.mailfrom=huawei.com; dkim=pass (1024-bit key) header.d=huawei.com header.i=@huawei.com header.b=Jcy4kvb6; arc=none smtp.client-ip=113.46.200.225
+Authentication-Results: smtp.subspace.kernel.org; dmarc=pass (p=quarantine dis=none) header.from=huawei.com
+Authentication-Results: smtp.subspace.kernel.org; spf=pass smtp.mailfrom=huawei.com
+Authentication-Results: smtp.subspace.kernel.org;
+	dkim=pass (1024-bit key) header.d=huawei.com header.i=@huawei.com header.b="Jcy4kvb6"
+dkim-signature: v=1; a=rsa-sha256; d=huawei.com; s=dkim;
+	c=relaxed/relaxed; q=dns/txt;
+	h=From;
+	bh=X/nASaHEAycknDEMuta+KNUeT5Wrc8KXViYcggb/2yo=;
+	b=Jcy4kvb63Kd+VZhYjHZYKpY67W9Xd6KABsG992lmGW2zrTseGfuQ52OHyGQEZzxrRbyUkrB/K
+	cdndwnyhcyC+iQamuToJ/tTBJGjQP/hyJ2Cwo5YWJVQoed/M0sk2HT9b4g3ILxC3M/PrMXDv08n
+	/vVJpGvLLRziSwq9yAu9jxY=
+Received: from mail.maildlp.com (unknown [172.19.163.127])
+	by canpmsgout10.his.huawei.com (SkyGuard) with ESMTPS id 4hmVpy5S4nz1K96s;
+	Fri, 18 Sep 2026 19:32:42 +0800 (CST)
+Received: from kwepemr100010.china.huawei.com (unknown [7.202.195.125])
+	by mail.maildlp.com (Postfix) with ESMTPS id DCA5B40572;
+	Fri, 18 Sep 2026 19:43:42 +0800 (CST)
+Received: from [10.67.120.103] (10.67.120.103) by
+ kwepemr100010.china.huawei.com (7.202.195.125) with Microsoft SMTP Server
+ (version=TLS1_2, cipher=TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) id
+ 15.2.2562.45; Fri, 18 Sep 2026 19:43:42 +0800
+Message-ID: <d039151a-d114-47fd-988d-df80751f1c97@huawei.com>
+Date: Fri, 18 Sep 2026 19:43:41 +0800
+Precedence: bulk
+X-Mailing-List: linux-kernel@vger.kernel.org
+List-Id: <linux-kernel.vger.kernel.org>
+List-Subscribe: <mailto:linux-kernel+subscribe@vger.kernel.org>
+List-Unsubscribe: <mailto:linux-kernel+unsubscribe@vger.kernel.org>
+MIME-Version: 1.0
+User-Agent: Mozilla Thunderbird
+Subject: Re: [RFC PATCH 1/5] KVM: arm64: pgtables: Change write bit from
+ S2AP_W to DBM
+To: Leonardo Bras <leo.bras@arm.com>, Marc Zyngier <maz@kernel.org>
+CC: Oliver Upton <oupton@kernel.org>, Fuad Tabba <fuad.tabba@linux.dev>, Joey
+ Gouly <joey.gouly@arm.com>, Steffen Eiden <seiden@linux.ibm.com>, Suzuki K
+ Poulose <suzuki.poulose@arm.com>, Zenghui Yu <yuzenghui@huawei.com>, Catalin
+ Marinas <catalin.marinas@arm.com>, Will Deacon <will@kernel.org>, Mark
+ Rutland <mark.rutland@arm.com>, Raghavendra Rao Ananta <rananta@google.com>,
+	<linux-arm-kernel@lists.infradead.org>, <kvmarm@lists.linux.dev>,
+	<linux-kernel@vger.kernel.org>, Tian Zheng <zhengtian10@huawei.com>
+References: <20260901171558.2674031-1-leo.bras@arm.com>
+ <20260901171558.2674031-2-leo.bras@arm.com> <86bja17cg7.wl-maz@kernel.org>
+ <aql8jY4o8SzjJuFU@LeoBrasDK> <aqnku2TcFzIKhjQl@kernel.org>
+ <aqp73SxO78o7LJTs@LeoBrasDK> <86fqz95qwe.wl-maz@kernel.org>
+ <aqqY1QiB0ZBAQkwc@LeoBrasDK>
+From: Tian Zheng <zhengtian10@huawei.com>
+In-Reply-To: <aqqY1QiB0ZBAQkwc@LeoBrasDK>
+Content-Type: text/plain; charset="UTF-8"; format=flowed
+Content-Transfer-Encoding: 8bit
+X-ClientProxiedBy: kwepems500001.china.huawei.com (7.221.188.70) To
+ kwepemr100010.china.huawei.com (7.202.195.125)
+
+
+
+On 9/16/2026 9:25 PM, Leonardo Bras wrote:
+> On Wed, Sep 16, 2026 at 01:20:33PM +0100, Marc Zyngier wrote:
+>> On Wed, 16 Sep 2026 12:22:05 +0100,
+>> Leonardo Bras <leo.bras@arm.com> wrote:
+>>>
+>>> On Tue, Sep 15, 2026 at 05:37:15PM -0700, Oliver Upton wrote:
+>>>> On Tue, Sep 15, 2026 at 06:12:45PM +0100, Leonardo Bras wrote:
+>>>>>> Yes, the HW should ignore it. But we have also
+>>>>>> seen quite a few broken designs in this area...
+>>>>>>
+>>>>>
+>>>>> I lack experience on what bad thing could happen. So I will expand on what
+>>>>> I belive to understand up to here:
+>>>>>
+>>>>> - The PTE is in memory, so the DBM bit can be set regardless of being RES0
+>>>>> - For SW pagetable walking, I don't think 'bit 51 == 0' is checked
+>>>>> - For HW pagetable walking, maybe some faulty implementation may rely on
+>>>>>    bit51 being RES0, and fault otherwise.
+>>>>>
+>>>>> If that's the case, then we would have to actually support both encodings,
+>>>>> and only enable the new one if HAFDBS is available in the system.
+>>>>>
+>>>>> I just wonder how high are the chances to have such a broken design,
+>>>>> or other broken designs did not come to my mind, and if we have to start
+>>>>> with that multiple-encoding option.
+>>>>
+>>>> FWIW, the host stage-1 already uses the DBM bit unconditionally,
+>>>> treating it as a software bit on implementations without HAFDBS.
+>>>> Although given the quality of any garden variety Arm MMU I understand
+>>>> where Marc is coming from.
+>>>>
+>>>> I don't think the HAFDBS enablement is complicated enough to be done in
+>>>> a separate series without any meaningful users, nor would I really be
+>>>> interested in taking it without, say, HDBSS.
+>>>>
+>>>> Can you please work with Tian to get a combined series out for this?
+>>>>
+>>>
+>>> Hi Oliver, thanks for reviewing!
+>>>
+>>> Sure, one of the reasons I sent like this is so Tian could use it as a base
+>>> for his next version.
+>>>
+>>>
+>>>>>>> diff --git a/arch/arm64/kvm/nested.c b/arch/arm64/kvm/nested.c
+>>>>>>> index 17123f0b6dab..eb8dfffc32c7 100644
+>>>>>>> --- a/arch/arm64/kvm/nested.c
+>>>>>>> +++ b/arch/arm64/kvm/nested.c
+>>>>>>> @@ -379,21 +379,23 @@ static int walk_nested_s2_pgd(struct kvm_vcpu *vcpu, phys_addr_t ipa,
+>>>>>>>   	}
+>>>>>>>   
+>>>>>>>   	addr_bottom += contiguous_bit_shift(desc, wi, level);
+>>>>>>>   
+>>>>>>>   	/* Calculate and return the result */
+>>>>>>>   	paddr = (desc & GENMASK_ULL(47, addr_bottom)) |
+>>>>>>>   		(ipa & GENMASK_ULL(addr_bottom - 1, 0));
+>>>>>>>   	out->output = paddr;
+>>>>>>>   	out->block_size = 1UL << ((3 - level) * stride + wi->pgshift);
+>>>>>>>   	out->readable = desc & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R;
+>>>>>>> -	out->writable = desc & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+>>>>>>> +	/* Takes care of both RO/RW and RO/WC/WD encodings */
+>>>>>>> +	out->writable = desc & (KVM_PTE_LEAF_ATTR_HI_S2_DBM |
+>>>>>>> +				KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W);
+>>>>>>
+>>>>>> Absolutely NOT. For a start, NV doesn't support FEAT_HAFDBS. But even
+>>>>>> if it did, you are now actively corrupting memory by turning a RO
+>>>>>> mapping with a spurious DBM bit set into a writable mapping.
+>>>>>> VTCR_EL2.HD exists for a reason.
+>>>>>>
+>>>>>> Do you see why your blanket approach of equating DBM with writable is
+>>>>>> plain wrong?
+>>>>>
+>>>>> Sorry, not really... please help me understand it.
+>>>>>
+>>>>> When you say a spurious DBM bit, what does it mean?
+>>>>
+>>>> You've implemented the exact sort of bug that was alluded to above. In
+>>>> this case it's a software page table walker consuming DBM regardless of
+>>>> the value of VTCR_EL2.HD.
+>>>>
+>>>
+>>> So you mean that DBM being treated as "writable" could _only_ happen if we
+>>> have VTCR_EL2.HD=1? I was previously under the impression that it could be
+>>> used regardless of HD value.
+>>
+>> Then you have failed to understand the architecture. When
+>> VTCR_EL2.HD==0, DBM can be treated as RES0, RES0, or RES0.
+>>
+>> R_XZFQH and R_BRFGY are pretty clear that DBM can only be evaluated
+>> when dirty hw update is enabled, and I_MHJZP tells you what it means
+>> for S2 to have this enabled.
+> 
+> Right, I_MHJZP says that if VTCR_EL2.HD is 1, then dirty state hardware
+> management is enabled.
+> 
+> Then, R_XZFQH and R_BRFGY say that if (DBM+S2AP) bit combination is the
+> given and the dirty state hardware management is enabled then a block
+> descriptor is WC/WD.
+> 
+> R_XZFQH header, as an example:
+> For each translation stage using Direct permissions, if all of the
+> following apply, then a Block descriptor or Page descriptor is described
+> as writable-clean[...]
+> 
+> It says:
+> "if all apply, the block is WC",
+> it does not say
+> "only if all apply, the block is WC".
+> so it forces one way, but not the other.
+> 
+> So I previously understood that we could also use the encoding for WC/WD in
+> software, to avoid having 2 distinct encodings, when VTCR_EL2.HD=0.
+> 
+> If that's not possible, as you mentioned, then yes, I failed to get that
+> part. I also see that you mention it being RES0 when VTCR_EL2.HD==0, but I
+> honestly could not find reference to that. :(
+> 
+> What I could find on Arm ARM M.cc was Table D8-53, which states for
+> bit 51 that it's DBM if indirect permissions are disabled, or PIINDEX[1]
+> if they are enabled. There is also no such information in D8.5.2 about this
+> res0 behavior.
+> 
+> So I am possibly missing the proper place to look for that information.
+> Could you please share that with me so I can improve and maybe avoid being
+> a inconvenience in the future?
+> 
+> Thanks!
+> Leo
+> 
+
+Hi Leo, Marc,
+
+On the NV side, KVM itself already limits the L1-visible
+ID_AA64MMFR1_EL1.HAFDBS to AF-only in limit_nv_id_reg(), so bit 51 has
+no architectural meaning to L1, and an L1 using it as software metadata
+would have its read-only pages misread as writable by the union read in
+walk_nested_s2_pgd() — the memory corruption Marc described. Since NV
+has no HAFDBS emulation today, I'd suggest we simply revert this hunk
+for now and keep reading writability from S2AP[1] alone:
+
+```
+out->writable = desc & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W;
+```
+
+It seems we can address the NV side later, once nested HAFDBS is
+actually supported.
+
+That's what I did when picking the series up for HDBSS v5: patch 1 drops
+the nested.c hunk.
+
+Thanks,
+Tian
 
