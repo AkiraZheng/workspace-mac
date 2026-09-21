@@ -1,6 +1,6 @@
 From f317229127299b8633985104e7797bb7674cf4f9 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
-Date: Mon, 21 Sep 2026 23:06:36 +0800
+Date: Mon, 21 Sep 2026 23:20:27 +0800
 Subject: [PATCH v5 00/15] KVM: arm64: FEAT_HDBSS support for stage-2 dirty
  tracking
 
@@ -9,12 +9,12 @@ arm64 using FEAT_HDBSS, and is the combined series of Leonardo Bras'
 HAFDBS descriptors rework [1] and the HDBSS buffer support built on
 top of it, as requested during the review of [1].
 
-The first five patches are the HAFDBS base from Leonardo's RFC,
-reworked per the review feedback and folded with fixes developed
-while validating the HDBSS work on top: the descriptor encoding moves
-the stage-2 write permission from S2AP[1] to DBM and reuses S2AP[1]
-as the dirty state, giving the three states the rest of the series
-builds on:
+The first five patches form the HAFDBS base: four from Leonardo's
+RFC, reworked per the review feedback, plus the folio-account harvest
+developed while validating the HDBSS work on top. The descriptor
+encoding moves the stage-2 write permission from S2AP[1] to DBM and
+reuses S2AP[1] as the dirty state, giving the three states the rest
+of the series builds on:
 
     RO  (DBM=0, S2AP[1]=0)  read-only, write -> permission fault
     WC  (DBM=1, S2AP[1]=0)  writable-clean, hw promotes on write
@@ -75,7 +75,50 @@ Comments welcome, especially on:
     keeps shadow installs writable-dirty so nested behaviour is
     unchanged.
 
+Relative to Leonardo's RFC [1]: patch 1 keeps reading stage-2
+writability from S2AP[1] in the nested walker, as DBM is RES0 from
+L1's perspective; patch 2 splits the two dirty ledgers on the fault
+paths, the host folio account marked speculatively on PROT_W and the
+KVM dirty bitmap only on PROT_DIRTY; his "Enable HAFDBS for guests
+not on migration" is replaced by the derived mode (patch 12). The
+folio-account harvest, the dirty-ring reservation, and the
+buffer-size UAPI with documentation and a selftest are new.
+
+Changes since v4 [2]:
+
+- Rebased onto Leonardo's descriptor rework [1]: the stage-2 write
+  permission moves to DBM and S2AP[1] becomes the pure dirty state,
+  with KVM_PGTABLE_PROT_DIRTY, a dedicated write-protect walker and
+  KVM_REQ_RELOAD_STAGE2. This replaces v4's auto-DBM patch and drops
+  the mandatory dependency on eager hugepage splitting, as the walker
+  clears DBM on blocks so writes still fault and lazy splitting keeps
+  working.
+
+- New: harvest of the stage-2 dirty state into the host folio account
+  at unmap/write-protect time. Guest writes bypass the host stage-1,
+  so nothing else marks the folio dirty.
+
+- Buffer lifetime reworked per review: buffers are allocated at vCPU
+  creation and freed at destruction, and the registers are programmed
+  on buffer ownership rather than on HDBSS enablement, closing the
+  use-after-free window on a concurrent mode switch.
+
+- The auto enable/disable on dirty-logging change is replaced by a
+  single derived mode, a pure function of the static capabilities and
+  the number of logging memslots: no intermediate illegal VTCR_EL2
+  state, no locking against concurrent updates.
+
+- The buffer flush and the HDBSS fault handling are split into
+  separate patches, and the flush now happens at a single point in
+  the run loop, before the exit reason is handled.
+
+- New: dirty ring mode support, with the ring reserving room for a
+  full buffer flush and the buffer size pinned to PAGE_SIZE, and the
+  KVM_CAP_ARM_HDBSS_BUFFER_SIZE UAPI with documentation and a
+  selftest.
+
 [1] https://lore.kernel.org/all/20260901171558.2674031-1-leo.bras@arm.com/
+[2] https://lore.kernel.org/all/20260709104026.2612599-1-zhengtian10@huawei.com/
 
 Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
 
