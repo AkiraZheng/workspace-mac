@@ -1,0 +1,96 @@
+From 8502df43390dba8e3dfe428bff5f25d0650eb086 Mon Sep 17 00:00:00 2001
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 4 Sep 2026 19:05:10 +0100
+Subject: [PATCH 4/8] hw/arm/smmuv3-accel: Add a helper to replay all STEs
+
+Add smmuv3_accel_replay_stes(). It walks the guest stream table and calls
+smmuv3_accel_install_ste() for every device behind an accelerated SMMUv3,
+which rebuilds the vDEVICE and the nested HWPT. The incoming migration path
+uses this instead of transferring per device host state, all of which can
+be derived from guest RAM once strtab_base and CR0 are restored.
+
+No caller yet.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ hw/arm/smmuv3-accel-stubs.c |  5 +++++
+ hw/arm/smmuv3-accel.c       | 34 ++++++++++++++++++++++++++++++++++
+ hw/arm/smmuv3-accel.h       |  1 +
+ 3 files changed, 40 insertions(+)
+
+diff --git a/hw/arm/smmuv3-accel-stubs.c b/hw/arm/smmuv3-accel-stubs.c
+index b57b5c01e7..0514915e45 100644
+--- a/hw/arm/smmuv3-accel-stubs.c
++++ b/hw/arm/smmuv3-accel-stubs.c
+@@ -28,6 +28,11 @@ bool smmuv3_accel_install_ste_range(SMMUv3State *s, SMMUSIDRange *range,
+     return true;
+ }
+ 
++bool smmuv3_accel_replay_stes(SMMUv3State *s, Error **errp)
++{
++    return true;
++}
++
+ bool smmuv3_accel_attach_gbpa_hwpt(SMMUv3State *s, Error **errp)
+ {
+     return true;
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 287ea91fbe..6678e49f6e 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -407,6 +407,40 @@ bool smmuv3_accel_install_ste_range(SMMUv3State *s, SMMUSIDRange *range,
+     return all_ok;
+ }
+ 
++/*
++ * Install the STE again for every device behind this accelerated SMMUv3, by
++ * reading the guest stream table once more. Stops at the first failure.
++ */
++bool smmuv3_accel_replay_stes(SMMUv3State *s, Error **errp)
++{
++    ERRP_GUARD();
++    SMMUv3AccelState *accel = s->s_accel;
++    SMMUv3AccelDevice *accel_dev;
++
++    if (!accel || !accel->viommu) {
++        return true;
++    }
++
++    QLIST_FOREACH(accel_dev, &accel->device_list, next) {
++        uint32_t sid = smmu_get_sid(&accel_dev->sdev);
++        SMMUEventInfo event = {.type = SMMU_EVT_NONE, .sid = sid,
++                               .inval_ste_allowed = true};
++        STE ste;
++
++        /* Skip a device the guest has not programmed */
++        if (smmu_find_ste(s, sid, &ste, &event)) {
++            continue;
++        }
++
++        if (!smmuv3_accel_install_ste(s, &accel_dev->sdev, sid, errp)) {
++            error_prepend(errp, "Device 0x%x: Failed to install STE: ", sid);
++            return false;
++        }
++    }
++
++    return true;
++}
++
+ /*
+  * This issues the invalidation cmd to the host SMMUv3.
+  *
+diff --git a/hw/arm/smmuv3-accel.h b/hw/arm/smmuv3-accel.h
+index a91d188d61..24828ba9ab 100644
+--- a/hw/arm/smmuv3-accel.h
++++ b/hw/arm/smmuv3-accel.h
+@@ -92,6 +92,7 @@ bool smmuv3_accel_install_ste(SMMUv3State *s, SMMUDevice *sdev, int sid,
+                               Error **errp);
+ bool smmuv3_accel_install_ste_range(SMMUv3State *s, SMMUSIDRange *range,
+                                     Error **errp);
++bool smmuv3_accel_replay_stes(SMMUv3State *s, Error **errp);
+ bool smmuv3_accel_attach_gbpa_hwpt(SMMUv3State *s, Error **errp);
+ bool smmuv3_accel_issue_inv_cmd(SMMUv3State *s, void *cmd, SMMUDevice *sdev,
+                                 Error **errp);
+-- 
+2.43.0
+

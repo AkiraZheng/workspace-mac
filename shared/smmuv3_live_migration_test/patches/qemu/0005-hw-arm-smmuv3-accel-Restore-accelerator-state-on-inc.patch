@@ -1,0 +1,53 @@
+From 6efe206d822f350922fb3d42340c2caaf62cbec8 Mon Sep 17 00:00:00 2001
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 4 Sep 2026 19:05:11 +0100
+Subject: [PATCH 5/8] hw/arm/smmuv3-accel: Restore accelerator state on
+ incoming migration
+
+Extend the accel subsection post_load, after the IDR check, to bring the
+host side back in line. It allocates the vEVENTQ, which the A_CR0 write
+handler normally does, using the restored s->eventq.log2size. It attaches
+the HWPT for the restored GBPA to every device. Then it replays the STEs,
+which overrides that HWPT wherever the guest has a usable entry.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ hw/arm/smmuv3-accel.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 6678e49f6e..b653f3f4ce 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -1165,6 +1165,28 @@ static bool smmuv3_accel_vmstate_post_load(void *opaque, int version_id,
+         return false;
+     }
+ 
++    if (!s->s_accel->viommu) {
++        return true;
++    }
++
++    /* Normally done by the A_CR0 write handler, which is not replayed. */
++    if (!smmuv3_accel_alloc_veventq(s, errp)) {
++        error_prepend(errp, "Failed to restore the vEVENTQ: ");
++        return false;
++    }
++
++    /* smmuv3/gbpa is listed before this subsection, so it is in place */
++    if (!smmuv3_accel_attach_gbpa_hwpt(s, errp)) {
++        error_prepend(errp, "Failed to restore the GBPA HWPT: ");
++        return false;
++    }
++
++    /* Everything else comes from guest memory, which is already restored. */
++    if (!smmuv3_accel_replay_stes(s, errp)) {
++        error_prepend(errp, "Failed to replay the stream table: ");
++        return false;
++    }
++
+     return true;
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,45 @@
+From 392946303ce7bbf5cf4bd32dddaea912da6fe979 Mon Sep 17 00:00:00 2001
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Wed, 19 Aug 2026 09:35:40 +0000
+Subject: [PATCH 8/8] pci/pcie: Do not check Link Status 2 across a migration
+
+pcie_sync_bridge_lnk() copies the Flit Mode Status bit of the device below
+a bridge into the Link Status 2 register of the bridge itself.
+
+When the device below the bridge is assigned with vfio-pci, config_read()
+returns the value of the real hardware. Two cards can easily disagree on
+it, even two of the same model in the same machine, because it depends on
+how each link trained. The bit then ends up set on one side of a migration
+and clear on the other. This does not need two hosts. It reproduces with
+both ends running on one machine and a different card assigned to each.
+
+Any VM with an assigned device below a pcie-root-port is affected.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ hw/pci/pcie.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/hw/pci/pcie.c b/hw/pci/pcie.c
+index 4622c75e48..054ca03c92 100644
+--- a/hw/pci/pcie.c
++++ b/hw/pci/pcie.c
+@@ -244,6 +244,15 @@ int pcie_cap_init(PCIDevice *dev, uint8_t offset,
+     /* Fill link speed and width options */
+     pcie_cap_fill_slot_lnk(dev);
+ 
++    /*
++     * Link Status 2 carries the Flit Mode Status bit, which
++     * pcie_sync_bridge_lnk() copies from the device below the bridge. For an
++     * assigned device that value comes from real hardware and can differ
++     * between two hosts, so checking it on migration would reject an
++     * otherwise valid stream. Same reasoning as PCI_EXP_LNKSTA above.
++     */
++    pci_set_word(dev->cmask + pos + PCI_EXP_LNKSTA2, 0);
++
+     /* Filling v2 specific values */
+     pci_set_long(exp_cap + PCI_EXP_DEVCAP2,
+                  PCI_EXP_DEVCAP2_EFF | PCI_EXP_DEVCAP2_EETLPP);
+-- 
+2.43.0
+

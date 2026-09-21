@@ -1,0 +1,623 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC 1/7] hw/arm/smmuv3-accel: Factor out the single vEVENT
+ read
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 04 Sep 2026 19:05:07 +0100
+Message-Id: <20260904180513.248396-2-skolothumtho@nvidia.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Move the body of smmuv3_accel_event_read() into a new helper,
+smmuv3_accel_event_read_one(), that reads one vEVENT and tells the caller
+whether it propagated an event, found the queue empty, or failed.
+
+Subsequent patch will make use of the helper to drain the queue.
+
+No functional change intended.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+Reviewed-by: Eric Auger <eric.auger@redhat.com>
+---
+ hw/arm/smmuv3-accel.c | 30 ++++++++++++++++++++----------
+ 1 file changed, 20 insertions(+), 10 deletions(-)
+
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 91aca1aa14..fc503578f5 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -484,28 +484,38 @@ int smmuv3_accel_event_read_validate(IOMMUFDVeventq *veventq, uint32_t type,
+     return 0;
+ }
+ 
+-static void smmuv3_accel_event_read(void *opaque)
++/*
++ * Read one pending vEVENT and propagate it to the guest event queue.
++ * Returns 0 if an event was propagated, 1 if the queue is drained, -1 on
++ * error with @errp set.
++ */
++static int smmuv3_accel_event_read_one(SMMUv3State *s, Error **errp)
+ {
+-    SMMUv3State *s = opaque;
+     IOMMUFDVeventq *veventq = s->s_accel->veventq;
+     struct {
+         struct iommufd_vevent_header hdr;
+         struct iommu_vevent_arm_smmuv3 vevent;
+     } buf;
+-    Error *local_err = NULL;
+     int ret;
+ 
+     ret = smmuv3_accel_event_read_validate(veventq,
+                                            IOMMU_VEVENTQ_TYPE_ARM_SMMUV3, &buf,
+-                                           sizeof(buf), &local_err);
+-    if (ret < 0) {
+-        warn_report_err_once(local_err);
+-        return;
+-    }
+-    if (ret > 0) {
+-        return; /* EAGAIN/EINTR */
++                                           sizeof(buf), errp);
++    if (ret) {
++        return ret;
+     }
+     smmuv3_propagate_event(s, (Evt *)&buf.vevent);
++    return 0;
++}
++
++static void smmuv3_accel_event_read(void *opaque)
++{
++    SMMUv3State *s = opaque;
++    Error *local_err = NULL;
++
++    if (smmuv3_accel_event_read_one(s, &local_err) < 0) {
++        warn_report_err_once(local_err);
++    }
+ }
+ 
+ static void smmuv3_accel_free_veventq(SMMUv3AccelState *accel)
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC 2/7] hw/arm/smmuv3-accel: Drain the vEVENTQ when the VM
+ stops
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 04 Sep 2026 19:05:08 +0100
+Message-Id: <20260904180513.248396-3-skolothumtho@nvidia.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Fault events sit in the kernel vEVENTQ until smmuv3_accel_event_read()
+moves them into the emulated event queue. The vEVENTQ is an iommufd object
+that is not migrated, so anything left in it when the source stops is lost.
+
+Drain it from a VM state change handler, which runs before any state is
+saved. Propagating an event writes the record into guest RAM and raises the
+event queue interrupt, and both guest RAM and the GIC are saved before the
+SMMUv3 device state. A pre_save hook would run after both, hence using
+qemu_add_vm_change_state_handler().
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+Reviewed-by: Eric Auger <eric.auger@redhat.com>
+---
+ hw/arm/smmuv3-accel.c | 35 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index fc503578f5..73509dbd8d 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -18,6 +18,7 @@
+ 
+ #include "smmuv3-internal.h"
+ #include "smmuv3-accel.h"
++#include "system/runstate.h"
+ #include "system/system.h"
+ #include "tegra241-cmdqv.h"
+ 
+@@ -518,6 +519,37 @@ static void smmuv3_accel_event_read(void *opaque)
+     }
+ }
+ 
++/*
++ * Drain the kernel vEVENTQ into the guest event queue whenever the VM stops,
++ * so that a migration does not strand events in an object it does not carry.
++ * Propagating an event writes the record into guest RAM and raises the event
++ * queue interrupt, both of which are saved before the SMMUv3 device state, so
++ * a pre_save hook would be too late for either.
++ *
++ * VFIO registers at a higher priority and the stop path runs in descending
++ * priority, so the devices are already in STOP by the time this runs.
++ */
++static void smmuv3_accel_vm_state_change(void *opaque, bool running,
++                                         RunState state)
++{
++    SMMUv3State *s = opaque;
++    SMMUv3AccelState *accel = s->s_accel;
++    Error *local_err = NULL;
++    int ret;
++
++    if (running || !accel || !accel->veventq) {
++        return;
++    }
++
++    do {
++        ret = smmuv3_accel_event_read_one(s, &local_err);
++    } while (!ret);
++
++    if (ret < 0) {
++        warn_report_err(local_err);
++    }
++}
++
+ static void smmuv3_accel_free_veventq(SMMUv3AccelState *accel)
+ {
+     IOMMUFDVeventq *veventq = accel->veventq;
+@@ -1146,5 +1178,8 @@ bool smmuv3_accel_init(SMMUv3State *s, Error **errp)
+         qemu_add_machine_init_done_notifier(&s->machine_done);
+     }
+ 
++    /* For migartion of vEVENTQ pending events */
++    qemu_add_vm_change_state_handler(smmuv3_accel_vm_state_change, s);
++
+     return true;
+ }
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC 3/7] hw/arm/smmuv3: Migrate the accelerator feature set
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 04 Sep 2026 19:05:09 +0100
+Message-Id: <20260904180513.248396-4-skolothumtho@nvidia.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Add a subsection carrying idr[0] to idr[5], needed when accel=on. pre_load
+saves the locally resolved values and post_load fails the migration if the
+incoming ones differ. Accepting the source values would leave QEMU
+advertising features the destination host cannot provide.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ hw/arm/smmuv3-accel.h       |  1 +
+ include/hw/arm/smmuv3.h     |  7 ++++-
+ hw/arm/smmuv3-accel-stubs.c | 12 ++++++++
+ hw/arm/smmuv3-accel.c       | 58 +++++++++++++++++++++++++++++++++++++
+ hw/arm/smmuv3.c             |  1 +
+ 5 files changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/hw/arm/smmuv3-accel.h b/hw/arm/smmuv3-accel.h
+index ea11d513cc..a91d188d61 100644
+--- a/hw/arm/smmuv3-accel.h
++++ b/hw/arm/smmuv3-accel.h
+@@ -99,6 +99,7 @@ void smmuv3_accel_idr_override(SMMUv3State *s);
+ bool smmuv3_accel_alloc_veventq(SMMUv3State *s, Error **errp);
+ int smmuv3_accel_event_read_validate(IOMMUFDVeventq *veventq, uint32_t type,
+                                      void *buf, size_t size, Error **errp);
++extern const VMStateDescription vmstate_smmuv3_accel;
+ void smmuv3_accel_reset(SMMUv3State *s);
+ SMMUv3AccelCmdqvType smmuv3_accel_cmdqv_type(Object *obj);
+ 
+diff --git a/include/hw/arm/smmuv3.h b/include/hw/arm/smmuv3.h
+index d39fe8850b..9e0836b81a 100644
+--- a/include/hw/arm/smmuv3.h
++++ b/include/hw/arm/smmuv3.h
+@@ -26,6 +26,9 @@
+ 
+ #define TYPE_SMMUV3_IOMMU_MEMORY_REGION "smmuv3-iommu-memory-region"
+ 
++/* Number of IDR registers, IDR0 to IDR5 */
++#define SMMU_NUM_IDR 6
++
+ typedef struct SMMUQueue {
+      uint64_t base; /* base register */
+      uint32_t prod;
+@@ -41,7 +44,9 @@ struct SMMUv3State {
+     uint8_t sid_size;
+     uint8_t sid_split;
+ 
+-    uint32_t idr[6];
++    uint32_t idr[SMMU_NUM_IDR];
++    /* Locally resolved IDRs, saved by pre_load for post_load to check */
++    uint32_t local_idr[SMMU_NUM_IDR];
+     uint32_t iidr;
+     uint32_t aidr;
+     uint32_t cr[3];
+diff --git a/hw/arm/smmuv3-accel-stubs.c b/hw/arm/smmuv3-accel-stubs.c
+index b8dd7e7b89..b57b5c01e7 100644
+--- a/hw/arm/smmuv3-accel-stubs.c
++++ b/hw/arm/smmuv3-accel-stubs.c
+@@ -8,6 +8,7 @@
+ #include "qapi/error.h"
+ #include "hw/arm/smmuv3.h"
+ #include "hw/arm/smmuv3-accel.h"
++#include "migration/vmstate.h"
+ 
+ bool smmuv3_accel_init(SMMUv3State *s, Error **errp)
+ {
+@@ -53,6 +54,17 @@ int smmuv3_accel_event_read_validate(IOMMUFDVeventq *veventq, uint32_t type,
+     return 0;
+ }
+ 
++static bool smmuv3_accel_vmstate_needed(void *opaque)
++{
++    return false;
++}
++
++const VMStateDescription vmstate_smmuv3_accel = {
++    .name = "smmuv3/accel",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = smmuv3_accel_vmstate_needed,
++};
+ 
+ void smmuv3_accel_reset(SMMUv3State *s)
+ {
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 73509dbd8d..287ea91fbe 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -18,6 +18,7 @@
+ 
+ #include "smmuv3-internal.h"
+ #include "smmuv3-accel.h"
++#include "migration/vmstate.h"
+ #include "system/runstate.h"
+ #include "system/system.h"
+ #include "tegra241-cmdqv.h"
+@@ -1096,6 +1097,63 @@ bool smmuv3_accel_attach_gbpa_hwpt(SMMUv3State *s, Error **errp)
+     return all_ok;
+ }
+ 
++static bool smmuv3_accel_vmstate_pre_load(void *opaque, Error **errp)
++{
++    SMMUv3State *s = opaque;
++
++    if (!s->s_accel) {
++        error_setg(errp, "Incoming stream carries SMMUv3 accelerator state "
++                   "but this arm-smmuv3 has accel=off");
++        return false;
++    }
++
++    /* Save the locally resolved IDRs before the stream overwrites them. */
++    memcpy(s->local_idr, s->idr, sizeof(s->idr));
++    return true;
++}
++
++static bool smmuv3_accel_vmstate_post_load(void *opaque, int version_id,
++                                           Error **errp)
++{
++    ERRP_GUARD();
++    SMMUv3State *s = opaque;
++    int i;
++
++    for (i = 0; i < ARRAY_SIZE(s->idr); i++) {
++        if (s->idr[i] == s->local_idr[i]) {
++            continue;
++        }
++        error_setg(errp, "SMMUv3 IDR%d mismatch: source 0x%08x, "
++                   "destination 0x%08x", i, s->idr[i],
++                   s->local_idr[i]);
++        error_append_hint(errp, "ril, ats, oas and ssidsize must resolve to "
++                          "the same values on source and destination.\n");
++        return false;
++    }
++
++    return true;
++}
++
++static bool smmuv3_accel_vmstate_needed(void *opaque)
++{
++    SMMUv3State *s = opaque;
++
++    return s->accel;
++}
++
++const VMStateDescription vmstate_smmuv3_accel = {
++    .name = "smmuv3/accel",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = smmuv3_accel_vmstate_needed,
++    .pre_load_errp = smmuv3_accel_vmstate_pre_load,
++    .post_load_errp = smmuv3_accel_vmstate_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT32_ARRAY(idr, SMMUv3State, SMMU_NUM_IDR),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ void smmuv3_accel_reset(SMMUv3State *s)
+ {
+     SMMUv3AccelState *accel = s->s_accel;
+diff --git a/hw/arm/smmuv3.c b/hw/arm/smmuv3.c
+index ed19536a4d..66d95e1076 100644
+--- a/hw/arm/smmuv3.c
++++ b/hw/arm/smmuv3.c
+@@ -2137,6 +2137,7 @@ static const VMStateDescription vmstate_smmuv3 = {
+     },
+     .subsections = (const VMStateDescription * const []) {
+         &vmstate_gbpa,
++        &vmstate_smmuv3_accel,
+         NULL
+     }
+ };
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC 4/7] hw/arm/smmuv3-accel: Add a helper to replay all
+ STEs
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 04 Sep 2026 19:05:10 +0100
+Message-Id: <20260904180513.248396-5-skolothumtho@nvidia.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Add smmuv3_accel_replay_stes(). It walks the guest stream table and calls
+smmuv3_accel_install_ste() for every device behind an accelerated SMMUv3,
+which rebuilds the vDEVICE and the nested HWPT. The incoming migration path
+uses this instead of transferring per device host state, all of which can
+be derived from guest RAM once strtab_base and CR0 are restored.
+
+No caller yet.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ hw/arm/smmuv3-accel.h       |  1 +
+ hw/arm/smmuv3-accel-stubs.c |  5 +++++
+ hw/arm/smmuv3-accel.c       | 34 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 40 insertions(+)
+
+diff --git a/hw/arm/smmuv3-accel.h b/hw/arm/smmuv3-accel.h
+index a91d188d61..24828ba9ab 100644
+--- a/hw/arm/smmuv3-accel.h
++++ b/hw/arm/smmuv3-accel.h
+@@ -92,6 +92,7 @@ bool smmuv3_accel_install_ste(SMMUv3State *s, SMMUDevice *sdev, int sid,
+                               Error **errp);
+ bool smmuv3_accel_install_ste_range(SMMUv3State *s, SMMUSIDRange *range,
+                                     Error **errp);
++bool smmuv3_accel_replay_stes(SMMUv3State *s, Error **errp);
+ bool smmuv3_accel_attach_gbpa_hwpt(SMMUv3State *s, Error **errp);
+ bool smmuv3_accel_issue_inv_cmd(SMMUv3State *s, void *cmd, SMMUDevice *sdev,
+                                 Error **errp);
+diff --git a/hw/arm/smmuv3-accel-stubs.c b/hw/arm/smmuv3-accel-stubs.c
+index b57b5c01e7..0514915e45 100644
+--- a/hw/arm/smmuv3-accel-stubs.c
++++ b/hw/arm/smmuv3-accel-stubs.c
+@@ -28,6 +28,11 @@ bool smmuv3_accel_install_ste_range(SMMUv3State *s, SMMUSIDRange *range,
+     return true;
+ }
+ 
++bool smmuv3_accel_replay_stes(SMMUv3State *s, Error **errp)
++{
++    return true;
++}
++
+ bool smmuv3_accel_attach_gbpa_hwpt(SMMUv3State *s, Error **errp)
+ {
+     return true;
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 287ea91fbe..6678e49f6e 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -407,6 +407,40 @@ bool smmuv3_accel_install_ste_range(SMMUv3State *s, SMMUSIDRange *range,
+     return all_ok;
+ }
+ 
++/*
++ * Install the STE again for every device behind this accelerated SMMUv3, by
++ * reading the guest stream table once more. Stops at the first failure.
++ */
++bool smmuv3_accel_replay_stes(SMMUv3State *s, Error **errp)
++{
++    ERRP_GUARD();
++    SMMUv3AccelState *accel = s->s_accel;
++    SMMUv3AccelDevice *accel_dev;
++
++    if (!accel || !accel->viommu) {
++        return true;
++    }
++
++    QLIST_FOREACH(accel_dev, &accel->device_list, next) {
++        uint32_t sid = smmu_get_sid(&accel_dev->sdev);
++        SMMUEventInfo event = {.type = SMMU_EVT_NONE, .sid = sid,
++                               .inval_ste_allowed = true};
++        STE ste;
++
++        /* Skip a device the guest has not programmed */
++        if (smmu_find_ste(s, sid, &ste, &event)) {
++            continue;
++        }
++
++        if (!smmuv3_accel_install_ste(s, &accel_dev->sdev, sid, errp)) {
++            error_prepend(errp, "Device 0x%x: Failed to install STE: ", sid);
++            return false;
++        }
++    }
++
++    return true;
++}
++
+ /*
+  * This issues the invalidation cmd to the host SMMUv3.
+  *
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC 5/7] hw/arm/smmuv3-accel: Restore accelerator state on
+ incoming migration
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 04 Sep 2026 19:05:11 +0100
+Message-Id: <20260904180513.248396-6-skolothumtho@nvidia.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Extend the accel subsection post_load, after the IDR check, to bring the
+host side back in line. It allocates the vEVENTQ, which the A_CR0 write
+handler normally does, using the restored s->eventq.log2size. It attaches
+the HWPT for the restored GBPA to every device. Then it replays the STEs,
+which overrides that HWPT wherever the guest has a usable entry.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ hw/arm/smmuv3-accel.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 6678e49f6e..b653f3f4ce 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -1165,6 +1165,28 @@ static bool smmuv3_accel_vmstate_post_load(void *opaque, int version_id,
+         return false;
+     }
+ 
++    if (!s->s_accel->viommu) {
++        return true;
++    }
++
++    /* Normally done by the A_CR0 write handler, which is not replayed. */
++    if (!smmuv3_accel_alloc_veventq(s, errp)) {
++        error_prepend(errp, "Failed to restore the vEVENTQ: ");
++        return false;
++    }
++
++    /* smmuv3/gbpa is listed before this subsection, so it is in place */
++    if (!smmuv3_accel_attach_gbpa_hwpt(s, errp)) {
++        error_prepend(errp, "Failed to restore the GBPA HWPT: ");
++        return false;
++    }
++
++    /* Everything else comes from guest memory, which is already restored. */
++    if (!smmuv3_accel_replay_stes(s, errp)) {
++        error_prepend(errp, "Failed to replay the stream table: ");
++        return false;
++    }
++
+     return true;
+ }
+ 
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC 6/7] hw/arm/smmuv3-accel: Request dirty tracking on the
+ nesting parent
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 04 Sep 2026 19:05:12 +0100
+Message-Id: <20260904180513.248396-7-skolothumtho@nvidia.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+With accel=on the guest owns Stage 1, so the Stage 2 nesting parent is the
+only page table the host can track guest writes through.
+
+VFIO only asks for IOMMU_HWPT_ALLOC_DIRTY_TRACKING on the nesting parent
+when the vIOMMU sets VIOMMU_FLAG_WANT_NESTING_DIRTY_TRACKING, which
+smmuv3-accel does not, so the parent is allocated plain.
+
+Set the flag.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+Reviewed-by: Eric Auger <eric.auger@redhat.com>
+---
+ hw/arm/smmuv3-accel.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index b653f3f4ce..3f83b505d0 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -1037,6 +1037,12 @@ static uint64_t smmuv3_accel_get_viommu_flags(void *opaque)
+     SMMUState *bs = opaque;
+     SMMUv3State *s = ARM_SMMUV3(bs);
+ 
++    /*
++     * The guest owns Stage 1, so the Stage 2 parent is the only page table
++     * the host can track guest writes through.
++     */
++    flags |= VIOMMU_FLAG_WANT_NESTING_DIRTY_TRACKING;
++
+     if (smmuv3_pasid_supported(s)) {
+         flags |= VIOMMU_FLAG_PASID_SUPPORTED;
+     }
+-- 
+2.43.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH RFC 7/7] hw/arm/smmuv3: Support migration with accel=on
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 04 Sep 2026 19:05:13 +0100
+Message-Id: <20260904180513.248396-8-skolothumtho@nvidia.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+With the restore path in place, allow migration of an accelerated SMMUv3.
+
+Replace the blocker installed unconditionally at realize with one scoped to
+CMDQV, installed where CMDQV is actually selected.
+
+CMDQV migration support is not enabled now.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+Reviewed-by: Eric Auger <eric.auger@redhat.com>
+---
+ hw/arm/smmuv3-accel.c | 11 +++++++++++
+ hw/arm/smmuv3.c       |  5 -----
+ 2 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 3f83b505d0..5456fd0ae2 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -18,6 +18,7 @@
+ 
+ #include "smmuv3-internal.h"
+ #include "smmuv3-accel.h"
++#include "migration/blocker.h"
+ #include "migration/vmstate.h"
+ #include "system/runstate.h"
+ #include "system/system.h"
+@@ -801,6 +802,16 @@ smmuv3_accel_select_cmdqv(SMMUv3State *s, HostIOMMUDeviceIOMMUFD *idev,
+         return false;
+     }
+     s->s_accel->cmdqv_ops = ops;
++
++    /* No support for CMDQV migration for now */
++    if (ops) {
++        error_setg(&s->migration_blocker,
++                   "Migration is not supported with SMMUv3 CMDQV enabled");
++        if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
++            return false;
++        }
++    }
++
+     return true;
+ }
+ 
+diff --git a/hw/arm/smmuv3.c b/hw/arm/smmuv3.c
+index 66d95e1076..8e8ca341c9 100644
+--- a/hw/arm/smmuv3.c
++++ b/hw/arm/smmuv3.c
+@@ -2047,11 +2047,6 @@ static void smmu_realize(DeviceState *d, Error **errp)
+         if (!smmuv3_accel_init(s, errp)) {
+             return;
+         }
+-        error_setg(&s->migration_blocker, "Migration not supported with SMMUv3 "
+-                   "accelerator mode enabled");
+-        if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
+-            return;
+-        }
+     }
+ 
+     c->parent_realize(d, &local_err);
+-- 
+2.43.0
+

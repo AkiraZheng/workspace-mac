@@ -1,0 +1,74 @@
+Subject: [PATCH RFC 0/7] hw/arm/smmuv3: Live migration for accel=on
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 04 Sep 2026 19:05:06 +0100
+Message-Id: <20260904180513.248396-1-skolothumtho@nvidia.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hi,
+
+This series adds live migration support for an accelerated SMMUv3
+(-device arm-smmuv3,accel=on) with vfio-pci endpoints on the iommufd
+backend.
+
+The destination replays rather than receives. The stream table, the STEs,
+the CDs and the Stage 1 page tables all live in guest RAM, so once that
+and the registers are restored, the destination walks the stream table
+again and rebuilds the vDEVICE and the nested HWPT for every device.
+
+What the series does:
+
+ - drains the kernel vEVENTQ into the guest event queue when the VM stops,
+   so that pending fault events are not lost (1, 2)
+ - migrates the resolved SMMUv3 feature set in a new smmuv3/accel
+   subsection and fails the load if the two ends differ (3)
+ - replays the guest stream table on the destination and restores the
+   vEVENTQ and the GBPA HWPT (4, 5)
+ - asks VFIO for dirty tracking on the Stage 2 nesting parent (6)
+ - replaces the accel migration blocker with one scoped to CMDQV, which
+   cannot be migrated for now (7)
+
+This depends on the host kernel supporting dirty tracking on the Stage 2
+nesting parent, for assigned devices that cannot track dirty pages
+themselves. A branch based on Jason's iommu page table work is here [0].
+
+Big caveat:
+
+This is not yet tested with a real device that supports migration as I
+do not have a test setup for that. Folks who do have such a setup have
+reached out and are copied here, so hopefully this RFC lets them give
+it a spin and provide some early feedback.
+
+QEMU branch is here:
+
+https://github.com/shamiali2008/qemu-master/tree/smmuv3-accel-live-migrn-rfcv1
+
+Please let me know your feedback.
+
+Thanks,
+Shameer
+[0]: https://github.com/shamiali2008/linux/commits/iommu_pt_arm64_s2_dbm/ 
+
+Shameer Kolothum (7):
+  hw/arm/smmuv3-accel: Factor out the single vEVENT read
+  hw/arm/smmuv3-accel: Drain the vEVENTQ when the VM stops
+  hw/arm/smmuv3: Migrate the accelerator feature set
+  hw/arm/smmuv3-accel: Add a helper to replay all STEs
+  hw/arm/smmuv3-accel: Restore accelerator state on incoming migration
+  hw/arm/smmuv3-accel: Request dirty tracking on the nesting parent
+  hw/arm/smmuv3: Support migration with accel=on
+
+ hw/arm/smmuv3-accel.h       |   2 +
+ include/hw/arm/smmuv3.h     |   7 +-
+ hw/arm/smmuv3-accel-stubs.c |  17 ++++
+ hw/arm/smmuv3-accel.c       | 192 ++++++++++++++++++++++++++++++++++--
+ hw/arm/smmuv3.c             |   6 +-
+ 5 files changed, 210 insertions(+), 14 deletions(-)
+
+-- 
+2.43.0
+
+
+
+

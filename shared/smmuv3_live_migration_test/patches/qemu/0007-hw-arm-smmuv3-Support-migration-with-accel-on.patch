@@ -1,0 +1,67 @@
+From 808b9e8851a8f9e29c03d3f7d95369a7fdfe4cb5 Mon Sep 17 00:00:00 2001
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 4 Sep 2026 19:05:13 +0100
+Subject: [PATCH 7/8] hw/arm/smmuv3: Support migration with accel=on
+
+With the restore path in place, allow migration of an accelerated SMMUv3.
+
+Replace the blocker installed unconditionally at realize with one scoped to
+CMDQV, installed where CMDQV is actually selected.
+
+CMDQV migration support is not enabled now.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+Reviewed-by: Eric Auger <eric.auger@redhat.com>
+---
+ hw/arm/smmuv3-accel.c | 11 +++++++++++
+ hw/arm/smmuv3.c       |  5 -----
+ 2 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 3f83b505d0..5456fd0ae2 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -18,6 +18,7 @@
+ 
+ #include "smmuv3-internal.h"
+ #include "smmuv3-accel.h"
++#include "migration/blocker.h"
+ #include "migration/vmstate.h"
+ #include "system/runstate.h"
+ #include "system/system.h"
+@@ -801,6 +802,16 @@ smmuv3_accel_select_cmdqv(SMMUv3State *s, HostIOMMUDeviceIOMMUFD *idev,
+         return false;
+     }
+     s->s_accel->cmdqv_ops = ops;
++
++    /* No support for CMDQV migration for now */
++    if (ops) {
++        error_setg(&s->migration_blocker,
++                   "Migration is not supported with SMMUv3 CMDQV enabled");
++        if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
++            return false;
++        }
++    }
++
+     return true;
+ }
+ 
+diff --git a/hw/arm/smmuv3.c b/hw/arm/smmuv3.c
+index 66d95e1076..8e8ca341c9 100644
+--- a/hw/arm/smmuv3.c
++++ b/hw/arm/smmuv3.c
+@@ -2047,11 +2047,6 @@ static void smmu_realize(DeviceState *d, Error **errp)
+         if (!smmuv3_accel_init(s, errp)) {
+             return;
+         }
+-        error_setg(&s->migration_blocker, "Migration not supported with SMMUv3 "
+-                   "accelerator mode enabled");
+-        if (migrate_add_blocker(&s->migration_blocker, errp) < 0) {
+-            return;
+-        }
+     }
+ 
+     c->parent_realize(d, &local_err);
+-- 
+2.43.0
+

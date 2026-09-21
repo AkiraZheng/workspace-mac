@@ -1,0 +1,177 @@
+From 37ad8553950ad1b18f991e3e67bd1c48e42bbaaa Mon Sep 17 00:00:00 2001
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 4 Sep 2026 19:05:09 +0100
+Subject: [PATCH 3/8] hw/arm/smmuv3: Migrate the accelerator feature set
+
+Add a subsection carrying idr[0] to idr[5], needed when accel=on. pre_load
+saves the locally resolved values and post_load fails the migration if the
+incoming ones differ. Accepting the source values would leave QEMU
+advertising features the destination host cannot provide.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ hw/arm/smmuv3-accel-stubs.c | 12 ++++++++
+ hw/arm/smmuv3-accel.c       | 58 +++++++++++++++++++++++++++++++++++++
+ hw/arm/smmuv3-accel.h       |  1 +
+ hw/arm/smmuv3.c             |  1 +
+ include/hw/arm/smmuv3.h     |  7 ++++-
+ 5 files changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/hw/arm/smmuv3-accel-stubs.c b/hw/arm/smmuv3-accel-stubs.c
+index b8dd7e7b89..b57b5c01e7 100644
+--- a/hw/arm/smmuv3-accel-stubs.c
++++ b/hw/arm/smmuv3-accel-stubs.c
+@@ -8,6 +8,7 @@
+ #include "qapi/error.h"
+ #include "hw/arm/smmuv3.h"
+ #include "hw/arm/smmuv3-accel.h"
++#include "migration/vmstate.h"
+ 
+ bool smmuv3_accel_init(SMMUv3State *s, Error **errp)
+ {
+@@ -53,6 +54,17 @@ int smmuv3_accel_event_read_validate(IOMMUFDVeventq *veventq, uint32_t type,
+     return 0;
+ }
+ 
++static bool smmuv3_accel_vmstate_needed(void *opaque)
++{
++    return false;
++}
++
++const VMStateDescription vmstate_smmuv3_accel = {
++    .name = "smmuv3/accel",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = smmuv3_accel_vmstate_needed,
++};
+ 
+ void smmuv3_accel_reset(SMMUv3State *s)
+ {
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index 73509dbd8d..287ea91fbe 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -18,6 +18,7 @@
+ 
+ #include "smmuv3-internal.h"
+ #include "smmuv3-accel.h"
++#include "migration/vmstate.h"
+ #include "system/runstate.h"
+ #include "system/system.h"
+ #include "tegra241-cmdqv.h"
+@@ -1096,6 +1097,63 @@ bool smmuv3_accel_attach_gbpa_hwpt(SMMUv3State *s, Error **errp)
+     return all_ok;
+ }
+ 
++static bool smmuv3_accel_vmstate_pre_load(void *opaque, Error **errp)
++{
++    SMMUv3State *s = opaque;
++
++    if (!s->s_accel) {
++        error_setg(errp, "Incoming stream carries SMMUv3 accelerator state "
++                   "but this arm-smmuv3 has accel=off");
++        return false;
++    }
++
++    /* Save the locally resolved IDRs before the stream overwrites them. */
++    memcpy(s->local_idr, s->idr, sizeof(s->idr));
++    return true;
++}
++
++static bool smmuv3_accel_vmstate_post_load(void *opaque, int version_id,
++                                           Error **errp)
++{
++    ERRP_GUARD();
++    SMMUv3State *s = opaque;
++    int i;
++
++    for (i = 0; i < ARRAY_SIZE(s->idr); i++) {
++        if (s->idr[i] == s->local_idr[i]) {
++            continue;
++        }
++        error_setg(errp, "SMMUv3 IDR%d mismatch: source 0x%08x, "
++                   "destination 0x%08x", i, s->idr[i],
++                   s->local_idr[i]);
++        error_append_hint(errp, "ril, ats, oas and ssidsize must resolve to "
++                          "the same values on source and destination.\n");
++        return false;
++    }
++
++    return true;
++}
++
++static bool smmuv3_accel_vmstate_needed(void *opaque)
++{
++    SMMUv3State *s = opaque;
++
++    return s->accel;
++}
++
++const VMStateDescription vmstate_smmuv3_accel = {
++    .name = "smmuv3/accel",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .needed = smmuv3_accel_vmstate_needed,
++    .pre_load_errp = smmuv3_accel_vmstate_pre_load,
++    .post_load_errp = smmuv3_accel_vmstate_post_load,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT32_ARRAY(idr, SMMUv3State, SMMU_NUM_IDR),
++        VMSTATE_END_OF_LIST()
++    }
++};
++
+ void smmuv3_accel_reset(SMMUv3State *s)
+ {
+     SMMUv3AccelState *accel = s->s_accel;
+diff --git a/hw/arm/smmuv3-accel.h b/hw/arm/smmuv3-accel.h
+index ea11d513cc..a91d188d61 100644
+--- a/hw/arm/smmuv3-accel.h
++++ b/hw/arm/smmuv3-accel.h
+@@ -99,6 +99,7 @@ void smmuv3_accel_idr_override(SMMUv3State *s);
+ bool smmuv3_accel_alloc_veventq(SMMUv3State *s, Error **errp);
+ int smmuv3_accel_event_read_validate(IOMMUFDVeventq *veventq, uint32_t type,
+                                      void *buf, size_t size, Error **errp);
++extern const VMStateDescription vmstate_smmuv3_accel;
+ void smmuv3_accel_reset(SMMUv3State *s);
+ SMMUv3AccelCmdqvType smmuv3_accel_cmdqv_type(Object *obj);
+ 
+diff --git a/hw/arm/smmuv3.c b/hw/arm/smmuv3.c
+index ed19536a4d..66d95e1076 100644
+--- a/hw/arm/smmuv3.c
++++ b/hw/arm/smmuv3.c
+@@ -2137,6 +2137,7 @@ static const VMStateDescription vmstate_smmuv3 = {
+     },
+     .subsections = (const VMStateDescription * const []) {
+         &vmstate_gbpa,
++        &vmstate_smmuv3_accel,
+         NULL
+     }
+ };
+diff --git a/include/hw/arm/smmuv3.h b/include/hw/arm/smmuv3.h
+index d39fe8850b..9e0836b81a 100644
+--- a/include/hw/arm/smmuv3.h
++++ b/include/hw/arm/smmuv3.h
+@@ -26,6 +26,9 @@
+ 
+ #define TYPE_SMMUV3_IOMMU_MEMORY_REGION "smmuv3-iommu-memory-region"
+ 
++/* Number of IDR registers, IDR0 to IDR5 */
++#define SMMU_NUM_IDR 6
++
+ typedef struct SMMUQueue {
+      uint64_t base; /* base register */
+      uint32_t prod;
+@@ -41,7 +44,9 @@ struct SMMUv3State {
+     uint8_t sid_size;
+     uint8_t sid_split;
+ 
+-    uint32_t idr[6];
++    uint32_t idr[SMMU_NUM_IDR];
++    /* Locally resolved IDRs, saved by pre_load for post_load to check */
++    uint32_t local_idr[SMMU_NUM_IDR];
+     uint32_t iidr;
+     uint32_t aidr;
+     uint32_t cr[3];
+-- 
+2.43.0
+

@@ -1,0 +1,41 @@
+From 7fe6949b69d14e9ef20472e510900ef175cf0400 Mon Sep 17 00:00:00 2001
+From: Shameer Kolothum <skolothumtho@nvidia.com>
+Date: Fri, 4 Sep 2026 19:05:12 +0100
+Subject: [PATCH 6/8] hw/arm/smmuv3-accel: Request dirty tracking on the
+ nesting parent
+
+With accel=on the guest owns Stage 1, so the Stage 2 nesting parent is the
+only page table the host can track guest writes through.
+
+VFIO only asks for IOMMU_HWPT_ALLOC_DIRTY_TRACKING on the nesting parent
+when the vIOMMU sets VIOMMU_FLAG_WANT_NESTING_DIRTY_TRACKING, which
+smmuv3-accel does not, so the parent is allocated plain.
+
+Set the flag.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+Reviewed-by: Eric Auger <eric.auger@redhat.com>
+---
+ hw/arm/smmuv3-accel.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/hw/arm/smmuv3-accel.c b/hw/arm/smmuv3-accel.c
+index b653f3f4ce..3f83b505d0 100644
+--- a/hw/arm/smmuv3-accel.c
++++ b/hw/arm/smmuv3-accel.c
+@@ -1037,6 +1037,12 @@ static uint64_t smmuv3_accel_get_viommu_flags(void *opaque)
+     SMMUState *bs = opaque;
+     SMMUv3State *s = ARM_SMMUV3(bs);
+ 
++    /*
++     * The guest owns Stage 1, so the Stage 2 parent is the only page table
++     * the host can track guest writes through.
++     */
++    flags |= VIOMMU_FLAG_WANT_NESTING_DIRTY_TRACKING;
++
+     if (smmuv3_pasid_supported(s)) {
+         flags |= VIOMMU_FLAG_PASID_SUPPORTED;
+     }
+-- 
+2.43.0
+
