@@ -1,4 +1,4 @@
-From 5d4c324ef00b244af342f34a8ef9b660a537f185 Mon Sep 17 00:00:00 2001
+From fca1ec8c3c2ae340705bf68a0ff27160457f5939 Mon Sep 17 00:00:00 2001
 From: Eillon <yezhenyu2@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:33 +0800
 Subject: [PATCH v5 07/15] KVM: arm64: Add HDBSS per-vCPU buffer management
@@ -70,7 +70,7 @@ index 000000000000..fe703f02626b
 +
 +#endif /* __ARM64_KVM_DIRTY_BIT_H__ */
 diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
-index 00fe169f239f..e25f1d40c114 100644
+index 86a4d6e50934..c8fc29f3db75 100644
 --- a/arch/arm64/include/asm/kvm_host.h
 +++ b/arch/arm64/include/asm/kvm_host.h
 @@ -425,6 +425,9 @@ struct kvm_arch {
@@ -140,7 +140,7 @@ index 59612d2f277c..ec2749af64fa 100644
  	 vgic/vgic-irqfd.o vgic/vgic-v2.o \
  	 vgic/vgic-v3.o vgic/vgic-v4.o \
 diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
-index 1e528d53d093..483b64e0b832 100644
+index d9ad765943d9..5ea4ac26995e 100644
 --- a/arch/arm64/kvm/arm.c
 +++ b/arch/arm64/kvm/arm.c
 @@ -36,6 +36,7 @@
@@ -151,7 +151,7 @@ index 1e528d53d093..483b64e0b832 100644
  #include <asm/kvm_emulate.h>
  #include <asm/kvm_hyp.h>
  #include <asm/kvm_mmu.h>
-@@ -576,10 +577,19 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
+@@ -580,10 +581,19 @@ int kvm_arch_vcpu_create(struct kvm_vcpu *vcpu)
  	}
  
  	err = kvm_share_hyp(vcpu, vcpu + 1);

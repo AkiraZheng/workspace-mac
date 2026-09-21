@@ -1,4 +1,4 @@
-From a3a6c3d6a06deb2bffeeb24813686989108647f5 Mon Sep 17 00:00:00 2001
+From e5a02b5396e19fa5c8680168f2dc2fc3d70c2244 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:39 +0800
 Subject: [PATCH v5 14/15] KVM: arm64: Document HDBSS buffer size ioctl

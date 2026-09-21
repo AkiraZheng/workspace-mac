@@ -1,4 +1,4 @@
-From 4cec9a837998c09f0b5299081e69d75f2c9a4ef4 Mon Sep 17 00:00:00 2001
+From 98567df331f9100d6705129adae27dcabf88fcf8 Mon Sep 17 00:00:00 2001
 From: Leonardo Bras <leo.bras@arm.com>
 Date: Fri, 18 Sep 2026 18:21:30 +0800
 Subject: [PATCH v5 04/15] KVM: arm64: Add KVM_REQ_RELOAD_STAGE2
@@ -20,7 +20,7 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  2 files changed, 10 insertions(+)
 
 diff --git a/arch/arm64/include/asm/kvm_host.h b/arch/arm64/include/asm/kvm_host.h
-index 27fe0cd5b2d7..00fe169f239f 100644
+index cd9b9d2462f9..86a4d6e50934 100644
 --- a/arch/arm64/include/asm/kvm_host.h
 +++ b/arch/arm64/include/asm/kvm_host.h
 @@ -55,6 +55,8 @@
@@ -33,10 +33,10 @@ index 27fe0cd5b2d7..00fe169f239f 100644
  #define KVM_DIRTY_LOG_MANUAL_CAPS   (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE | \
  				     KVM_DIRTY_LOG_INITIALLY_SET)
 diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
-index 8b080804bc90..1e528d53d093 100644
+index 0576c2022ef5..d9ad765943d9 100644
 --- a/arch/arm64/kvm/arm.c
 +++ b/arch/arm64/kvm/arm.c
-@@ -1171,6 +1171,14 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
+@@ -1175,6 +1175,14 @@ static int check_vcpu_requests(struct kvm_vcpu *vcpu)
  		if (kvm_dirty_ring_check_request(vcpu))
  			return 0;
  

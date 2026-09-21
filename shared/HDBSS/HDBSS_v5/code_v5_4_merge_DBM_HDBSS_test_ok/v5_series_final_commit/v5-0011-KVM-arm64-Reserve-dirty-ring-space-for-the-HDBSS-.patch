@@ -1,4 +1,4 @@
-From fe30618d0375c4e23f21749b2653d23cd11d8ab3 Mon Sep 17 00:00:00 2001
+From 207127e96e98e2b05d10427b9b41bfba970e080d Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:36 +0800
 Subject: [PATCH v5 11/15] KVM: arm64: Reserve dirty ring space for the HDBSS
@@ -19,7 +19,7 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  2 files changed, 16 insertions(+)
 
 diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
-index 8e5af2e3958c..0d591eabde71 100644
+index 9d7bdece149a..5a7046acb62e 100644
 --- a/arch/arm64/kvm/arm.c
 +++ b/arch/arm64/kvm/arm.c
 @@ -215,6 +215,14 @@ static int kvm_arm_default_max_vcpus(void)
@@ -38,10 +38,10 @@ index 8e5af2e3958c..0d591eabde71 100644
   * kvm_arch_init_vm - initializes a VM data structure
   * @kvm:	pointer to the KVM struct
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index e46c027db935..96d7f0b9e85d 100644
+index 7bf82d65041c..c1e09ba98d48 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
-@@ -2832,3 +2832,11 @@ void kvm_toggle_cache(struct kvm_vcpu *vcpu, bool was_enabled)
+@@ -2841,3 +2841,11 @@ void kvm_toggle_cache(struct kvm_vcpu *vcpu, bool was_enabled)
  
  	trace_kvm_toggle_cache(*vcpu_pc(vcpu), was_enabled, now_enabled);
  }

@@ -1,4 +1,4 @@
-From 30d4a28304ace4d3f689929f548484839d7d6d75 Mon Sep 17 00:00:00 2001
+From 1b05fcc2d6a41c3d08da077d3836c21a7237772e Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:35 +0800
 Subject: [PATCH v5 10/15] KVM: Add kvm_arch_dirty_ring_size_updated() hook
@@ -45,10 +45,10 @@ index 572b854edf74..784f53c95b54 100644
  {
  	return KVM_DIRTY_RING_RSVD_ENTRIES + kvm_cpu_dirty_log_size(kvm);
 diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
-index 65eb26a0520d..7d574fb29a8f 100644
+index 85f42289748d..d109062f6a1c 100644
 --- a/virt/kvm/kvm_main.c
 +++ b/virt/kvm/kvm_main.c
-@@ -4988,6 +4988,7 @@ static int kvm_vm_ioctl_enable_dirty_log_ring(struct kvm *kvm, u32 size)
+@@ -5011,6 +5011,7 @@ static int kvm_vm_ioctl_enable_dirty_log_ring(struct kvm *kvm, u32 size)
  		r = -EINVAL;
  	} else {
  		kvm->dirty_ring_size = size;

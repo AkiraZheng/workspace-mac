@@ -1,4 +1,4 @@
-From a18972b8f9c35a1048c4e1421309dd4e2eefb30e Mon Sep 17 00:00:00 2001
+From 58ac2f1157e81a7eec882af7b51afde9b155bf36 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:37 +0800
 Subject: [PATCH v5 12/15] KVM: arm64: Derive the VM hardware dirty mode from
@@ -79,7 +79,7 @@ index 6eae7e7e2a68..24407194444a 100644
  void kvm_s2_ptdump_create_debugfs(struct kvm *kvm);
  void kvm_nested_s2_ptdump_create_debugfs(struct kvm_s2_mmu *mmu);
 diff --git a/arch/arm64/include/asm/kvm_nested.h b/arch/arm64/include/asm/kvm_nested.h
-index 1ed708335809..d54f8fe4674d 100644
+index 586026e85903..6226b330d7c8 100644
 --- a/arch/arm64/include/asm/kvm_nested.h
 +++ b/arch/arm64/include/asm/kvm_nested.h
 @@ -7,11 +7,16 @@
@@ -127,10 +127,10 @@ index 9dde7e779699..0472edcb63b9 100644
  	if (kvm_pte_valid(ctx->old) && ctx->old != new)
  		WRITE_ONCE(*ctx->ptep, new);
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index 96d7f0b9e85d..e298ffa72d52 100644
+index c1e09ba98d48..17786453c004 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
-@@ -2013,7 +2013,19 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
+@@ -2022,7 +2022,19 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
  	if (s2vi->map_writable) {
  		*prot |= KVM_PGTABLE_PROT_W;
  
@@ -151,7 +151,7 @@ index 96d7f0b9e85d..e298ffa72d52 100644
  		    kvm_is_write_fault(s2fd->vcpu))
  			*prot |= KVM_PGTABLE_PROT_DIRTY;
  	}
-@@ -2608,6 +2620,45 @@ int __init kvm_mmu_init(u32 hyp_va_bits)
+@@ -2617,6 +2629,45 @@ int __init kvm_mmu_init(u32 hyp_va_bits)
  	return err;
  }
  
@@ -197,7 +197,7 @@ index 96d7f0b9e85d..e298ffa72d52 100644
  void kvm_arch_commit_memory_region(struct kvm *kvm,
  				   struct kvm_memory_slot *old,
  				   const struct kvm_memory_slot *new,
-@@ -2615,6 +2666,9 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+@@ -2624,6 +2675,9 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
  {
  	bool log_dirty_pages = new && new->flags & KVM_MEM_LOG_DIRTY_PAGES;
  

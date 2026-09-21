@@ -1,4 +1,4 @@
-From 29a437ae1f1eb3925a4500bac209290a123da0c6 Mon Sep 17 00:00:00 2001
+From ffc3d63db14b2a347a25e951908d59842f8503ec Mon Sep 17 00:00:00 2001
 From: Leonardo Bras <leo.bras@arm.com>
 Date: Fri, 18 Sep 2026 18:21:28 +0800
 Subject: [PATCH v5 02/15] KVM: arm64: Add KVM_PGTABLE_PROT_DIRTY
@@ -136,10 +136,10 @@ index 50f4d3a74f77..357b06648418 100644
  	if (prot & KVM_PGTABLE_PROT_X) {
  		ret = stage2_set_xn_attr(prot, &xn);
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index 9ba86450fe4a..410158c44499 100644
+index 2d44cd6a5aed..698a87e85a6d 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
-@@ -1212,7 +1212,9 @@ int kvm_phys_addr_ioremap(struct kvm *kvm, phys_addr_t guest_ipa,
+@@ -1221,7 +1221,9 @@ int kvm_phys_addr_ioremap(struct kvm *kvm, phys_addr_t guest_ipa,
  	struct kvm_pgtable *pgt = mmu->pgt;
  	enum kvm_pgtable_prot prot = KVM_PGTABLE_PROT_DEVICE |
  				     KVM_PGTABLE_PROT_R |
@@ -150,7 +150,7 @@ index 9ba86450fe4a..410158c44499 100644
  
  	if (is_protected_kvm_enabled())
  		return -EPERM;
-@@ -1578,7 +1580,7 @@ static enum kvm_pgtable_prot adjust_nested_fault_perms(struct kvm_s2_trans *nest
+@@ -1587,7 +1589,7 @@ static enum kvm_pgtable_prot adjust_nested_fault_perms(struct kvm_s2_trans *nest
  						       enum kvm_pgtable_prot prot)
  {
  	if (!kvm_s2_trans_writable(nested))
@@ -159,7 +159,7 @@ index 9ba86450fe4a..410158c44499 100644
  	if (!kvm_s2_trans_readable(nested))
  		prot &= ~KVM_PGTABLE_PROT_R;
  
-@@ -1649,7 +1651,7 @@ static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
+@@ -1658,7 +1660,7 @@ static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
  	}
  
  	if (!(s2fd->memslot->flags & KVM_MEM_READONLY))
@@ -168,7 +168,7 @@ index 9ba86450fe4a..410158c44499 100644
  
  	if (s2fd->nested)
  		prot = adjust_nested_fault_perms(s2fd->nested, prot);
-@@ -1681,10 +1683,17 @@ static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
+@@ -1690,10 +1692,17 @@ static int gmem_abort(const struct kvm_s2_fault_desc *s2fd)
  	}
  
  out_unlock:
@@ -187,7 +187,7 @@ index 9ba86450fe4a..410158c44499 100644
  		mark_page_dirty_in_slot(kvm, s2fd->memslot, gfn);
  
  	return ret != -EAGAIN ? ret : 0;
-@@ -1984,11 +1993,14 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
+@@ -1993,11 +2002,14 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
  
  	*prot = KVM_PGTABLE_PROT_R;
  
@@ -205,7 +205,7 @@ index 9ba86450fe4a..410158c44499 100644
  	if (s2fd->nested)
  		*prot = adjust_nested_fault_perms(s2fd->nested, *prot);
  
-@@ -2019,7 +2031,7 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
+@@ -2028,7 +2040,7 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
  			    void *memcache)
  {
  	enum kvm_pgtable_walk_flags flags = KVM_PGTABLE_WALK_SHARED;
@@ -214,7 +214,7 @@ index 9ba86450fe4a..410158c44499 100644
  	struct kvm *kvm = s2fd->vcpu->kvm;
  	struct kvm_pgtable *pgt;
  	long perm_fault_granule;
-@@ -2082,7 +2094,11 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
+@@ -2091,7 +2103,11 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
  	}
  
  out_unlock:
@@ -227,7 +227,7 @@ index 9ba86450fe4a..410158c44499 100644
  	kvm_fault_unlock(kvm);
  
  	/*
-@@ -2090,7 +2106,7 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
+@@ -2099,7 +2115,7 @@ static int kvm_s2_fault_map(const struct kvm_s2_fault_desc *s2fd,
  	 * making sure we adjust the canonical IPA if the mapping size has
  	 * been updated (via a THP upgrade, for example).
  	 */

@@ -1,4 +1,4 @@
-From e62e2b6613824c371e1040d1be69e055d9afdccd Mon Sep 17 00:00:00 2001
+From 2d06e7346f93647dc9511c1c85ab8008250684cb Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:38 +0800
 Subject: [PATCH v5 13/15] KVM: arm64: Add HDBSS buffer size ioctl for
@@ -28,7 +28,7 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  2 files changed, 35 insertions(+)
 
 diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
-index 0d591eabde71..c7681b828e80 100644
+index 5a7046acb62e..eadbf3a88d31 100644
 --- a/arch/arm64/kvm/arm.c
 +++ b/arch/arm64/kvm/arm.c
 @@ -19,6 +19,7 @@
@@ -71,7 +71,7 @@ index 0d591eabde71..c7681b828e80 100644
  	default:
  		break;
  	}
-@@ -496,6 +522,14 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
+@@ -500,6 +526,14 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
  		else
  			r = KVM_ARM_EAGER_SPLIT_CHUNK_SIZE_DEFAULT;
  		break;

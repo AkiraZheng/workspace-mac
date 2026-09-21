@@ -1,4 +1,4 @@
-From 0ef85f642fa1146e1f4ad6b73376ed0d7ab59550 Mon Sep 17 00:00:00 2001
+From 494be34e696662c1c8c71b42749b022454559907 Mon Sep 17 00:00:00 2001
 From: Eillon <yezhenyu2@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:34 +0800
 Subject: [PATCH v5 09/15] KVM: arm64: Handle HDBSS faults
@@ -86,7 +86,7 @@ index be0d12555c84..893a8c4248bc 100644
 +	return -EFAULT;
 +}
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index 45d4e55e9c89..e46c027db935 100644
+index 85a98d2c23a9..7bf82d65041c 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
 @@ -15,6 +15,7 @@
@@ -97,7 +97,7 @@ index 45d4e55e9c89..e46c027db935 100644
  #include <asm/kvm_mmu.h>
  #include <asm/kvm_pgtable.h>
  #include <asm/kvm_pkvm.h>
-@@ -2306,6 +2307,9 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
+@@ -2315,6 +2316,9 @@ int kvm_handle_guest_abort(struct kvm_vcpu *vcpu)
  
  	is_iabt = kvm_vcpu_trap_is_iabt(vcpu);
  

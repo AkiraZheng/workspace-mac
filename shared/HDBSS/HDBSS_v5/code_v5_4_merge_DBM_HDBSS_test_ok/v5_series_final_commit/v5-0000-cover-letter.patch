@@ -1,6 +1,6 @@
-From f317229127299b8633985104e7797bb7674cf4f9 Mon Sep 17 00:00:00 2001
+From 5ced533881e997a31dbeea57b2b4e747e9bcca23 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
-Date: Mon, 21 Sep 2026 23:42:30 +0800
+Date: Tue, 22 Sep 2026 01:43:52 +0800
 Subject: [PATCH v5 00/15] KVM: arm64: FEAT_HDBSS support for stage-2 dirty
  tracking
 
@@ -156,7 +156,7 @@ Tian Zheng (8):
  create mode 100644 tools/testing/selftests/kvm/arm64/hdbss_test.c
 
 
-base-commit: 93f51579e7df248780214094418f205253383cc5
+base-commit: 72d3fcf802c45d00b300f25b848a93c3a2bd7c7e
 -- 
 2.43.0
 

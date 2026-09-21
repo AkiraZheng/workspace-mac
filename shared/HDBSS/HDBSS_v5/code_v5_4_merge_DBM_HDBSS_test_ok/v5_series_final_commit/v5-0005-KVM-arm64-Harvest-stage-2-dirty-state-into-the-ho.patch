@@ -1,4 +1,4 @@
-From f9d6157b909678d1e78b515e6a9d196b09b36789 Mon Sep 17 00:00:00 2001
+From 944a8aeed57d273213fa9c130ea0716dfe9ac290 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:31 +0800
 Subject: [PATCH v5 05/15] KVM: arm64: Harvest stage-2 dirty state into the
@@ -82,10 +82,10 @@ index aa0448d3a6a4..9dde7e779699 100644
  	 * We may race with the CPU trying to set the access flag here,
  	 * but worst-case the access flag update gets lost and will be
 diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
-index 410158c44499..45d4e55e9c89 100644
+index 698a87e85a6d..85a98d2c23a9 100644
 --- a/arch/arm64/kvm/mmu.c
 +++ b/arch/arm64/kvm/mmu.c
-@@ -888,6 +888,21 @@ static int get_user_mapping_size(struct kvm *kvm, u64 addr)
+@@ -897,6 +897,21 @@ static int get_user_mapping_size(struct kvm *kvm, u64 addr)
  	return BIT(ARM64_HW_PGTABLE_LEVEL_SHIFT(level));
  }
  
@@ -107,7 +107,7 @@ index 410158c44499..45d4e55e9c89 100644
  static struct kvm_pgtable_mm_ops kvm_s2_mm_ops = {
  	.zalloc_page		= stage2_memcache_zalloc_page,
  	.zalloc_pages_exact	= kvm_s2_zalloc_pages_exact,
-@@ -900,6 +915,7 @@ static struct kvm_pgtable_mm_ops kvm_s2_mm_ops = {
+@@ -909,6 +924,7 @@ static struct kvm_pgtable_mm_ops kvm_s2_mm_ops = {
  	.virt_to_phys		= kvm_host_pa,
  	.dcache_clean_inval_poc	= clean_dcache_guest_page,
  	.icache_inval_pou	= invalidate_icache_guest_page,

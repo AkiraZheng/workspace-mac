@@ -1,4 +1,4 @@
-From 24c861e5e2688db2165c2456bb78c156af9be44c Mon Sep 17 00:00:00 2001
+From 4b53a50beff99f2973ba4eb8abaa70dc2a28ae03 Mon Sep 17 00:00:00 2001
 From: Eillon <yezhenyu2@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:34 +0800
 Subject: [PATCH v5 08/15] KVM: arm64: Flush the HDBSS buffer on VM exit
@@ -63,10 +63,10 @@ index fe703f02626b..d828e6b43fe9 100644
  
  #endif /* __ARM64_KVM_DIRTY_BIT_H__ */
 diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
-index 483b64e0b832..8e5af2e3958c 100644
+index 5ea4ac26995e..9d7bdece149a 100644
 --- a/arch/arm64/kvm/arm.c
 +++ b/arch/arm64/kvm/arm.c
-@@ -1426,6 +1426,14 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+@@ -1430,6 +1430,14 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
  
  		trace_kvm_exit(ret, kvm_vcpu_trap_get_class(vcpu), *vcpu_pc(vcpu));
  
@@ -81,7 +81,7 @@ index 483b64e0b832..8e5af2e3958c 100644
  		/* Exit types that need handling before we can be preempted */
  		handle_exit_early(vcpu, ret);
  
-@@ -2013,7 +2021,19 @@ long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
+@@ -2017,7 +2025,19 @@ long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
  
  void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
  {

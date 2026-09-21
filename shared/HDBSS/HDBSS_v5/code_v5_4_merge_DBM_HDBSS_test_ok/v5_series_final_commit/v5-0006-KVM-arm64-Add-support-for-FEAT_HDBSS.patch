@@ -1,4 +1,4 @@
-From 0ccb6dd844ee0cde665f08ee9fe98ba1c8f6ba3e Mon Sep 17 00:00:00 2001
+From 740947d7a59a16d81381f5082fd4a7963f916dae Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Fri, 18 Sep 2026 18:21:32 +0800
 Subject: [PATCH v5 06/15] KVM: arm64: Add support for FEAT_HDBSS
