@@ -98,8 +98,64 @@ Changes since v4 [2]:
   buffer pinned to PAGE_SIZE) and the KVM_CAP_ARM_HDBSS_BUFFER_SIZE
   UAPI with documentation and a selftest.
 
+Changes since v3 [3]:
+
+- Merge sysreg definitions into the FEAT_HDBSS detection patch (was a
+  separate patch in v3).
+- Add auto DBM (Dirty Bit Modifier) support as a new patch, suggested
+  by Leonardo Bras. DBM is now controlled as a page-table level flag
+  (KVM_PGTABLE_S2_DBM) rather than per-PTE. Note that DBM is injected
+  at stage-2 MMU creation time, not lazily on first dirty access. This
+  means the first write to a dirty-logged page does not generate a
+  page fault, which is a key reason for the mandatory dependency on
+  Leonardo's eager hugepage splitting patch.
+- Split the v3 "Enable HDBSS support and handle HDBSSF events" patch
+  into three patches: per-vCPU buffer management, fault handling and
+  buffer flush, and auto enable/disable on dirty logging change. This
+  implements kernel-managed automatic HDBSS enable/disable.
+- Remove the KVM_CAP_ARM_HW_DIRTY_STATE_TRACK ioctl for manual HDBSS
+  on/off. HDBSS is now automatically enabled/disabled based on dirty
+  logging state via kvm_arch_commit_memory_region().
+- Change HDBSS buffer flush triggers to vcpu_put, check_vcpu_requests,
+  and kvm_handle_guest_abort.
+- Store hdbss_order at VM level (kvm->arch.hdbss_order) instead of
+  per-vCPU, since all vCPUs share the same order.
+- Document patch is not included in this version; will be sent in a
+  follow-up series.
+
+Changes since v2 [4]:
+
+- Remove the ARM64_HDBSS configuration option and ensure this feature
+  is only enabled in VHE mode.
+- Move HDBSS-related variables to the arch-independent portion of the
+  kvm structure.
+- Remove error messages during HDBSS enable/disable operations.
+- Change HDBSS buffer flushing from handle_exit to vcpu_put,
+  check_vcpu_requests, and kvm_handle_guest_abort.
+- Add fault handling for HDBSS including buffer full, external abort,
+  and general protection fault (GPF).
+- Add support for a 4KB HDBSS buffer size, mapped to the value 0b0000.
+- Add a second argument to the ioctl to turn HDBSS on or off.
+
+Changes since v1 [5]:
+
+- Removed redundant macro definitions and switched to tool-generated.
+- Split HDBSS interface and implementation into separate patches.
+- Integrate system_supports_hdbss() into ARM feature initialization.
+- Refactored HDBSS data structure to store meaningful values instead
+  of raw register contents.
+- Fixed permission checks when applying DBM bits in page tables to
+  prevent potential memory corruption.
+- Removed unnecessary dsb instructions.
+- Drop the debugging printks.
+- Merged the two patches "using ioctl to enable/disable the HDBSS
+  feature" and "support to handle the HDBSSF event" into one.
+
 [1] https://lore.kernel.org/all/20260901171558.2674031-1-leo.bras@arm.com/
 [2] https://lore.kernel.org/all/20260709104026.2612599-1-zhengtian10@huawei.com/
+[3] https://lore.kernel.org/all/20260225040421.2683931-1-zhengtian10@huawei.com/
+[4] https://lore.kernel.org/all/20251121092342.3393318-1-zhengtian10@huawei.com/
+[5] https://lore.kernel.org/all/20250311040321.1460-1-yezhenyu2@huawei.com/
 
 Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
 
