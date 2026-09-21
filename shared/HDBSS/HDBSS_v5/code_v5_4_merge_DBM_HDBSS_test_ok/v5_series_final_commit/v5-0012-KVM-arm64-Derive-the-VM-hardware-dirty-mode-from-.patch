@@ -1,0 +1,212 @@
+From a18972b8f9c35a1048c4e1421309dd4e2eefb30e Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Fri, 18 Sep 2026 18:21:37 +0800
+Subject: [PATCH v5 12/15] KVM: arm64: Derive the VM hardware dirty mode from
+ dirty logging
+
+Both HAFDBS and HDBSS flip VTCR_EL2.HD at memslot-update time. Two
+independent toggles allow an intermediate HDBSS-set/HD-clear state,
+an illegal combination, and need locking against concurrent updates.
+
+Replace both with kvm_arch_update_hw_dirty_mode(), a pure function
+of the static capabilities and the number of logging memslots:
+
+  - logging && HDBSS-capable  -> HD|HA|HDBSS
+  - logging, no HDBSS         -> off
+  - !logging && HAFDBS-cap.   -> HD|HA
+
+Recomputing rather than toggling needs no locking against racing
+writers, and a vCPU created mid-migration inherits the current mode
+from the shared VTCR at its first vcpu_load().
+
+The HAFDBS leg is not gated on nested virtualization: shadow MMUs
+build their own VTCR without HD, and the L1-visible HAFDBS ID is
+capped at AF-only. The HDBSS leg stays gated for now, as the nested
+exit-flush and harvest paths are unaudited.
+
+kvm_s2_fault_compute_prot() consults the live HD state of the target
+MMU rather than the canonical VTCR, so a nested read fault does not
+install a writable-clean shadow entry, which is read-only under the
+HD-less shadow VTCR.
+
+The mode switch issues one KVM_REQ_RELOAD_STAGE2 followed by a
+VMID-wide TLB invalidation, as the request only reloads VTCR_EL2 and
+cached translations outlive the old mode. HA is always set together
+with HD, as FEAT_HDBSS requires VTCR_EL2.{HDBSS,HA,HD}.
+
+Also factor kvm_has_nv() out of vcpu_has_nv() for the VM-level HDBSS
+check.
+
+This is a rework of Leonardo Bras' "Enable HAFDBS for guests not on
+migration".
+
+Link: https://lore.kernel.org/all/20260901171558.2674031-6-leo.bras@arm.com/
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_mmu.h    | 18 ++++++++++
+ arch/arm64/include/asm/kvm_nested.h |  9 +++--
+ arch/arm64/kvm/hyp/pgtable.c        | 14 ++++++--
+ arch/arm64/kvm/mmu.c                | 56 ++++++++++++++++++++++++++++-
+ 4 files changed, 91 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
+index 6eae7e7e2a68..24407194444a 100644
+--- a/arch/arm64/include/asm/kvm_mmu.h
++++ b/arch/arm64/include/asm/kvm_mmu.h
+@@ -390,6 +390,24 @@ static inline bool kvm_supports_cacheable_pfnmap(void)
+ 	       cpus_have_final_cap(ARM64_HAS_CACHE_DIC);
+ }
+ 
++static inline bool kvm_supports_hafdbs(void)
++{
++	return IS_ENABLED(CONFIG_ARM64_HW_AFDBM) && has_vhe() &&
++		cpus_have_final_cap(ARM64_HW_DBM);
++}
++
++static inline bool kvm_supports_hdbss(struct kvm *kvm)
++{
++	return system_supports_hdbss() && !kvm_has_nv(kvm);
++}
++
++void kvm_arch_update_hw_dirty_mode(struct kvm *kvm);
++
++static inline bool kvm_hw_dirty_enabled(struct kvm_s2_mmu *mmu)
++{
++	return mmu->vtcr & VTCR_EL2_HD;
++}
++
+ #ifdef CONFIG_PTDUMP_STAGE2_DEBUGFS
+ void kvm_s2_ptdump_create_debugfs(struct kvm *kvm);
+ void kvm_nested_s2_ptdump_create_debugfs(struct kvm_s2_mmu *mmu);
+diff --git a/arch/arm64/include/asm/kvm_nested.h b/arch/arm64/include/asm/kvm_nested.h
+index 1ed708335809..d54f8fe4674d 100644
+--- a/arch/arm64/include/asm/kvm_nested.h
++++ b/arch/arm64/include/asm/kvm_nested.h
+@@ -7,11 +7,16 @@
+ #include <asm/kvm_emulate.h>
+ #include <asm/kvm_pgtable.h>
+ 
+-static inline bool vcpu_has_nv(const struct kvm_vcpu *vcpu)
++static inline bool kvm_has_nv(const struct kvm *kvm)
+ {
+ 	return (!__is_defined(__KVM_NVHE_HYPERVISOR__) &&
+ 		cpus_have_final_cap(ARM64_HAS_NESTED_VIRT) &&
+-		vcpu_has_feature(vcpu, KVM_ARM_VCPU_HAS_EL2));
++		kvm_vcpu_has_feature(kvm, KVM_ARM_VCPU_HAS_EL2));
++}
++
++static inline bool vcpu_has_nv(const struct kvm_vcpu *vcpu)
++{
++	return kvm_has_nv(vcpu->kvm);
+ }
+ 
+ /* Translation helpers from non-VHE EL2 to EL1 */
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index 9dde7e779699..0472edcb63b9 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -1313,9 +1313,17 @@ static int stage2_wrprotect_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 		ctx->mm_ops->mark_page_dirty(kvm_pte_to_phys(ctx->old));
+ 
+ 	/*
+-	 * We may race with the CPU trying to set the access flag here,
+-	 * but worst-case the access flag update gets lost and will be
+-	 * set on the next access instead.
++	 * The plain WRITE_ONCE races with hardware updates; both are
++	 * benign.
++	 *
++	 * AF: the update may be lost, and is set on the next access.
++	 *
++	 * Dirty state: we only rewrite entries whose old value had S2AP[1]
++	 * set, while hardware only promotes entries with S2AP[1] clear, so
++	 * the two never touch the same entry. The one overlap is DBM removal
++	 * on writable-clean blocks: a racing promotion is demoted back to
++	 * read-only, but the write is still recorded in the HDBSS buffer and
++	 * the folio was marked dirty at fault-in, so nothing is lost.
+ 	 */
+ 	if (kvm_pte_valid(ctx->old) && ctx->old != new)
+ 		WRITE_ONCE(*ctx->ptep, new);
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 96d7f0b9e85d..e298ffa72d52 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -2013,7 +2013,19 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
+ 	if (s2vi->map_writable) {
+ 		*prot |= KVM_PGTABLE_PROT_W;
+ 
+-		if (s2vi->device || !memslot_is_logging(s2fd->memslot) ||
++		/*
++		 * Check the live HD state of the MMU being installed
++		 * into, not the static capability: HD is off for the
++		 * whole VM as soon as any memslot logs, and under HD=0 a
++		 * writable-clean entry behaves as read-only, costing an
++		 * extra permission fault per page. Shadow MMUs never
++		 * carry HD, so nested installs are always writable-dirty.
++		 * A racing flip is benign: at worst one page takes one
++		 * extra fault.
++		 */
++		if (s2vi->device ||
++		    !(memslot_is_logging(s2fd->memslot) ||
++		      kvm_hw_dirty_enabled(s2fd->vcpu->arch.hw_mmu)) ||
+ 		    kvm_is_write_fault(s2fd->vcpu))
+ 			*prot |= KVM_PGTABLE_PROT_DIRTY;
+ 	}
+@@ -2608,6 +2620,45 @@ int __init kvm_mmu_init(u32 hyp_va_bits)
+ 	return err;
+ }
+ 
++/*
++ * The VM's hardware dirty-management mode is a derived value, a pure
++ * function of the static capabilities and the number of logging
++ * memslots, so recomputing it on every event cannot lose an update
++ * and needs no locking against racing writers:
++ *
++ *   logging && HDBSS-capable  ->  HD|HA|HDBSS (hardware tracking)
++ *   logging, no HDBSS         ->  off (write-protect faults)
++ *   !logging && HAFDBS-cap.   ->  HD|HA (only written pages go dirty)
++ */
++void kvm_arch_update_hw_dirty_mode(struct kvm *kvm)
++{
++	unsigned long cur, target;
++	bool logging = atomic_read(&kvm->nr_memslots_dirty_logging) != 0;
++
++	if (logging && kvm_supports_hdbss(kvm))
++		target = VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS;
++	else if (logging || !kvm_supports_hafdbs())
++		target = 0;
++	else
++		target = VTCR_EL2_HD | VTCR_EL2_HA;
++
++	cur = kvm->arch.mmu.vtcr & (VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS);
++	if (cur == target)
++		return;
++
++	kvm->arch.mmu.vtcr = (kvm->arch.mmu.vtcr &
++			      ~(VTCR_EL2_HD | VTCR_EL2_HA | VTCR_EL2_HDBSS)) |
++			     target;
++
++	kvm_make_all_cpus_request(kvm, KVM_REQ_RELOAD_STAGE2);
++
++	/*
++	 * The request only reloads VTCR_EL2; cached translations keep
++	 * the old permissions until invalidated.
++	 */
++	kvm_flush_remote_tlbs(kvm);
++}
++
+ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ 				   struct kvm_memory_slot *old,
+ 				   const struct kvm_memory_slot *new,
+@@ -2615,6 +2666,9 @@ void kvm_arch_commit_memory_region(struct kvm *kvm,
+ {
+ 	bool log_dirty_pages = new && new->flags & KVM_MEM_LOG_DIRTY_PAGES;
+ 
++	/* Derive the hardware dirty mode from the new logging state. */
++	kvm_arch_update_hw_dirty_mode(kvm);
++
+ 	/*
+ 	 * At this point memslot has been committed and there is an
+ 	 * allocated dirty_bitmap[], dirty pages will be tracked while the
+-- 
+2.43.0
+

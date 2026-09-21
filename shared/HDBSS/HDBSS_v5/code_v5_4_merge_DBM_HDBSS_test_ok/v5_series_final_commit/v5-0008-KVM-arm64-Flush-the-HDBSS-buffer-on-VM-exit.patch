@@ -1,0 +1,166 @@
+From 24c861e5e2688db2165c2456bb78c156af9be44c Mon Sep 17 00:00:00 2001
+From: Eillon <yezhenyu2@huawei.com>
+Date: Fri, 18 Sep 2026 18:21:34 +0800
+Subject: [PATCH v5 08/15] KVM: arm64: Flush the HDBSS buffer on VM exit
+
+HDBSS entries accumulate in the per-vCPU buffer while the guest runs,
+and must be drained into the dirty bitmap or dirty ring before
+userspace can observe them.
+
+Drain the buffer at a single point: kvm_arch_vcpu_ioctl_run() flushes
+it on every VM exit, before the exit reason is handled. Flushing
+inside the run loop keeps the dirty-ring feedback timely: when a flush
+pushes the ring past its soft limit, kvm_dirty_ring_push() raises
+KVM_REQ_DIRTY_RING_SOFT_FULL, which check_vcpu_requests() observes at
+the top of the next loop iteration, so the vCPU exits to userspace for
+the harvest before re-entering the guest.
+
+kvm_arch_sync_dirty_log() relies on the exit path to flush: it kicks
+vCPUs out of guest mode, and the GET/CLEAR protocol tolerates
+concurrent bitmap writes, so the snapshot is complete without extra
+synchronization.
+
+Signed-off-by: Eillon <yezhenyu2@huawei.com>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_dirty_bit.h | 15 +++++++++
+ arch/arm64/kvm/arm.c                   | 20 ++++++++++++
+ arch/arm64/kvm/dirty_bit.c             | 45 ++++++++++++++++++++++++++
+ 3 files changed, 80 insertions(+)
+
+diff --git a/arch/arm64/include/asm/kvm_dirty_bit.h b/arch/arm64/include/asm/kvm_dirty_bit.h
+index fe703f02626b..d828e6b43fe9 100644
+--- a/arch/arm64/include/asm/kvm_dirty_bit.h
++++ b/arch/arm64/include/asm/kvm_dirty_bit.h
+@@ -13,6 +13,9 @@
+ #include <asm/sysreg.h>
+ #include <linux/sizes.h>
+ 
++#define HDBSS_ENTRY_VALID	BIT(0)
++#define HDBSS_ENTRY_IPA	GENMASK_ULL(55, 12)
++
+ #define KVM_ARM_HDBSS_DEFAULT_SIZE  PAGE_SIZE
+ #define KVM_ARM_HDBSS_MAX_SIZE      SZ_2M
+ 
+@@ -22,7 +25,19 @@ static inline u32 kvm_hdbss_buffer_size(struct kvm *kvm)
+ 	return kvm->arch.hdbss_buffer_size ?: KVM_ARM_HDBSS_DEFAULT_SIZE;
+ }
+ 
++static inline bool kvm_hdbss_enabled(struct kvm *kvm)
++{
++	return kvm->arch.mmu.vtcr & VTCR_EL2_HDBSS;
++}
++
++static inline bool vcpu_hdbss_enabled(struct kvm_vcpu *vcpu)
++{
++	return vcpu->arch.hw_mmu &&
++		(vcpu->arch.hw_mmu->vtcr & VTCR_EL2_HDBSS);
++}
++
+ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu);
+ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu);
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu);
+ 
+ #endif /* __ARM64_KVM_DIRTY_BIT_H__ */
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index 483b64e0b832..8e5af2e3958c 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -1426,6 +1426,14 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
+ 
+ 		trace_kvm_exit(ret, kvm_vcpu_trap_get_class(vcpu), *vcpu_pc(vcpu));
+ 
++		/*
++		 * Drain the HDBSS buffer before the exit is handled, so
++		 * entries pushed to the dirty ring are accounted for by
++		 * dirty_ring_check_request() on the next iteration.
++		 */
++		if (vcpu_hdbss_enabled(vcpu))
++			kvm_flush_hdbss_buffer(vcpu);
++
+ 		/* Exit types that need handling before we can be preempted */
+ 		handle_exit_early(vcpu, ret);
+ 
+@@ -2013,7 +2021,19 @@ long kvm_arch_vcpu_unlocked_ioctl(struct file *filp, unsigned int ioctl,
+ 
+ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
+ {
++	unsigned long i;
++	struct kvm_vcpu *vcpu;
+ 
++	if (!kvm_hdbss_enabled(kvm))
++		return;
++
++	/*
++	 * The buffer is drained on every VM exit, so kicking running
++	 * vCPUs is enough to flush them; the dirty-log GET/CLEAR
++	 * protocol tolerates bits set concurrently with the snapshot.
++	 */
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		kvm_vcpu_kick(vcpu);
+ }
+ 
+ static int kvm_vm_ioctl_set_device_addr(struct kvm *kvm,
+diff --git a/arch/arm64/kvm/dirty_bit.c b/arch/arm64/kvm/dirty_bit.c
+index f9aeb9f34ad0..be0d12555c84 100644
+--- a/arch/arm64/kvm/dirty_bit.c
++++ b/arch/arm64/kvm/dirty_bit.c
+@@ -13,6 +13,7 @@
+ #include <linux/kconfig.h>
+ #include <linux/log2.h>
+ #include <linux/mm.h>
++#include <linux/srcu.h>
+ 
+ int kvm_arm_vcpu_alloc_hdbss(struct kvm_vcpu *vcpu)
+ {
+@@ -53,3 +54,47 @@ void kvm_arm_vcpu_free_hdbss(struct kvm_vcpu *vcpu)
+ 	vcpu->arch.hdbss.hdbss_pg = NULL;
+ 	vcpu->arch.hdbss.hdbssbr_el2 = 0;
+ }
++
++void kvm_flush_hdbss_buffer(struct kvm_vcpu *vcpu)
++{
++	int idx, curr_idx;
++	u64 prod;
++	u32 entries;
++	u64 *hdbss_buf;
++	struct kvm *kvm = vcpu->kvm;
++	int srcu_idx;
++
++	if (!vcpu_hdbss_enabled(vcpu))
++		return;
++
++	prod = read_sysreg_s(SYS_HDBSSPROD_EL2);
++	curr_idx = HDBSSPROD_IDX(prod);
++
++	if (curr_idx == 0 || !vcpu->arch.hdbss.hdbss_pg)
++		return;
++
++	hdbss_buf = page_address(vcpu->arch.hdbss.hdbss_pg);
++	if (!hdbss_buf)
++		return;
++
++	entries = kvm_hdbss_buffer_size(kvm) / sizeof(u64);
++
++	/* kvm_vcpu_mark_page_dirty() resolves the memslot under SRCU. */
++	srcu_idx = srcu_read_lock(&kvm->srcu);
++	for (idx = 0; idx < min_t(u32, curr_idx, entries); idx++) {
++		u64 gpa;
++
++		gpa = hdbss_buf[idx];
++		if (!(gpa & HDBSS_ENTRY_VALID))
++			continue;
++
++		gpa &= HDBSS_ENTRY_IPA;
++		kvm_vcpu_mark_page_dirty(vcpu, gpa >> PAGE_SHIFT);
++	}
++	srcu_read_unlock(&kvm->srcu, srcu_idx);
++
++	prod &= ~HDBSSPROD_EL2_INDEX_MASK;
++	write_sysreg_s(prod, SYS_HDBSSPROD_EL2);
++	vcpu->arch.hdbss.hdbssprod_el2 = prod;
++	isb();
++}
+-- 
+2.43.0
+

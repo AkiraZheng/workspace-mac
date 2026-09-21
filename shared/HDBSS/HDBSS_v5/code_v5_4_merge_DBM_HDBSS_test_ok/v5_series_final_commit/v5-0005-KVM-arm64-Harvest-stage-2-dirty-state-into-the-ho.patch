@@ -1,0 +1,120 @@
+From f9d6157b909678d1e78b515e6a9d196b09b36789 Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Fri, 18 Sep 2026 18:21:31 +0800
+Subject: [PATCH v5 05/15] KVM: arm64: Harvest stage-2 dirty state into the
+ host folio account
+
+With VTCR_EL2.HD set, hardware promotes writable-clean descriptors to
+writable-dirty without any VM exit, and the only record of the write
+is the S2AP[1] bit in the stage-2 PTE. The write never passed through
+the host stage-1, and no unmap path reads the bit, so the record dies
+with the PTE and reclaim may discard written guest data (silent
+corruption).
+
+The fault paths already mark the folio speculatively at fault-in, but
+the mapping lifecycle still needs exact harvesting, mirroring
+zap_present_folio_ptes() in the generic mm:
+
+  - stage2_unmap_walker(): harvest the output address of a valid leaf
+    with S2AP[1] set before tearing it down.
+
+  - stage2_wrprotect_walker(): a WD -> WC transition drops the dirty
+    state, so harvest before the clear.
+
+Both hooks go through a new kvm_pgtable_mm_ops::mark_page_dirty
+callback, as the walkers are also compiled into the nVHE hypervisor,
+where SetPageDirty() is unavailable. pKVM leaves the callback NULL.
+
+The folio is dirtied at its head, so one harvest covers a whole block
+mapping. MMIO/PFNMAP ranges and reserved pages are skipped, mirroring
+kvm_is_ad_tracked_page().
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h |  2 ++
+ arch/arm64/kvm/hyp/pgtable.c         | 14 ++++++++++++--
+ arch/arm64/kvm/mmu.c                 | 16 ++++++++++++++++
+ 3 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/include/asm/kvm_pgtable.h b/arch/arm64/include/asm/kvm_pgtable.h
+index 379031c74cbc..ea71c13615f7 100644
+--- a/arch/arm64/include/asm/kvm_pgtable.h
++++ b/arch/arm64/include/asm/kvm_pgtable.h
+@@ -246,6 +246,8 @@ struct kvm_pgtable_mm_ops {
+ 	phys_addr_t	(*virt_to_phys)(void *addr);
+ 	void		(*dcache_clean_inval_poc)(void *addr, size_t size);
+ 	void		(*icache_inval_pou)(void *addr, size_t size);
++	/* NULL where folios are not tracked. */
++	void		(*mark_page_dirty)(u64 pa);
+ };
+ 
+ /**
+diff --git a/arch/arm64/kvm/hyp/pgtable.c b/arch/arm64/kvm/hyp/pgtable.c
+index aa0448d3a6a4..9dde7e779699 100644
+--- a/arch/arm64/kvm/hyp/pgtable.c
++++ b/arch/arm64/kvm/hyp/pgtable.c
+@@ -1182,8 +1182,13 @@ static int stage2_unmap_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 
+ 		if (mm_ops->page_count(childp) != 1)
+ 			return 0;
+-	} else if (stage2_pte_cacheable(pgt, ctx->old)) {
+-		need_flush = !cpus_have_final_cap(ARM64_HAS_STAGE2_FWB);
++	} else {
++		if (stage2_pte_cacheable(pgt, ctx->old))
++			need_flush = !cpus_have_final_cap(ARM64_HAS_STAGE2_FWB);
++
++		if ((ctx->old & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W) &&
++		    mm_ops->mark_page_dirty)
++			mm_ops->mark_page_dirty(kvm_pte_to_phys(ctx->old));
+ 	}
+ 
+ 	/*
+@@ -1302,6 +1307,11 @@ static int stage2_wrprotect_walker(const struct kvm_pgtable_visit_ctx *ctx,
+ 	if (ctx->level < KVM_PGTABLE_LAST_LEVEL)
+ 		new &= ~KVM_PTE_LEAF_ATTR_HI_S2_DBM;
+ 
++	if (kvm_pte_valid(ctx->old) && ctx->old != new &&
++	    (ctx->old & KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W) &&
++	    ctx->mm_ops->mark_page_dirty)
++		ctx->mm_ops->mark_page_dirty(kvm_pte_to_phys(ctx->old));
++
+ 	/*
+ 	 * We may race with the CPU trying to set the access flag here,
+ 	 * but worst-case the access flag update gets lost and will be
+diff --git a/arch/arm64/kvm/mmu.c b/arch/arm64/kvm/mmu.c
+index 410158c44499..45d4e55e9c89 100644
+--- a/arch/arm64/kvm/mmu.c
++++ b/arch/arm64/kvm/mmu.c
+@@ -888,6 +888,21 @@ static int get_user_mapping_size(struct kvm *kvm, u64 addr)
+ 	return BIT(ARM64_HW_PGTABLE_LEVEL_SHIFT(level));
+ }
+ 
++static void kvm_s2_mark_page_dirty(u64 pa)
++{
++	unsigned long pfn = pa >> PAGE_SHIFT;
++	struct page *page;
++
++	if (!pfn_valid(pfn))
++		return;
++
++	page = pfn_to_page(pfn);
++	if (PageReserved(page))
++		return;
++
++	SetPageDirty(page);
++}
++
+ static struct kvm_pgtable_mm_ops kvm_s2_mm_ops = {
+ 	.zalloc_page		= stage2_memcache_zalloc_page,
+ 	.zalloc_pages_exact	= kvm_s2_zalloc_pages_exact,
+@@ -900,6 +915,7 @@ static struct kvm_pgtable_mm_ops kvm_s2_mm_ops = {
+ 	.virt_to_phys		= kvm_host_pa,
+ 	.dcache_clean_inval_poc	= clean_dcache_guest_page,
+ 	.icache_inval_pou	= invalidate_icache_guest_page,
++	.mark_page_dirty	= kvm_s2_mark_page_dirty,
+ };
+ 
+ static int kvm_init_ipa_range(struct kvm_s2_mmu *mmu, unsigned long type)
+-- 
+2.43.0
+
