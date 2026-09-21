@@ -32,7 +32,9 @@ derived hardware-dirty mode so that:
 HAFDBS is not gated on nested virtualization, as shadow stage-2 MMUs
 build their own VTCR through kvm_get_vtcr(), which never carries the
 HD bit. HDBSS stays gated for now, as the nested exit-flush and
-harvest paths are unaudited.
+harvest paths are unaudited. Note that this series was only tested
+on non-nested guests: the nested paths are reasoned about but not
+exercised, so reviewer attention there is appreciated.
 
 The HDBSS buffer registers are programmed on buffer ownership rather
 than on feature enablement (patch 7): HDBSS can be turned on while a
