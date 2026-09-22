@@ -28,7 +28,7 @@
 ```
 smmuv3_live_migration_test/
 ├── README.md                # 本文件:索引与快速上手
-├── test-plan.md             # 完整测试计划(环境/命令行/8 个测试用例/Tested-by 模板)
+├── test-plan.md             # 完整测试计划(命令行/12 用例总表 §5.0/压力基准/性能数据表/Tested-by 模板)
 └── patches/
     ├── qemu/
     │   ├── 0001~0007-*.patch   # 7 个 RFC patch(git format-patch 导出)
