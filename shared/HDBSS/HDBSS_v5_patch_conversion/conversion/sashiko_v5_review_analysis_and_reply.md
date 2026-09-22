@@ -4,7 +4,8 @@
 
 sashiko-bot 共回复 6 封(patch 04 / 09 / 10 / 11 / 12 / 14),合计 14 条 finding。
 
-**结论:5 个真问题(已出修复补丁)、3 个设计项(留待 v6)、5 条误报(回复中说明理由)。**
+**结论:4 个真问题 + 1 个防御性加固(已出修复补丁)、3 个设计项(留待 v6)、
+5 条误报(回复中说明理由)。**
 
 修复补丁在 `../bugfix_patches/`(3 个,分支 `hdbss-v5_review_fixes`,
 base 7.3-rc5 + v5 系列)。
@@ -45,11 +46,15 @@ panic;普通用户可经 /dev/kvm 触发 DoS。
 **Bot 的说法**:`kvm_get_vtcr()` 按 erratum 屏蔽 HA,而派生 target 在
 hafdbs 为真时无条件设 HA,任何 memslot 更新都会覆盖 workaround。
 
-**判定:真 bug。** erratum 不影响 ARM64_HW_DBM 能力位,所以
-`kvm_supports_hafdbs()` 在 AmpereOne 上仍为真,target HD|HA(或
-HD|HA|HDBSS)把 HA 加回去。修复:`kvm_supports_hafdbs()` 增加
-`!cpus_have_final_cap(ARM64_WORKAROUND_AMPERE_AC03_CPU_38)`(补丁 0001)。
-附带效应:VHE 但无 DBM 硬件的系统不再静默清掉 upstream 的 HA 默认位。
+**判定:当前硬件不可达;修复属防御性加固。** Bot 的前提反了——
+AC03_CPU_38 的受影响机型在 ID_AA64MMFR1_EL1.HAFDBS 里报告"未实现"
+(勘误本身:ID 说没有,但 (V)TCR_ELx.{HA,HD} 不是 RES0、位是活的,且
+隐藏实现还有 PTE 置 invalid 后硬件仍做 A/D 更新的附加 bug),所以
+ARM64_HW_DBM 能力为 false → `kvm_supports_hafdbs()` 已为 false →
+target 恒 0;同时 workaround 摘掉了初始 HA → cur = 0,永不翻转,
+HA 设不上。修复(补丁 0001)在 `kvm_supports_hafdbs()` 显式排除
+erratum:不依赖"ID 恰好报 NI"这条间接路径,若未来有型号 ID 如实
+报告 HAFDBS 但仍带勘误,闸门直接挡住。
 
 ### 3. [High] kvm_has_nv() 门控时序(patch 12)
 
@@ -155,10 +160,10 @@ RES0,不存在巧合置位。
 
 ```
 Thank you for the reviews. Replying to the six sashiko reports in one
-go: five findings are real and fixed, four are false positives, and
-three are design points I plan to settle in v6.
+go: five findings are addressed with fixes, four are false positives,
+and three are design points I plan to settle in v6.
 
-Real and fixed:
+Addressed:
 
 1. (Critical, 04/12) nVHE host panic. The reload request is handled in
    host context and calls the VHE __load_stage2(), which writes the
@@ -169,10 +174,11 @@ Real and fixed:
    request, no HAFDBS hardware involved. The whole mode update now
    stays out unless the HAFDBS mode is available.
 
-2. (High, 12) Ampere AC03_CPU_38. The derived target sets HA
-   unconditionally, undoing the erratum workaround on any memslot
-   update. The erratum is now excluded from kvm_supports_hafdbs(),
-   which also covers the HDBSS mode.
+2. (High, 12) Ampere AC03_CPU_38. The affected parts report
+   FEAT_HAFDBS as not implemented, so kvm_supports_hafdbs() is
+   already false there and the mode never sets VTCR_EL2.HA. The
+   erratum is excluded explicitly as well, so the gate no longer
+   depends on the ID register.
 
 3. (High, 12) kvm_has_nv() timing. The flag only becomes true at the
    first KVM_ARM_VCPU_INIT, so a logging memslot created before that

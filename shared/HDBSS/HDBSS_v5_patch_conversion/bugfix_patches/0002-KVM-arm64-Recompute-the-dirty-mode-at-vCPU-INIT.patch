@@ -1,6 +1,6 @@
-From ee37cc920aa36f9c689036d87ea789b704da348d Mon Sep 17 00:00:00 2001
+From 99be9b3bea14197599f7144e303963b4c9910526 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
-Date: Tue, 22 Sep 2026 07:15:38 +0800
+Date: Tue, 22 Sep 2026 17:12:28 +0800
 Subject: [PATCH 2/3] KVM: arm64: Recompute the dirty mode at vCPU INIT
 
 kvm_has_nv() only becomes true once the vCPU features are copied at

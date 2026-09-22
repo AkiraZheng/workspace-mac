@@ -1,6 +1,6 @@
-From 2283e5e1b289d37c292e8ab512bdd7381fc77430 Mon Sep 17 00:00:00 2001
+From 6586469861c2105523e3238e3c5b128951314d6d Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
-Date: Tue, 22 Sep 2026 07:15:38 +0800
+Date: Tue, 22 Sep 2026 17:12:28 +0800
 Subject: [PATCH 3/3] KVM: Add the dirty ring size hook stub
 
 kvm_vm_ioctl_enable_dirty_log_ring() is built for every architecture,
