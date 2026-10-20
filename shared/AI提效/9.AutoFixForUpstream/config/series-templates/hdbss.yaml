@@ -1,0 +1,23 @@
+# HDBSS v5 -> v6 系列配置(import 模式首个实例)
+# 复制到 <repo>/.autofix/hdbss-v6/series.yaml 后按需调整
+series_id: hdbss-v6
+repo_path: /home/akira/code/linux/linux
+work_branch: hdbss-v6_v5review_fixes       # 已存在的分支(import 注册,不新建)
+base_commit: 72d3fcf802c4                  # Linux 7.3-rc5,系列基底
+list: kvmarm
+prev_version: 5
+new_version: 6
+prev_msgid: "20260929103655.85107-1-zhengtian10@huawei.com"   # v5 cover 在 lore 的 Message-ID
+series_authors:                            # 这些发件人的回复视为作者自述,不算外部意见
+  - zhengtian10@huawei.com
+  - yezhenyu2@huawei.com
+build:
+  command: "make ARCH=arm64 -j4"
+  artifact: "arch/arm64/boot/Image"
+rpm_validate:
+  enabled: false                           # 上板验证留配置项,本期关闭
+  command: ""
+poll:
+  interval_hours: 4
+b4:
+  no_add_trailers: true                    # 基底 patch 不带线程收集的 Acked-by

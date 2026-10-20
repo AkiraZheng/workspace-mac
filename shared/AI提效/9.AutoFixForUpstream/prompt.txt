@@ -1,0 +1,30 @@
+使用场景:经常需要从社区中拉patch并跟踪该patch的社区意见,然后根据社区的已经生成bugfix,并不断监控是否有新的review意见,然后生成bugfix.(可选地没有条件的话可以把代码编译后上版验证)待意见基本稳定不再更新后,分析各个bugfix属于哪个patch,merge进去(amend).
+
+步骤:
+1. 先b4拉conversion和patch(或者你想想看有没有什么更好的review意见监控方法)
+# b4 am：下载并准备补丁，但不自动应用
+b4 am <Message-ID>
+
+# b4 shazam：下载并直接应用到当前分支
+b4 shazam <Message-ID>
+
+# b4 会自动从 lore.kernel.org 拉取整个讨论线程
+b4 mbox <Message-ID>
+
+2. linux切到master中,并git pull.然后基于master checkout生成新分支:比如 xxx_v6_xxx.把上一版本的patch先am --3waymerge进来(可以调用patch-merge-workflow的skill来实现合入,用quick yaml)
+其中,cover的格式一般为:
+
+patch实现内容.
+change log
+历史版本的链接
+
+这部分内容,所以可以先新建一个文本,记录下一个新版本的cover信息(注意,这里的历史版本链接,比如b4拉的是v5,我们接下来准备发的是v6,那么patch实现内容可以先拷贝v5的,change log就是v5->v6,此时还没做修改,所以内容应该是空的,且历史链接版本要在v5的cover基础上新增v5的链接.
+3. 分析conversion中的聊天并提取有效检视意见(区分人为检视意见和sashiko检视意见),并深度分析源码,确定哪些是有效意见哪些是无效意见,并记录bugfix文档:
+- 原始意见来源
+- 是否是有效意见
+	- 如果是有效意见的话:源码分析,解决方法
+4. 通过bugfix的方式修改代码
+修改->add和commit->编译修改(amend)->可选的,有条件的话rpm包上板验证
+5. 想办法定时拉取社区新的review意见,并重复上面步骤3-4.
+6. 等到社区基本没有意见了.或者经过人工确认后,可以把这一批的bugfix抽出来,amend到原始patch中,注意,原始patch相对于社区来说,并没有合入到源码中,所以你不能把当前的修改内容死板地写到原始patch的commit message中,只能有必要的时候再做一些commit message的修改.至于bugfix的更改信息,应该记录到cover中.(change log),cover的 patch实现内容的修改逻辑功能patch的一样,应该以最终的实现为准(做调整),而不是以bugfix修改内容为准
+

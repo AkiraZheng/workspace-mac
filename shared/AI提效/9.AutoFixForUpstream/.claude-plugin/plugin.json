@@ -1,0 +1,4 @@
+{
+  "name": "autofix-upstream",
+  "description": "内核社区 review 意见跟踪与自动修复工作流:拉取 lore 线程意见、三分类甄别(人为/AI/机器人)、生成 bugfix、意见稳定后 fixup 合回原始 patch 并产出下一版系列"
+}

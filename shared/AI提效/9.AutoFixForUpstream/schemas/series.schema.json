@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "autofix-upstream/series.schema.json",
+  "title": "系列静态配置 (series.yaml 的 JSON 化)",
+  "type": "object",
+  "required": ["series_id", "repo_path", "work_branch", "prev_version", "new_version", "prev_msgid"],
+  "properties": {
+    "series_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "repo_path": {"type": "string", "minLength": 1},
+    "work_branch": {"type": "string", "minLength": 1},
+    "base_commit": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "list": {"type": "string"},
+    "prev_version": {"type": "integer", "minimum": 1},
+    "new_version": {"type": "integer", "minimum": 2},
+    "prev_msgid": {"type": "string", "minLength": 3},
+    "series_authors": {"type": "array", "items": {"type": "string"}},
+    "build": {
+      "type": "object",
+      "properties": {
+        "command": {"type": "string"},
+        "artifact": {"type": "string"}
+      }
+    },
+    "rpm_validate": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "command": {"type": "string"}
+      }
+    },
+    "poll": {
+      "type": "object",
+      "properties": {
+        "interval_hours": {"type": "integer", "minimum": 1}
+      }
+    },
+    "b4": {
+      "type": "object",
+      "properties": {
+        "no_add_trailers": {"type": "boolean"}
+      }
+    }
+  }
+}

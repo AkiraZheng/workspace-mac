@@ -1,0 +1,49 @@
+# 发送者三分类规则(harness/triage/classify.py 加载)
+# 匹配顺序: bots -> ai_reviewers -> humans_priority -> default_class,先中先用
+# 每条规则: email_re(对邮箱全匹配) 或 name_re(对显示名匹配),正则语法
+
+# 测试机器人:只提取客观事实(编译错误/警告/复现参数),是否修由人定
+bots:
+  - {name_re: "kernel test robot"}
+  - {name_re: "syzbot"}
+  - {name_re: "0-day"}
+  - {email_re: "oliver\\.sang@intel\\.com"}
+  - {email_re: "linux-kernel-mentees@lists\\.linuxfoundation\\.org"}
+
+# AI 检视账号:kvmarm 列表上发 LLM 生成检视意见的账号,质量参差,默认不信任
+# triage 时必须逐条代码级反证:引用不存在/行号错/与主线语义矛盾 -> invalid
+ai_reviewers:
+  - {email_re: "sashiko-bot@kernel\\.org", note: "kvmarm 上的 LLM 检视账号"}
+
+# maintainer/核心 reviewer:分类仍为 human,显示优先级更高
+humans_priority:
+  - {email_re: "maz@kernel\\.org",         note: "Marc Zyngier (kvmarm maintainer)"}
+  - {email_re: "oliver\\.upton@linux\\.dev", note: "Oliver Upton (kvmarm maintainer)"}
+  - {email_re: "oupton@kernel\\.org",      note: "Oliver Upton (kvmarm maintainer)"}
+  - {email_re: "leo\\.bras@arm\\.com",     note: "Leonardo Bras"}
+  - {email_re: "ricardo\\.koller@arm\\.com", note: "Ricardo Koller"}
+  - {email_re: "shahuang@redhat\\.com",   note: "Shaoqin Huang"}
+  - {email_re: "seanjc@kernel\\.org|seanjc@google\\.com", note: "Sean Christopherson"}
+
+# 未知发件人的默认分类
+default_class: human
+
+# 各类的甄别基线(review-triage SKILL.md 引用)
+strictness:
+  human: >-
+    标准验证:意见与源码对得上即采纳,引用的行号/符号需复核。
+  ai_reviewer: >-
+    默认不信任:必须引用邮件原文并对应到源码行,逐条核对代码事实;
+    引用不存在/行号错/与主线语义矛盾 -> invalid。即使技术上说得通,
+    也要检查它建议的修复是否与系列设计意图冲突。
+  bot: >-
+    只提取客观事实(编译错误/警告/配置/复现参数),不采纳其修复建议;
+    是否修由人决定。
+
+# 未知账号的 LLM 风格启发式(判 suspected_llm 时按 ai_reviewer 基线处理)
+heuristics:
+  llm_style_signals:
+    - "结构化 boilerplate 开场 + 泛泛 praise 后列 numbered findings"
+    - "行号/符号引用与实际源码不符"
+    - "建议与主线已有语义/结论矛盾"
+    - "对 patch 上下文之外的内容做臆测性推断"

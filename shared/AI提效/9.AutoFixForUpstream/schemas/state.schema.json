@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "autofix-upstream/state.schema.json",
+  "title": "系列动态状态 (state.json,harness 唯一写者)",
+  "type": "object",
+  "required": ["schema_version", "series_id", "phase", "base", "series_commits", "fix_commits", "thread", "poll"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "series_id": {"type": "string"},
+    "phase": {"enum": ["monitoring", "finalizing", "done"]},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "import_mode": {"type": "boolean"},
+    "base": {
+      "type": "object",
+      "required": ["commit"],
+      "properties": {
+        "commit": {"type": "string"},
+        "subject": {"type": "string"}
+      }
+    },
+    "series_commits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["seq", "sha", "subject"],
+        "properties": {
+          "seq": {"type": "integer", "minimum": 1},
+          "sha": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+          "subject": {"type": "string"},
+          "msgid": {"type": ["string", "null"]},
+          "new_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{7,40}$"}
+        }
+      }
+    },
+    "fix_commits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sha", "subject", "target_seq"],
+        "properties": {
+          "sha": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+          "subject": {"type": "string"},
+          "target_seq": {"type": "integer", "minimum": 1},
+          "origin": {"type": "string", "description": "imported 或 triage item id 如 r0-003"}
+        }
+      }
+    },
+    "cover": {
+      "type": "object",
+      "properties": {
+        "v5_msgid": {"type": "string"},
+        "v5_lore_url": {"type": "string"},
+        "draft": {"type": "string"},
+        "final": {"type": ["string", "null"]}
+      }
+    },
+    "thread": {
+      "type": "object",
+      "required": ["root_msgid", "messages_seen", "rounds"],
+      "properties": {
+        "root_msgid": {"type": "string"},
+        "messages_seen": {"type": "array", "items": {"type": "string"}},
+        "rounds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["round", "at", "new_messages", "mbox"],
+            "properties": {
+              "round": {"type": "integer", "minimum": 0},
+              "at": {"type": "string"},
+              "new_messages": {"type": "integer"},
+              "mbox": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "poll": {
+      "type": "object",
+      "properties": {
+        "last_run_at": {"type": ["string", "null"]},
+        "last_status": {"type": ["string", "null"]}
+      }
+    },
+    "final": {
+      "type": "object",
+      "properties": {
+        "started_at": {"type": ["string", "null"]},
+        "rebase": {
+          "type": "object",
+          "properties": {
+            "done": {"type": "boolean"},
+            "old_to_new": {"type": "object", "additionalProperties": {"type": "string"}}
+          }
+        },
+        "backup_branch": {"type": ["string", "null"]},
+        "export_dir": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
