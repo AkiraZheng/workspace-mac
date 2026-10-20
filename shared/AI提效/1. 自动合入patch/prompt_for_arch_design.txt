@@ -1,0 +1,128 @@
+## 角色
+你是 Linux 内核补丁自动合入系统的架构师。请基于以下现有实现和目标愿景，设计从单体架构到模块化多场景架构的演进方案。
+
+## 背景
+
+### 现有系统：patchset-merge-v2
+位于 /mnt/shared/openeuler/shared/AI提效/1.\ 自动合入patch/patchset-merge-v2/
+
+一个 4 层单体流水线架构，专门处理"将一组 patch 合入单个目标仓库/分支"：
+
+- Layer 1 (interaction): /root/.agents/skills/patchset-merge-v2/layer1-interaction/SKILL.md
+  解析用户输入 → 基线分支检测 → 工作分支创建 → .config 配置 → 输出 config.json
+
+- Layer 2 (search): /root/.agents/skills/patchset-merge-v2/layer2-search/SKILL.md
+  下载 patch → 抽样检测旧版本 → 场景问询（upgrade/backport）→ 并行 subagent 搜索 revert 候选 + upstream 依赖 → 符号提取 → 编译点计算 → 输出 merge_tasks.json
+
+- Layer 3 (execution): /root/.agents/skills/patchset-merge-v2/layer3-execution/SKILL.md
+  Phase 1 批量 revert → Phase 2 拉取上游依赖 → Phase 3 串行 git am → 冲突解决 → 编译验证 → review → commit → 落盘 analyse.md
+
+- Layer 4 (output): /root/.agents/skills/patchset-merge-v2/layer4-output/SKILL.md
+  生成 summary.md + output_report.json
+
+子模块：
+- conflict-resolver: /root/.agents/skills/patchset-merge-v2/conflict-resolver/SKILL.md
+- linux-kernel-review: /root/.agents/skills/patchset-merge-v2/linux-kernel-review/SKILL.md
+- orchestrator: /root/.agents/skills/patchset-merge-v2/patchset-merge-orchestrator/SKILL.md
+- 参考文件: /root/.agents/skills/patchset-merge-v2/patchset-merge-orchestrator/references/（含 layer_interface_schema.md, state_schema.md 等）
+
+关键约束：
+- HARD-GATE 强制线性执行，不可跳过
+- 所有层间通过 JSON 文件传递（config.json → merge_tasks.json → execution_log.json → summary.md）
+- 单一仓库、单一分支的假设硬编码在各层
+- 编译验证硬编码为 arm64 内核
+
+### 目标愿景：OS多分支同步workflow.md
+文件位于：/mnt/shared/OS多分支同步workflow.md
+
+从"单 repo 单 branch"升级为"多 repo 多 branch 多场景"的模块化系统：
+
+**工作场景**：
+1. 5.10 ↔ 6.6 跨远程仓同步（不同远程仓）
+2. 6.x 切分支（相同远程仓，不同分支）
+3. 6.6 切分支（相同远程仓，不同分支）
+4. 社区挖掘 patch 同步回来（可能同仓也可能异仓）
+5. qemu/rdma/ras/dpdk 等非内核模块切分支
+
+**核心功能模块**（可组合）：
+- git cherry-pick（支持跨仓，通过 git remote add 统一管理）
+- git am/apply
+- 冲突解决（含通用低逻辑冲突 AI 解决 + 深层逻辑冲突灰度降级至人工）
+- review（Diff-of-Diff 检查，AI 作为严格 Reviewer）
+- 搜索目标 patch（三级去重过滤网：commit message 匹配 → patch-id → git cherry 盲测）
+- 前置依赖挖掘器（依赖链拓扑排序）
+- commit message 改写
+- 编译（拆为环境搭建 + 业务编译两个 skill，支持多模块多组件）
+- gate 门禁模块（统一规则 + 动态加载模块的门禁）
+
+**设计原则**：
+- 主流程放独立 skill，功能模块动态组合
+- 允许用户选择工作场景，系统自动组合功能 skill
+- 允许用户自行组合 skill
+- harness（脚本化逻辑，长期存在）与提示词（任务流，模型相关）分离
+- 编译沙盒化（docker）
+- 场景确认阶段生成执行 plan（动态加卸载模块）
+
+### 新patch merge skill工程路径：/mnt/shared/patch-merge-workflow/
+
+## 设计任务
+
+请从以下 8 个维度给出架构设计方案：
+
+### 1. 模块拆分与边界定义
+当前 patchset-merge-v2 是单体架构。请将现有功能拆解为可组合的 skill 模块，并定义每个模块的：
+- 输入/输出接口（JSON schema）
+- 依赖关系（哪些模块可独立，哪些有前置条件）
+- 是否为"通用模块"（所有场景复用）还是"场景专属模块"
+
+### 2. 场景编排机制
+如何从"选择场景 → 自动组合 skill → 生成执行 plan"？请设计：
+- 场景配置文件结构（声明该场景需要哪些模块、模块顺序、编译目标等）
+- plan 生成器的工作流程（如何根据场景配置动态组装执行 DAG）
+- 模块动态加载/卸载的机制
+
+### 3. 多仓库/多分支模型
+当前系统假设单一 repo。如何扩展以支持：
+- 多 remote 管理（Core 仓库 + 多个 remote add）
+- 多分支并行合入（同一仓库的不同分支互不干扰）
+- 跨仓 cherry-pick 的 git 操作抽象
+
+### 4. 编译模块解耦
+当前编译硬编码为 `make ARCH=arm64 -j$(nproc)`。如何拆为：
+- 编译环境搭建 skill（docker/env setup）
+- 业务编译 skill（支持内核单模块/整体编译、其他模块编译）
+- 编译目标注册机制（新增模块只需添加编译脚本 + 环境信息）
+
+### 5. Gate 门禁模块改造
+当前 gate 是硬编码的层间检查。如何改造为：
+- 统一门禁规则引擎（可配置规则集）
+- 按动态加载的模块自动追加门禁检查
+- 门禁规则与模块的绑定关系
+
+### 6. 冲突解决的分级策略
+OS多分支同步workflow.md 提出"通用低逻辑冲突 AI 解决 ↔ 深层逻辑冲突降级人工"。请设计：
+- 冲突分类器（如何自动判断是"低逻辑"还是"深层逻辑"）
+- 降级触发条件（mutex/spin_lock/rcu/复杂时序 → 强制中断）
+- 中断后的工单生成机制（保留现场 + 冲突核心差异图 + 路由给模块专家）
+
+### 7. 现有 skill 的改造策略
+对 patchset-merge-v2 现有各层，请给出改造建议：
+- 哪些可以直接复用为独立模块（如 conflict-resolver、linux-kernel-review）
+- 哪些需要重构拆分（如 Layer 2 的多个 subagent 需独立为可组合的搜索策略）
+- 哪些需要重新设计（如 Layer 1 的配置提取需支持多仓库）
+
+### 8. 渐进式迁移路径
+请给出分阶段实施计划（Phase 1 → Phase 2 → Phase 3），每个阶段：
+- 目标状态
+- 需要新建的 skill
+- 需要改造的现有 skill
+- 可交付的 MVP 能力
+
+## 约束
+- 不要过度设计——优先 pragmatism，其次 elegance
+- 考虑 AI agent 的上下文长度限制（每个 skill 的 SKILL.md 应在 200-300 行以内）
+- Harness（脚本/确定性逻辑）与 Prompt（AI 推理逻辑）必须明确分离
+- 向后兼容：第一阶段应保持现有单 repo 场景可运行
+
+## 输出格式
+请输出结构化的架构设计文档，使用 markdown，包含必要的数据结构示例（JSON/YAML），避免冗长的散文式描述。

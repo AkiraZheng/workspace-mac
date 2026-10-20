@@ -30,7 +30,13 @@ description: ARM KVM (arch/arm64/kvm) 代码与 commit 风格指南。在编写�
 - **技术细节**：问题确立后，用 plain English 描述具体做了什么，让 reviewer 验证代码行为符合意图
 - **祈使语气**：写 "make xyzzy do frotz" 而非 "[This patch] makes xyzzy do frotz" 或 "[I] changed xyzzy to do frotz"
 - **自包含**：每次提交或重新提交时，包含完整的 patch 描述和理由。不要只说 "this is version N"，不要指望维护者去翻之前的版本
+- **无上版对比痕迹**：每个版本都当作全新的 patch 对待。正文禁止出现与上一版比较的表述——"v4 used X"、"previously we kicked"、"no longer..." 指代自家旧设计、"needs no X of its own" 这类只有看过旧版才懂的句子。版本差异说明只放两处：cover letter（patch 0000）或各 patch `---` 之后的 changelog。正文 focus 当前 patch 完成的内容。注意区分：与**当前内核既有行为**的对比（问题描述所必需，如 "instead of write-protecting and taking a fault..."）不是上版痕迹，允许保留
 - **每行 75 字符换行**（tag 行例外，tag 不换行以便脚本解析）
+- **纯 ASCII 箭头**：commit message、代码注释、Documentation 中禁止 Unicode 箭头——`→` 改为 `->`、`⇒` 改为 `=>`、`←` 改为 `<-`、`↔` 改为 `<->`，其他 Unicode 符号同理替换为 ASCII 等价物。注意 checkpatch 的 UTF8_BEFORE_PATCH 警告只在邮件声明了非 UTF-8 charset 时触发，正常 UTF-8 邮件里的 Unicode 它不查，不能依赖工具——发系列前手动扫描：
+  ```
+  git log --format='%B' <base>..HEAD | grep -nP '[^\x00-\x7F]'
+  git diff <base>..HEAD | grep -nP '^\+.*[^\x00-\x7F]'
+  ```
 
 ### 0.3 引用其他 commit
 
@@ -72,12 +78,32 @@ description: ARM KVM (arch/arm64/kvm) 代码与 commit 风格指南。在编写�
 | `Suggested-by:` | 提出了 patch 的想法 | 否（公开建议即可） |
 | `Cc:` | 记录被通知的人（未提供评论） | 否 |
 | `Co-developed-by:` | 共同作者，每个 Co-developed-by 后必须紧跟该人的 Signed-off-by | 是 |
-| `Assisted-by:` | 使用了 AI 编码辅助工具时必须标注 | 否 |
 | `Closes:` | 关闭 bug 报告 | 否 |
 
 - `Reported-by:` 后应紧跟 `Closes:` 指向报告链接
 - 添加 `Tested-by` / `Reviewed-by` / `Acked-by` 等 tag 需要本人明确许可
 - 如果 patch 大幅修改导致之前的 Reviewed-by 不再适用，应移除该 tag 并在 changelog 中说明
+
+#### 拾取他人 patch 进自己的系列
+
+每条 `Link:` 记录一跳 custody（接力棒交接），**由接收方在交接时写入**。先例：`56fd1fc526e6`（Bradley Morgan 的 patch 被 Fuad Tabba 带入自己系列，Oliver Upton 应用）、`2684e02bac41`（Oliver 的 patch 经 Marc 应用）。
+
+拾取时的 commit message 形态（内容 verbatim 不改）：
+
+```
+<原作者 message 原文，一字不动>
+
+Link: https://lore.kernel.org/all/<原作者发帖 message-id>/   ← 你写的：记录"内容来自该发帖"
+Signed-off-by: <原作者>
+Signed-off-by: <你>                                          ← custody 传递到你的 SoB
+```
+
+规则：
+- **Author/From 保留原作者**，diff 与 message 正文 verbatim；不伪造原作者的任何 tag（Marc Zyngier 裁定：SoB 只能本人给）
+- **Link 放在原作者 SoB 之前**（b4/lore 语义："此 commit 内容来自该发帖"）
+- **若修改了正文**（reword/adapt）：在你的 SoB 前加注记 `[你的tag: 改了什么]`——先例 `[tabba: reword the commit message for ...]`
+- **指向你自己系列的 Link 不写**：你发帖前 message-id 不存在；将来维护者应用你的系列时，其 b4 自动追加 `Link: https://patch.msgid.link/<你的系列 msgid>`。因此被携带过的 patch 在 mainline 是双 Link 形态（原帖 + 应用来源），直接应用的 patch 单 Link
+- 封面信 changelog 中提及拾取时引用原帖 URL（脚注 `[1]` 风格）
 
 ### 0.6 Patch 格式
 
@@ -362,6 +388,30 @@ ARM KVM 代码中偶尔出现幽默/俏皮的注释，这是该子系统的文�
 - 引用架构概念时使用标准缩写：BBM、CMO、FWB、VNCR、TLBI
 - 引用架构文档时说 "As per the ARM GICv3 spec" 或 "The architecture requires..."
 
+### 3.5 注释密度
+
+**commit message 承载 WHY，代码注释只留给"读者无法从代码 + message 重建的不变量"。**
+
+上游参考密度（arch/arm64/kvm 近期落库 patch 抽样）：
+
+| patch 类型 | 插入行 | 注释行 | 占比 |
+|-----------|-------|--------|------|
+| 特性新增（FEAT_XNX stage-2 权限） | 60 | 2 | ~3% |
+| 优化（TLB workaround） | 47 | 8 | ~17% |
+| 带不变量的重构（set_owner 泛化） | 62 | 16 | ~26% |
+
+规则：
+
+- 特性类 patch 以**个位数**注释块为目标；新文件也只给文件头职责行
+- 该写注释的（读者无法重建的不变量）：两种编码/基准不一致（如 SZ 编码 vs buddy order）、寄存器是 per-CPU 状态需 save/restore、嵌套虚拟化的 MMU 切换语义、并发/锁序约束
+- 不该写注释的：
+  - 宏/函数名自解释（`KVM_ARM_HDBSS_DEFAULT_SIZE = PAGE_SIZE` 不需要注释）
+  - 重复 commit message 内容的段落（message 已说过 WHY，注释别再抄一遍）
+  - forward-reference 后续 patch 才出现的消费者（"Used by flush and ioctl..."）
+  - 成对的交叉引用注释（load 处注释指向 put，put 处又指回 load——只在非显而易见的一侧留）
+- 检验方法：删掉注释后，读者（知道 message 内容）能否从代码本身重建行为？能则删
+- 注释块数量比行数更影响观感——10 个小块把 diff 切得稀碎，不如 3 个块各说清一个不变量
+
 ---
 
 ## 四、代码组织
@@ -401,6 +451,20 @@ Stage-2 页表更新遵循 BBM：
 2. 执行 CMO（如需要）
 3. `stage2_make_pte()` — 用 `smp_store_release()` 安装新 PTE
 
+### 4.4 UAPI 变更的文件范围
+
+新增 KVM capability / ioctl 时的分界——**不是所有 UAPI 变更都要同步 tools copy**：
+
+| 变更类型 | include/uapi/linux/kvm.h | tools/include/uapi/linux/kvm.h | Documentation/virt/kvm/api.rst |
+|---------|--------------------------|-------------------------------|-------------------------------|
+| 纯 cap 编号（`KVM_CAP_xxx`） | ✓ | **✗**（perf 不消费 cap 编号） | ✓（新 capability 必配文档） |
+| ioctl 命令码（`_IO`/`_IOR`/`_IOW`）或设备/结构类型 | ✓ | **✓**（perf `beauty_ioctl` 解码，`tools/perf/check-headers.sh` 监控两份 kvm.h 的 drift） | ✓ |
+
+- tools copy 由 perf 维护者例行批量同步（"tools headers: Sync KVM headers with the kernel sources" 系列 commit），**不挂在 KVM 系列**里；KVM 系列强行同步会把 tools copy 里其他缺失项捎带进来（越权 churn）
+- 先例：cap-only 单文件 —— `KVM_CAP_ARM_PMU_V3_STRICT 251`（ad220e275c39）；ioctl 命令码/设备类型双文件 —— GICv5 device（c547c51ff4d4）
+- KVM selftests 的头文件来源是 `make headers_install` 产物（`lib.mk` 的 `KHDR_INCLUDES = -isystem $(top_srcdir)/usr/include`），**不是 tools copy**——系列自带 selftest 也不需要同步 tools copy
+- cap 编号选取：取 `include/uapi/linux/kvm.h` 中当前最大值 +1；若目标树该编号已被占用（如本树 251 已有 PMU_V3_STRICT），顺延取下一个空闲值，勿复用
+
 ---
 
 ## 五、检查清单
@@ -415,11 +479,12 @@ Stage-2 页表更新遵循 BBM：
 - [ ] Bug fix 包含 `Fixes:` tag（12 位 hash + 引号包裹 subject，不折行）
 - [ ] `Reported-by:` 后跟 `Closes:` 链接
 - [ ] `Link:` 指向 lore.kernel.org 或 patch.msgid.link
-- [ ] 使用了 AI 辅助工具时包含 `Assisted-by:` tag
 - [ ] 需要 stable 回移时包含 `Cc: stable@vger.kernel.org`
 - [ ] 运行 `scripts/checkpatch.pl` 无 ERROR
 - [ ] 邮件纯文本发送，不用 MIME/附件
 - [ ] 版本变更记录放在 `---` 之后
+- [ ] 正文无与上一版本的对比痕迹（版本差异只在 cover letter / `---` changelog）
+- [ ] 无 Unicode 箭头/符号：`→ ⇒ ← ↔` 已替换为 `-> => <- <->`，commit message、代码注释、文档均适用（checkpatch 查不出来，须手动 grep 扫描，见 0.2）
 
 ### 提交前检查（ARM KVM 子系统）
 
@@ -428,6 +493,8 @@ Stage-2 页表更新遵循 BBM：
 - [ ] Body 解释了 WHY（架构行为、竞态条件），不只是 WHAT
 - [ ] Tag 顺序正确（Fixes → Cc stable → Link → Reported-by → Signed-off-by → Reviewed-by → 维护者 Signed-off-by）
 - [ ] 维护者 sign-off 在最后（Oliver Upton / Will Deacon）
+- [ ] 新增 UAPI：纯 cap 编号只进 `include/uapi/linux/kvm.h`；ioctl 命令码/设备类型才同步 `tools/include/uapi/linux/kvm.h`；新 capability 配 api.rst 文档；编号取当前最大值 +1 且不与树内已占用冲突（见 4.4）
+- [ ] 拾取他人 patch：Author 保留原作者、正文 verbatim（改动则加 `[tag: ...]` 注记）、原帖 Link 在原作者 SoB 之前、自己 SoB 收尾、不预写指向自己系列的 Link（见 0.5）
 
 ### 写代码前检查
 
@@ -438,6 +505,7 @@ Stage-2 页表更新遵循 BBM：
 - [ ] 错误返回负 error code（`-EINVAL`、`-ENOMEM`、`-EAGAIN` 等）
 - [ ] `-EAGAIN` 仅用于 PTE 竞态
 - [ ] 注释解释 WHY 而非 WHAT
+- [ ] 注释密度达标：只保留"代码 + message 无法重建的不变量"，自解释代码、重复 message、forward-reference 消费者的注释已删（见 3.5）
 - [ ] 不硬编码架构常量，使用架构定义的宏
 - [ ] Guest 可控条件不使用 `WARN_ON`
 - [ ] 使用 `static` 限制文件内部函数作用域

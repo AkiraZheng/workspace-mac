@@ -108,12 +108,19 @@ skill 代码需遵循 karpathy-guidelines（路径：`~/.config/opencode/skills/
 
 ## Skill 部署流程
 
+**安装**：
 ```bash
-# 一键安装（运行测试 + 部署到 ~/.agents/skills/merge-patchset/）
 bash install.sh
-
-# 手动部署
-cp SKILL.md ~/.claude/skills/merge-patchset/SKILL.md
-cp SKILL.md "$WORKSPACE/SKILL.md"
-cp references/* ~/.claude/skills/merge-patchset/references/
 ```
+
+**卸载**：
+```bash
+bash uninstall.sh
+```
+
+卸载内容包括：
+- Skill 目录（$HOME/.agents/skills/merge-patchset）
+- Claude Code symlink
+- OpenCode symlink
+
+**注意**：卸载不会删除 patch_analysis 目录（用户数据）
