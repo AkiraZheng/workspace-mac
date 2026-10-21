@@ -39,8 +39,14 @@ STATUS_BY_VERDICT = {
 
 
 def make_stubs(store: SeriesStore, msgs: list[MailMsg], round_no: int,
-               patch_index: dict[str, int], msg_index: dict[str, MailMsg]) -> list[str]:
-    """为新意见生成台账 item,返回新 item id 列表。"""
+               patch_index: dict[str, int], msg_index: dict[str, MailMsg],
+               thread_tag: str = "primary") -> list[str]:
+    """为新意见生成台账 item,返回新 item id 列表。
+
+    thread_tag: 意见来源线程("primary" = 系列 prev_msgid 线程;
+    其余为 series.yaml watch_threads 的 tag,其 target_patch.seq 指向
+    该线程自己的 patch 编号)。
+    """
     rules = load_rules(_default_rules_path())
     authors = set(store.cfg.get("series_authors") or [])
     store.reviews_dir(round_no).mkdir(parents=True, exist_ok=True)
@@ -73,6 +79,7 @@ def make_stubs(store: SeriesStore, msgs: list[MailMsg], round_no: int,
                 "eml_path": str(msg.path.relative_to(store.dir)),
                 "sender_class": verdict.cls.value,
                 "sender_rule": verdict.rule,
+                "thread": thread_tag,
             },
             "target_patch": {"seq": seq, "subject": thread_mod.subject_of_seq(
                 list(msg_index.values()), seq) if seq and seq > 0 else None},
@@ -160,8 +167,10 @@ def render_md(store: SeriesStore) -> Path:
     if not todo:
         lines.append("(无 — 全部意见已闭环)")
     for it in todo:
+        thread = it["source"].get("thread", "primary")
         lines.append(f"- [ ] **{it['id']}** [{it['status']}] "
-                     f"{CLASS_LABEL.get(it['source']['sender_class'], '?')} · patch {it['target_patch']['seq']} · "
+                     f"{CLASS_LABEL.get(it['source']['sender_class'], '?')} · patch {it['target_patch']['seq']}"
+                     f"{f'({thread} 线程)' if thread != 'primary' else ''} · "
                      f"{it['source']['from_name']}: {(it['summary_zh'] or it['source']['subject'])[:60]}")
     lines.append("")
     lines.append("## 逐条详情")
@@ -172,7 +181,9 @@ def render_md(store: SeriesStore) -> Path:
         lines.append(f"- 分类: {CLASS_LABEL.get(src['sender_class'], src['sender_class'])}"
                      f"({src['sender_rule']})  状态: **{it['status']}**  判定: {it.get('verdict') or '-'}"
                      f"  修复类型: {it.get('fix_type') or '-'}")
-        lines.append(f"- 邮件: `{src['message_id']}`  ({src['date']})  针对patch: {it['target_patch']['seq']}")
+        thread = src.get("thread", "primary")
+        lines.append(f"- 邮件: `{src['message_id']}`  ({src['date']})  针对patch: {it['target_patch']['seq']}"
+                     f"{f'({thread} 线程)' if thread != 'primary' else ''}")
         lines.append(f"- 原文: `{src['eml_path']}`")
         if it.get("summary_zh"):
             lines.append(f"- 摘要: {it['summary_zh']}")

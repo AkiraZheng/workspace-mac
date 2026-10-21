@@ -139,54 +139,104 @@ def cmd_import(args) -> int:
 
 # ---------------------------------------------------------------- poll
 
+def _watch_threads(cfg: dict) -> list[tuple[str, str]]:
+    """series.yaml watch_threads -> [(tag, msgid)]。
+
+    元素为字符串时 tag 取 watch<N>;为 {tag, msgid} 时用显式 tag。
+    """
+    out: list[tuple[str, str]] = []
+    for i, w in enumerate(cfg.get("watch_threads") or [], start=1):
+        if isinstance(w, str):
+            out.append((f"watch{i}", w))
+        else:
+            out.append((str(w.get("tag") or f"watch{i}"), str(w["msgid"])))
+    return out
+
+
 def cmd_poll(args) -> int:
     store = _open_store(args)
     store.require_phase("monitoring")
     st = store.state
     round_no = len(st["thread"]["rounds"])
-    try:
-        if args.mbox_file:
-            mode = import_mbox_file(args.mbox_file, store.round_mbox(round_no))
-        else:
-            mode = fetch_thread(store.cfg["prev_msgid"], store.round_mbox(round_no))
-    except FetchError as e:
-        store.save_state(poll={"last_run_at": now_iso(), "last_status": "b4_error"})
-        print(f"错误: {e}", file=sys.stderr)
-        return 2
-    msgs = thread_mod.split_mbox(store.round_mbox(round_no), store.round_dir(round_no))
+    threads: list[tuple[str, str | None]] = [("primary", store.cfg["prev_msgid"])]
+    threads += _watch_threads(store.cfg)
+
     seen = set(st["thread"]["messages_seen"])
-    new = thread_mod.diff_msgids(msgs, seen)
-    if not new:
+    new_ids: list[str] = []
+    per_thread: dict[str, dict] = {}
+    mode = "b4"
+    fetch_failed: list[str] = []
+
+    for tag, msgid in threads:
+        mbox_path = store.round_mbox(round_no, None if tag == "primary" else tag)
+        try:
+            if args.mbox_file and tag == "primary":
+                tmode = import_mbox_file(args.mbox_file, mbox_path)
+            else:
+                tmode = fetch_thread(msgid, mbox_path)
+            if tag == "primary":
+                mode = tmode
+        except FetchError as e:
+            if tag == "primary":
+                store.save_state(poll={"last_run_at": now_iso(), "last_status": "b4_error"})
+                print(f"错误: {e}", file=sys.stderr)
+                return 2
+            fetch_failed.append(tag)
+            print(f"警告: watch 线程 {tag} 拉取失败,跳过: {e}", file=sys.stderr)
+            continue
+        msgs = thread_mod.split_mbox(mbox_path, store.round_dir(round_no, None if tag == "primary" else tag))
+        new = thread_mod.diff_msgids(msgs, seen)
+        seen |= {m.msgid for m in new}
+        if not new:
+            per_thread[tag] = {"new_messages": 0, "new_items": []}
+            continue
+        patch_index = thread_mod.patch_index_of(msgs)
+        msg_index = {m.msgid: m for m in msgs}
+        new_non_patch = [m for m in new if not m.is_patch]
+        ids = ledger_mod.make_stubs(store, new_non_patch, round_no, patch_index,
+                                    msg_index, thread_tag=tag)
+        new_ids += ids
+        per_thread[tag] = {"new_messages": len(new), "new_items": ids}
+
+    new_total = sum(t["new_messages"] for t in per_thread.values())
+    if not new_total and not fetch_failed:
         store.save_state(poll={"last_run_at": now_iso(), "last_status": "ok"})
         _print_json({"round": round_no - 1 if st["thread"]["rounds"] else 0,
                      "new_messages": 0, "new_items": [], "new_pending": [],
                      "mode": mode})
         return 0
-    patch_index = thread_mod.patch_index_of(msgs)
-    msg_index = {m.msgid: m for m in msgs}
-    new_non_patch = [m for m in new if not m.is_patch]
-    new_ids = ledger_mod.make_stubs(store, new_non_patch, round_no, patch_index, msg_index)
-    items_by_id = {it["id"]: it for it in store.items()}
-    new_items = [items_by_id[i] for i in new_ids]
-    st["thread"]["messages_seen"] = sorted(seen | {m.msgid for m in new})
-    st["thread"]["rounds"].append({"round": round_no, "at": now_iso(),
-                                   "new_messages": len(new),
-                                   "mbox": f"mboxes/round-{round_no:04d}.mbox"})
-    store.save_state(thread=st["thread"], poll={"last_run_at": now_iso(), "last_status": "ok"})
-    ledger_mod.render_md(store)
-    write_notify(store, round_no, new_items, mode)
-    pending_ids = [it["id"] for it in new_items if it["status"] == "pending"]
-    dirty = _dirty_violations(store)
-    if dirty:
-        store.save_state(poll={"last_run_at": now_iso(), "last_status": "dirty_tree"})
-        _print_json({"round": round_no, "new_messages": len(new), "mode": mode,
+    if new_total:
+        items_by_id = {it["id"]: it for it in store.items()}
+        new_items = [items_by_id[i] for i in new_ids]
+        st["thread"]["messages_seen"] = sorted(seen)
+        st["thread"]["rounds"].append({"round": round_no, "at": now_iso(),
+                                       "new_messages": new_total,
+                                       "mbox": f"mboxes/round-{round_no:04d}.mbox",
+                                       "watch_mboxes": {t: f"mboxes/round-{round_no:04d}-{t}.mbox"
+                                                        for t, _ in threads[1:]}})
+        store.save_state(thread=st["thread"], poll={"last_run_at": now_iso(), "last_status": "ok"})
+        ledger_mod.render_md(store)
+        write_notify(store, round_no, new_items, mode)
+        pending_ids = [it["id"] for it in new_items if it["status"] == "pending"]
+        dirty = _dirty_violations(store)
+        if dirty:
+            store.save_state(poll={"last_run_at": now_iso(), "last_status": "dirty_tree"})
+            _print_json({"round": round_no, "new_messages": new_total, "mode": mode,
+                         "new_items": new_ids, "new_pending": pending_ids,
+                         "per_thread": per_thread, "fetch_failed": fetch_failed,
+                         "ALERT_dirty_tree": dirty[:10]})
+            print("ALERT: 内核仓库出现基线之外的改动,请人工检查 git status", file=sys.stderr)
+            return 4
+        _print_json({"round": round_no, "new_messages": new_total, "mode": mode,
                      "new_items": new_ids, "new_pending": pending_ids,
-                     "ALERT_dirty_tree": dirty[:10]})
-        print("ALERT: 内核仓库出现基线之外的改动,请人工检查 git status", file=sys.stderr)
-        return 4
-    _print_json({"round": round_no, "new_messages": len(new), "mode": mode,
-                 "new_items": new_ids, "new_pending": pending_ids})
-    return 0
+                     "per_thread": per_thread, "fetch_failed": fetch_failed})
+        return 0
+    # 仅 watch 线程全部拉取失败:记 b4_error 但不产生新意见
+    store.save_state(poll={"last_run_at": now_iso(), "last_status": "b4_error"})
+    _print_json({"round": round_no - 1 if st["thread"]["rounds"] else 0,
+                 "new_messages": 0, "new_items": [], "new_pending": [],
+                 "mode": mode, "fetch_failed": fetch_failed})
+    return 3
 
 
 # ---------------------------------------------------------------- triage

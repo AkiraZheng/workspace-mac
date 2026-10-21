@@ -85,3 +85,33 @@ def test_subject_unfolding(tmp_path):
     msgs = T.split_mbox(p, tmp_path / "fold")
     assert msgs[0].subject_clean == \
         "Re: [PATCH v5 12/15] KVM: arm64: Derive the VM hardware dirty mode from dirty logging"
+
+
+def test_rfc_prefixed_patch_subjects(tmp_path):
+    """watch 线程的 RFC 系列:[RFC PATCH x/y] 也是 patch 邮件,不是意见。"""
+    raw = ("From x@example.com Mon Oct  5 10:00:00 2026\n"
+           "From: leo.bras@arm.com\n"
+           "Subject: [RFC PATCH 1/5] KVM: arm64: pgtables: Change write bit\n"
+           "Message-ID: <rfc1@arm.com>\n"
+           "\nbody\n"
+           "From x@example.com Mon Oct  5 10:01:00 2026\n"
+           "From: leo.bras@arm.com\n"
+           "Subject: [RFC PATCH v2 2/5] second\n"
+           "Message-ID: <rfc2@arm.com>\n"
+           "\nbody\n"
+           "From x@example.com Mon Oct  5 10:02:00 2026\n"
+           "From: maz@kernel.org\n"
+           "Subject: Re: [RFC PATCH 1/5] KVM: arm64: pgtables: Change write bit\n"
+           "Message-ID: <rfcrev@kernel.org>\n"
+           "In-Reply-To: <rfc1@arm.com>\n"
+           "\nbody\n")
+    p = tmp_path / "rfc.mbox"
+    p.write_text(raw, encoding="utf-8")
+    msgs = T.split_mbox(p, tmp_path / "rfc")
+    assert [m.patch_seq for m in msgs if m.is_patch] == [1, 2]
+    # 回复不因 RFC 前缀被误判为 patch,且能关联到 rfc patch 1
+    rev = next(m for m in msgs if m.msgid == "<rfcrev@kernel.org>")
+    assert not rev.is_patch
+    pidx = T.patch_index_of(msgs)
+    midx = {m.msgid: m for m in msgs}
+    assert T.associate(rev, pidx, midx) == 1

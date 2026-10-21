@@ -19,8 +19,10 @@ def write_notify(store: SeriesStore, round_no: int, new_items: list[dict],
         lines.append("| id | 来自 | 分类 | 针对 patch | 主题 |")
         lines.append("|---|---|---|---|---|")
         for it in new_items:
+            thread = it["source"].get("thread", "primary")
+            patch = str(it['target_patch']['seq']) + (f"({thread})" if thread != "primary" else "")
             lines.append(f"| {it['id']} | {it['source']['from_name']} | "
-                         f"{it['source']['sender_class']} | {it['target_patch']['seq']} | "
+                         f"{it['source']['sender_class']} | {patch} | "
                          f"{(it['source']['subject'] or '')[:60]} |")
         lines.append("")
     if pending:

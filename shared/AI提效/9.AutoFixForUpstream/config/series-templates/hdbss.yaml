@@ -8,6 +8,12 @@ list: kvmarm
 prev_version: 5
 new_version: 6
 prev_msgid: "20260929103655.85107-1-zhengtian10@huawei.com"   # v5 cover 在 lore 的 Message-ID
+# 额外监控线程(可选):内容已吸收进本系列的上游线程,其讨论同样跟踪;
+# tag 用于 round 产物命名(round-NNNN-<tag>.mbox)与台账 "(<tag> 线程)" 标记,
+# 该线程 item 的 target_patch.seq 是该线程自己的 patch 编号
+watch_threads:
+  - tag: rfc
+    msgid: "20260901171558.2674031-1-leo.bras@arm.com"
 series_authors:                            # 这些发件人的回复视为作者自述,不算外部意见
   - zhengtian10@huawei.com
   - yezhenyu2@huawei.com

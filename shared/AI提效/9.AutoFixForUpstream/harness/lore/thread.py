@@ -16,7 +16,9 @@ from pathlib import Path
 from harness.lore.b4fetch import normalize_msgid
 
 # [PATCH v5 12/15] / [PATCH v5 00/15] / [PATCH 12/15](无版本号兜底)
-PATCH_SUBJECT_RE = re.compile(r"^\s*\[PATCH(?:\s+v(\d+))?\s+(\d+)/(\d+)\]\s*(.*)$")
+# [RFC PATCH 2/5] / [PATCH RFC 2/5](watch 线程的 RFC 系列)
+PATCH_SUBJECT_RE = re.compile(
+    r"^\s*\[(?:RFC\s+)?PATCH(?:\s+RFC)?(?:\s+v(\d+))?\s+(\d+)/(\d+)\]\s*(.*)$")
 REPLY_RE = re.compile(r"^\s*(re|答复|回复)\s*:", re.IGNORECASE)
 
 

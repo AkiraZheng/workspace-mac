@@ -6,6 +6,8 @@
     triage.json   检视意见台账(schema 校验)
     triage.md     台账渲染(可再生)
     mboxes/       v5/(b4 am 产物) + round-NNNN.mbox + round-NNNN/*.eml
+                  额外监控线程(series.yaml watch_threads)为
+                  round-NNNN-<tag>.mbox + round-NNNN-<tag>/*.eml
     reviews/      round-N/item-*.json + .md(LLM 产物,triage-merge 并入)
     cover/        cover-vN.draft.md / cover-vN.final.md
     build/ final/ 编译与最终产物
@@ -236,11 +238,13 @@ class SeriesStore:
 
     # ---------- 路径辅助 ----------
 
-    def round_mbox(self, round_no: int) -> Path:
-        return self.dir / "mboxes" / f"round-{round_no:04d}.mbox"
+    def round_mbox(self, round_no: int, tag: str | None = None) -> Path:
+        name = f"round-{round_no:04d}" if tag is None else f"round-{round_no:04d}-{tag}"
+        return self.dir / "mboxes" / f"{name}.mbox"
 
-    def round_dir(self, round_no: int) -> Path:
-        return self.dir / "mboxes" / f"round-{round_no:04d}"
+    def round_dir(self, round_no: int, tag: str | None = None) -> Path:
+        name = f"round-{round_no:04d}" if tag is None else f"round-{round_no:04d}-{tag}"
+        return self.dir / "mboxes" / name
 
     def reviews_dir(self, round_no: int) -> Path:
         return self.dir / "reviews" / f"round-{round_no}"
