@@ -204,7 +204,8 @@ class SeriesStore:
 
     def fixable_items(self) -> list[dict]:
         return [it for it in self.items()
-                if it["status"] == "analyzed" and it.get("verdict") == "valid"
+                if it["status"] == "analyzed"
+                and it.get("verdict") in ("valid", "partial")
                 and it.get("fix_type") == "code"]
 
     def unresolved_items(self) -> list[dict]:
