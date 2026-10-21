@@ -127,7 +127,7 @@ repeat :shrink_folio_list() 逐页判定;
     endif
     :try_to_unmap()
     拆掉所有进程的映射
-    (匿名 PTE 换成 swap entry;
+    (匿名 PTE 换成 swap entry,
     文件 PTE 直接清空);
     if (文件页?) then (是)
       if (干净?) then (是)
@@ -546,7 +546,7 @@ if (仍被进程映射?) then (是)
 endif
 if (pageout() → swap_writeout()) then (成功提交)
   :先试 zswap 压缩存储:
-  命中则同步完成,无需磁盘 I/O;
+  命中则同步完成,无需磁盘 I/O,
   未命中则提交块设备异步 I/O;
   if (回写已完成?) then (是,zswap 同步路径)
     :本轮继续:
