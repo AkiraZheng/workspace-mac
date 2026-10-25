@@ -1,0 +1,98 @@
+From 2be363ca6f512dd172498c3eadfea69b89f0e34d Mon Sep 17 00:00:00 2001
+From: Tian Zheng <zhengtian10@huawei.com>
+Date: Sun, 25 Oct 2026 02:55:12 +0800
+Subject: [PATCH 10/10] KVM: arm64: ptdump: Dump stage-2 memory attributes
+
+hulk inclusion
+category: feature
+bugzilla: https://atomgit.com/openeuler/kernel/issues/XXX
+CVE: NA
+
+----------------------------------------
+
+The stage-2 ptdump decodes validity, permissions, XN and AF, but does
+not decode KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR.
+
+When analyzing performance issues, a BAR that could be configured as
+NORMAL_NC may be configured as DEVICE_nGnRE, degrading device
+performance, so dumping memattr is needed to debug such performance
+issues.
+
+The final memory attributes are affected by the FWB feature:
+- With FWB enabled, the memory attributes are determined entirely by
+  the MemAttr in the stage-2 PTE.
+- With FWB disabled, the memory attributes are determined by both
+  stage-1 and stage-2.
+
+KVM selects one of two fixed sets depending on whether the host
+supports ARM64_HAS_STAGE2_FWB:
+
+  memory type      FWB=0   FWB=1   dumps as
+  NORMAL           0xf     6       WB
+  NORMAL_NC        5       5       NC
+  DEVICE_nGnRE     1       1       DEV
+
+The memattr in the stage-2 PTE is written by stage2_set_prot_attr()
+and only ever takes one of the constants above. The final dump output
+is, e.g. a VFIO passthrough BAR in the high IPA window:
+
+  before:  0x0000008000000000-0x0000008000400000  4M 2  R W NX AF BLK
+  after:   0x0000008000000000-0x0000008000400000  4M 2  R W NX AF BLK NC
+
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/ptdump.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index d3bbfa3ac5f4..07cd11e2c7d0 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -12,6 +12,8 @@
+ 
+ #include <asm/kvm_mmu.h>
+ #include <asm/kvm_pgtable.h>
++#include <asm/memory.h>
++#include <asm/pgtable-prot.h>
+ #include <asm/ptdump.h>
+ 
+ #define MARKERS_LEN		2
+@@ -55,6 +57,35 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+ 		.set	= "BLK",
+ 		.clear	= "   ",
+ 	},
++	/*
++	 * The S2 memattr encoding depends on HCR_EL2.FWB: AttrIndx-based
++	 * (indexing MAIR_EL2) when FWB=0, 4-bit direct encoding when FWB=1.
++	 * KVM only ever programs a closed set of values for either flavour
++	 * from stage2_set_prot_attr(), and NORMAL_NC and DEVICE_nGnRE share
++	 * an encoding across both flavours. Matching on the programmed value
++	 * alone is therefore sufficient to decode the memory type, without
++	 * consulting MAIR_EL2 at runtime.
++	 */
++	{
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR,
++		.val	= PTE_S2_MEMATTR(MT_S2_NORMAL),
++		.set	= "WB",
++	},
++	{
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR,
++		.val	= PTE_S2_MEMATTR(MT_S2_FWB_NORMAL),
++		.set	= "WB",
++	},
++	{
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR,
++		.val	= PTE_S2_MEMATTR(MT_S2_NORMAL_NC),
++		.set	= "NC",
++	},
++	{
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_MEMATTR,
++		.val	= PTE_S2_MEMATTR(MT_S2_DEVICE_nGnRE),
++		.set	= "DEV",
++	},
+ };
+ 
+ static int kvm_ptdump_visitor(const struct kvm_pgtable_visit_ctx *ctx,
+-- 
+2.43.0
+

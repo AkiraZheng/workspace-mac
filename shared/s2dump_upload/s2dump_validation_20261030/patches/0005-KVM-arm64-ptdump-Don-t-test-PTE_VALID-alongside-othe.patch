@@ -1,0 +1,82 @@
+From b0453cdaaf1277fd700754d697954862f913eb52 Mon Sep 17 00:00:00 2001
+From: Wei-Lin Chang <r09922117@csie.ntu.edu.tw>
+Date: Sat, 9 Aug 2025 21:53:56 +0800
+Subject: [PATCH 05/10] KVM: arm64: ptdump: Don't test PTE_VALID alongside
+ other attributes
+
+mainline inclusion
+from mainline-v6.18-rc1
+commit 8673e5b22e1e114213d3ca74f415034aed45e528
+category: feature
+bugzilla: https://atomgit.com/openeuler/kernel/issues/XXX
+CVE: NA
+
+Reference: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=8673e5b22e1e114213d3ca74f415034aed45e528
+
+--------------------------------
+
+The attribute masks and test values in the ptdump code are meant for
+individual attributes, however for stage-2 ptdump we included PTE_VALID
+while testing for R, W, X, and AF. This led to some confusion and the
+flipped output for the executable attribute.
+
+Remove PTE_VALID from all attribute masks and values so that each test
+matches only the relevant bits.
+
+Additionally, the executable attribute printing is updated to align with
+stage-1 ptdump, printing "NX" for non-executable regions and "x " for
+executable ones.
+
+Suggested-by: Anshuman Khandual <anshuman.khandual@arm.com>
+Suggested-by: Mark Rutland <mark.rutland@arm.com>
+Suggested-by: Sebastian Ene <sebastianene@google.com>
+Signed-off-by: Wei-Lin Chang <r09922117@csie.ntu.edu.tw>
+Acked-by: Will Deacon <will@kernel.org>
+Reviewed-by: Anshuman Khandual <anshuman.khandual@arm.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/ptdump.c | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index a9521dae3e4a..1903477ed7cd 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -31,23 +31,23 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+ 		.set	= " ",
+ 		.clear	= "F",
+ 	}, {
+-		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R | PTE_VALID,
+-		.val	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R | PTE_VALID,
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R,
++		.val	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_R,
+ 		.set	= "R",
+ 		.clear	= " ",
+ 	}, {
+-		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W | PTE_VALID,
+-		.val	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W | PTE_VALID,
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
++		.val	= KVM_PTE_LEAF_ATTR_LO_S2_S2AP_W,
+ 		.set	= "W",
+ 		.clear	= " ",
+ 	}, {
+-		.mask	= KVM_PTE_LEAF_ATTR_HI_S2_XN | PTE_VALID,
+-		.val	= PTE_VALID,
+-		.set	= " ",
+-		.clear	= "X",
++		.mask	= KVM_PTE_LEAF_ATTR_HI_S2_XN,
++		.val	= KVM_PTE_LEAF_ATTR_HI_S2_XN,
++		.set	= "NX",
++		.clear	= "x ",
+ 	}, {
+-		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_AF | PTE_VALID,
+-		.val	= KVM_PTE_LEAF_ATTR_LO_S2_AF | PTE_VALID,
++		.mask	= KVM_PTE_LEAF_ATTR_LO_S2_AF,
++		.val	= KVM_PTE_LEAF_ATTR_LO_S2_AF,
+ 		.set	= "AF",
+ 		.clear	= "  ",
+ 	}, {
+-- 
+2.43.0
+

@@ -1,0 +1,6 @@
+-r-------- 1 root root 0 10月30日 11:08 ipa_range
+-r-------- 1 root root 0 10月30日 11:08 stage2_levels
+-r-------- 1 root root 0 10月30日 11:08 stage2_page_tables
+400 root /sys/kernel/debug/kvm/7302-9//stage2_page_tables
+400 root /sys/kernel/debug/kvm/7302-9//stage2_levels
+400 root /sys/kernel/debug/kvm/7302-9//ipa_range

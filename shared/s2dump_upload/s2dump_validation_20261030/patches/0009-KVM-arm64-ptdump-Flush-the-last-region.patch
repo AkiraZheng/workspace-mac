@@ -1,0 +1,151 @@
+From d7ff6f4518e47aa33f1e520a9ed162994cf59eb9 Mon Sep 17 00:00:00 2001
+From: Wei-Lin Chang <weilin.chang@arm.com>
+Date: Fri, 14 Aug 2026 23:24:58 +0100
+Subject: [PATCH 09/10] KVM: arm64: ptdump: Flush the last region
+
+mainline inclusion
+from mainline-v7.3-rc1
+commit beca1b97a21d81eae9cbd267ecc44b5d2193e60a
+category: feature
+bugzilla: https://atomgit.com/openeuler/kernel/issues/XXX
+CVE: NA
+
+Reference: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=beca1b97a21d81eae9cbd267ecc44b5d2193e60a
+
+--------------------------------
+
+Currently the stage-2 ptdump calls note_page() at each leaf entry visit.
+This simply misses the output of the last region, because note_page()
+only dumps output when it detects a change in level/prot, or when the
+walk enters a next marker section. The last region in the guest IPA
+space with the same level/prot is not dumped since there is no change
+after it.
+
+Call note_page_flush() to dump the final region. note_page_flush()
+uses ptdump_pg_state.end_address to call the final note_page(), so also
+provide the end address.
+
+Also change the second marker's start address to ULONG_MAX so we never
+cross it. This avoids dumping redundant marker names (which are NULL),
+and advancing beyond the end of the marker array.
+
+Fixes: 7c4f73548ed1 ("KVM: arm64: Register ptdump with debugfs on guest creation")
+Reported-by: Sashiko AI <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/kvmarm/20260630122758.891011F00A3A@smtp.kernel.org/
+Reviewed-by: Dev Jain <dev.jain@arm.com>
+Tested-by: Dev Jain <dev.jain@arm.com>
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+Reviewed-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Will Deacon <will@kernel.org>
+Conflicts:
+	arch/arm64/include/asm/ptdump.h
+	arch/arm64/mm/ptdump.c
+[ptdump_pg_state.end_address and note_page_flush() do not exist in 6.6
+(they come from mainline e064e7384f99 and 902caade3cfd, which are not
+backported); a minimal port of 902caade3cfd is included, adapted to the
+OLK note_page(pt_st, addr, level, val) signature while preserving the
+ULONG_MAX wraparound semantics.]
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/ptdump.h |  4 ++++
+ arch/arm64/kvm/ptdump.c         | 11 +++++++----
+ arch/arm64/mm/ptdump.c          | 16 ++++++++++++++++
+ 3 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/include/asm/ptdump.h b/arch/arm64/include/asm/ptdump.h
+index d550f6ac17e4..e5a7a93a497e 100644
+--- a/arch/arm64/include/asm/ptdump.h
++++ b/arch/arm64/include/asm/ptdump.h
+@@ -52,6 +52,8 @@ struct ptdump_pg_state {
+ 	const struct addr_marker *marker;
+ 	const struct mm_struct *mm;
+ 	unsigned long start_address;
++	/* exclusive end, ULONG_MAX represents an end at 1 << 64 */
++	unsigned long end_address;
+ 	int level;
+ 	u64 current_prot;
+ 	bool check_wx;
+@@ -62,6 +64,7 @@ struct ptdump_pg_state {
+ void ptdump_walk(struct seq_file *s, struct ptdump_info *info);
+ void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
+ 	       u64 val);
++void note_page_flush(struct ptdump_state *pt_st);
+ #ifdef CONFIG_PTDUMP_DEBUGFS
+ #define EFI_RUNTIME_MAP_END	DEFAULT_MAP_WINDOW_64
+ void __init ptdump_debugfs_register(struct ptdump_info *info, const char *name);
+@@ -73,6 +76,7 @@ void ptdump_check_wx(void);
+ #else
+ static inline void note_page(struct ptdump_state *pt_st, unsigned long addr,
+ 			     int level, u64 val) { }
++static inline void note_page_flush(struct ptdump_state *pt_st) { }
+ #endif /* CONFIG_PTDUMP_CORE */
+ 
+ #ifdef CONFIG_DEBUG_WX
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index 9124ffbd6a06..d3bbfa3ac5f4 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -111,7 +111,7 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm_s2_mmu
+ 	}
+ 
+ 	st->ipa_marker[0].name		= "Guest IPA";
+-	st->ipa_marker[1].start_address = BIT(pgtable->ia_bits);
++	st->ipa_marker[1].start_address = ULONG_MAX;
+ 
+ 	st->mmu				= mmu;
+ 	return st;
+@@ -129,18 +129,21 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
+ 		.flags	= KVM_PGTABLE_WALK_LEAF,
+ 	};
+ 
++	guard(write_lock)(&kvm->mmu_lock);
+ 	st->parser_state = (struct ptdump_pg_state) {
+ 		.marker		= &st->ipa_marker[0],
++		.end_address	= BIT(mmu->pgt->ia_bits),
+ 		.level		= -1,
+ 		.pg_level	= &st->level[0],
+ 		.seq		= m,
+ 	};
+ 
+-	write_lock(&kvm->mmu_lock);
+ 	ret = kvm_pgtable_walk(mmu->pgt, 0, BIT(mmu->pgt->ia_bits), &walker);
+-	write_unlock(&kvm->mmu_lock);
++	if (ret)
++		return ret;
++	note_page_flush(&st->parser_state.ptdump);
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ static int kvm_ptdump_guest_open(struct inode *m, struct file *file)
+diff --git a/arch/arm64/mm/ptdump.c b/arch/arm64/mm/ptdump.c
+index 3469b4c80969..251db1d13904 100644
+--- a/arch/arm64/mm/ptdump.c
++++ b/arch/arm64/mm/ptdump.c
+@@ -274,6 +274,22 @@ void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
+ 
+ }
+ 
++void note_page_flush(struct ptdump_state *pt_st)
++{
++	struct ptdump_pg_state *st = container_of(pt_st, struct ptdump_pg_state, ptdump);
++	unsigned long end = st->end_address;
++
++	/*
++	 * Address spaces that end at 1 << 64 have end_address == ULONG_MAX,
++	 * but note_page() expects the exclusive end. In this case adjust end
++	 * to the wraparound value 0.
++	 */
++	if (end == ULONG_MAX)
++		end = 0;
++
++	note_page(pt_st, end, -1, 0);
++}
++
+ static void arm64_ptdump_walk_pgd(struct ptdump_state *st, struct mm_struct *mm)
+ {
+ 	static_branch_inc(&arm64_ptdump_lock_key);
+-- 
+2.43.0
+

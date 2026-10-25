@@ -1,0 +1,230 @@
+From af2dd001d60032b4ace9ff2c5a1f507ff3b875fd Mon Sep 17 00:00:00 2001
+From: Sebastian Ene <sebastianene@google.com>
+Date: Mon, 9 Sep 2024 12:47:18 +0000
+Subject: [PATCH 02/10] arm64: ptdump: Expose the attribute parsing
+ functionality
+
+mainline inclusion
+from mainline-v6.12-rc1
+commit acc3d3a8176651a839056c7da4b925ea0bcc38c2
+category: feature
+bugzilla: https://atomgit.com/openeuler/kernel/issues/XXX
+CVE: NA
+
+Reference: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=acc3d3a8176651a839056c7da4b925ea0bcc38c2
+
+--------------------------------
+
+Reuse the descriptor parsing functionality to keep the same output format
+as the original ptdump code. In order for this to happen, move the state
+tracking objects into a common header.
+
+[maz: Fixed note_page() stub as suggested by Will]
+
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Acked-by: Will Deacon <will@kernel.org>
+Link: https://lore.kernel.org/r/20240909124721.1672199-3-sebastianene@google.com
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Conflicts:
+	arch/arm64/include/asm/ptdump.h
+	arch/arm64/mm/ptdump.c
+[ptdump_pg_level keeps the OLK-6.6 member shape (const char *name;
+size_t num) instead of the upstream char name[4]; int num, which relies on
+mainline d40900fcb397; the OLK-specific arm64_ptdump_lock_key declaration
+and the ptdump_check_wx() prototype are preserved.]
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/include/asm/ptdump.h | 42 ++++++++++++++++++++++++-
+ arch/arm64/mm/ptdump.c          | 54 +++++++--------------------------
+ 2 files changed, 52 insertions(+), 44 deletions(-)
+
+diff --git a/arch/arm64/include/asm/ptdump.h b/arch/arm64/include/asm/ptdump.h
+index 9841bf24ad76..af71ac653b5f 100644
+--- a/arch/arm64/include/asm/ptdump.h
++++ b/arch/arm64/include/asm/ptdump.h
+@@ -5,6 +5,8 @@
+ #ifndef __ASM_PTDUMP_H
+ #define __ASM_PTDUMP_H
+ 
++#include <linux/ptdump.h>
++
+ DECLARE_STATIC_KEY_FALSE(arm64_ptdump_lock_key);
+ 
+ #ifdef CONFIG_PTDUMP_CORE
+@@ -23,15 +25,53 @@ struct ptdump_info {
+ 	unsigned long			base_addr;
+ };
+ 
++struct ptdump_prot_bits {
++	u64		mask;
++	u64		val;
++	const char	*set;
++	const char	*clear;
++};
++
++struct ptdump_pg_level {
++	const struct ptdump_prot_bits *bits;
++	const char *name;
++	size_t num;
++	u64 mask;
++};
++
++/*
++ * The page dumper groups page table entries of the same type into a single
++ * description. It uses pg_state to track the range information while
++ * iterating over the pte entries. When the continuity is broken it then
++ * dumps out a description of the range.
++ */
++struct ptdump_pg_state {
++	struct ptdump_state ptdump;
++	struct seq_file *seq;
++	const struct addr_marker *marker;
++	const struct mm_struct *mm;
++	unsigned long start_address;
++	int level;
++	u64 current_prot;
++	bool check_wx;
++	unsigned long wx_pages;
++	unsigned long uxn_pages;
++};
++
+ void ptdump_walk(struct seq_file *s, struct ptdump_info *info);
++void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
++	       u64 val);
+ #ifdef CONFIG_PTDUMP_DEBUGFS
+ #define EFI_RUNTIME_MAP_END	DEFAULT_MAP_WINDOW_64
+ void __init ptdump_debugfs_register(struct ptdump_info *info, const char *name);
+ #else
+ static inline void ptdump_debugfs_register(struct ptdump_info *info,
+ 					   const char *name) { }
+-#endif
++#endif /* CONFIG_PTDUMP_DEBUGFS */
+ void ptdump_check_wx(void);
++#else
++static inline void note_page(struct ptdump_state *pt_st, unsigned long addr,
++			     int level, u64 val) { }
+ #endif /* CONFIG_PTDUMP_CORE */
+ 
+ #ifdef CONFIG_DEBUG_WX
+diff --git a/arch/arm64/mm/ptdump.c b/arch/arm64/mm/ptdump.c
+index dcf2eaa1b244..1e460dbe5baa 100644
+--- a/arch/arm64/mm/ptdump.c
++++ b/arch/arm64/mm/ptdump.c
+@@ -66,32 +66,7 @@ static struct addr_marker address_markers[] = {
+ 		seq_printf(m, fmt);	\
+ })
+ 
+-/*
+- * The page dumper groups page table entries of the same type into a single
+- * description. It uses pg_state to track the range information while
+- * iterating over the pte entries. When the continuity is broken it then
+- * dumps out a description of the range.
+- */
+-struct pg_state {
+-	struct ptdump_state ptdump;
+-	struct seq_file *seq;
+-	const struct addr_marker *marker;
+-	unsigned long start_address;
+-	int level;
+-	u64 current_prot;
+-	bool check_wx;
+-	unsigned long wx_pages;
+-	unsigned long uxn_pages;
+-};
+-
+-struct prot_bits {
+-	u64		mask;
+-	u64		val;
+-	const char	*set;
+-	const char	*clear;
+-};
+-
+-static const struct prot_bits pte_bits[] = {
++static const struct ptdump_prot_bits pte_bits[] = {
+ 	{
+ 		.mask	= PTE_VALID,
+ 		.val	= PTE_VALID,
+@@ -170,14 +145,7 @@ static const struct prot_bits pte_bits[] = {
+ 	}
+ };
+ 
+-struct pg_level {
+-	const struct prot_bits *bits;
+-	const char *name;
+-	size_t num;
+-	u64 mask;
+-};
+-
+-static struct pg_level pg_level[] = {
++static struct ptdump_pg_level pg_level[] __ro_after_init = {
+ 	{ /* pgd */
+ 		.name	= "PGD",
+ 		.bits	= pte_bits,
+@@ -201,7 +169,7 @@ static struct pg_level pg_level[] = {
+ 	},
+ };
+ 
+-static void dump_prot(struct pg_state *st, const struct prot_bits *bits,
++static void dump_prot(struct ptdump_pg_state *st, const struct ptdump_prot_bits *bits,
+ 			size_t num)
+ {
+ 	unsigned i;
+@@ -219,7 +187,7 @@ static void dump_prot(struct pg_state *st, const struct prot_bits *bits,
+ 	}
+ }
+ 
+-static void note_prot_uxn(struct pg_state *st, unsigned long addr)
++static void note_prot_uxn(struct ptdump_pg_state *st, unsigned long addr)
+ {
+ 	if (!st->check_wx)
+ 		return;
+@@ -233,7 +201,7 @@ static void note_prot_uxn(struct pg_state *st, unsigned long addr)
+ 	st->uxn_pages += (addr - st->start_address) / PAGE_SIZE;
+ }
+ 
+-static void note_prot_wx(struct pg_state *st, unsigned long addr)
++static void note_prot_wx(struct ptdump_pg_state *st, unsigned long addr)
+ {
+ 	if (!st->check_wx)
+ 		return;
+@@ -248,10 +216,10 @@ static void note_prot_wx(struct pg_state *st, unsigned long addr)
+ 	st->wx_pages += (addr - st->start_address) / PAGE_SIZE;
+ }
+ 
+-static void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
+-		      u64 val)
++void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
++	       u64 val)
+ {
+-	struct pg_state *st = container_of(pt_st, struct pg_state, ptdump);
++	struct ptdump_pg_state *st = container_of(pt_st, struct ptdump_pg_state, ptdump);
+ 	static const char units[] = "KMGTPE";
+ 	u64 prot = 0;
+ 
+@@ -315,12 +283,12 @@ static void arm64_ptdump_walk_pgd(struct ptdump_state *st, struct mm_struct *mm)
+ void ptdump_walk(struct seq_file *s, struct ptdump_info *info)
+ {
+ 	unsigned long end = ~0UL;
+-	struct pg_state st;
++	struct ptdump_pg_state st;
+ 
+ 	if (info->base_addr < TASK_SIZE_64)
+ 		end = TASK_SIZE_64;
+ 
+-	st = (struct pg_state){
++	st = (struct ptdump_pg_state){
+ 		.seq = s,
+ 		.marker = info->markers,
+ 		.level = -1,
+@@ -354,7 +322,7 @@ static struct ptdump_info kernel_ptdump_info = {
+ 
+ void ptdump_check_wx(void)
+ {
+-	struct pg_state st = {
++	struct ptdump_pg_state st = {
+ 		.seq = NULL,
+ 		.marker = (struct addr_marker[]) {
+ 			{ 0, NULL},
+-- 
+2.43.0
+

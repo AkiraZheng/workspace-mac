@@ -1,0 +1,100 @@
+From 7181b89eeaeac542da6e465c8b922afdebb904d3 Mon Sep 17 00:00:00 2001
+From: "Zenghui Yu (Huawei)" <zenghui.yu@linux.dev>
+Date: Sat, 28 Mar 2026 13:31:55 +0800
+Subject: [PATCH 08/10] KVM: arm64: ptdump: Initialize parser_state before
+ pgtable walk
+
+mainline inclusion
+from mainline-v7.1-rc1
+commit 570428601ba506e76c265a65626524ef3c5cbc04
+category: feature
+bugzilla: https://atomgit.com/openeuler/kernel/issues/XXX
+CVE: NA
+
+Reference: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=570428601ba506e76c265a65626524ef3c5cbc04
+
+--------------------------------
+
+If we go through the "need a bigger buffer" path in seq_read_iter(), which
+is likely to happen as we're dumping page tables, we will pass the
+populated-by-last-run st::parser_state to
+kvm_pgtable_walk()/kvm_ptdump_visitor(). As a result, the output of
+stage2_page_tables on my box looks like
+
+0x0000000240000000-0x0000000000000000   17179869175G 1
+0x0000000000000000-0x0000000000200000           2M 2   R   px ux  AF BLK
+0x0000000000200000-0x0000000040000000        1022M 2
+0x0000000040000000-0x0000000040200000           2M 2   R W PXNUXN AF BLK
+[...]
+
+Fix it by always initializing st::parser_state before starting a new
+pgtable walk.
+
+Besides, remove st::range as it's not used by note_page(); remove the
+explicit initialization of parser_state::start_address as it will be
+initialized in note_page() anyway.
+
+Signed-off-by: Zenghui Yu (Huawei) <zenghui.yu@linux.dev>
+Link: https://patch.msgid.link/20260328053155.12219-1-zenghui.yu@linux.dev
+[maz: rebased on top of NV support]
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
+---
+ arch/arm64/kvm/ptdump.c | 20 +++++++-------------
+ 1 file changed, 7 insertions(+), 13 deletions(-)
+
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index b5a949efe7cc..9124ffbd6a06 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -21,7 +21,6 @@ struct kvm_ptdump_guest_state {
+ 	struct ptdump_pg_state	parser_state;
+ 	struct addr_marker	ipa_marker[MARKERS_LEN];
+ 	struct ptdump_pg_level	level[KVM_PGTABLE_MAX_LEVELS];
+-	struct ptdump_range	range[MARKERS_LEN];
+ };
+ 
+ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+@@ -113,17 +112,8 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm_s2_mmu
+ 
+ 	st->ipa_marker[0].name		= "Guest IPA";
+ 	st->ipa_marker[1].start_address = BIT(pgtable->ia_bits);
+-	st->range[0].end		= BIT(pgtable->ia_bits);
+ 
+ 	st->mmu				= mmu;
+-	st->parser_state = (struct ptdump_pg_state) {
+-		.marker		= &st->ipa_marker[0],
+-		.level		= -1,
+-		.pg_level	= &st->level[0],
+-		.ptdump.range	= &st->range[0],
+-		.start_address	= 0,
+-	};
+-
+ 	return st;
+ }
+ 
+@@ -133,14 +123,18 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
+ 	struct kvm_ptdump_guest_state *st = m->private;
+ 	struct kvm_s2_mmu *mmu = st->mmu;
+ 	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);
+-	struct ptdump_pg_state *parser_state = &st->parser_state;
+ 	struct kvm_pgtable_walker walker = (struct kvm_pgtable_walker) {
+ 		.cb	= kvm_ptdump_visitor,
+-		.arg	= parser_state,
++		.arg	= &st->parser_state,
+ 		.flags	= KVM_PGTABLE_WALK_LEAF,
+ 	};
+ 
+-	parser_state->seq = m;
++	st->parser_state = (struct ptdump_pg_state) {
++		.marker		= &st->ipa_marker[0],
++		.level		= -1,
++		.pg_level	= &st->level[0],
++		.seq		= m,
++	};
+ 
+ 	write_lock(&kvm->mmu_lock);
+ 	ret = kvm_pgtable_walk(mmu->pgt, 0, BIT(mmu->pgt->ia_bits), &walker);
+-- 
+2.43.0
+

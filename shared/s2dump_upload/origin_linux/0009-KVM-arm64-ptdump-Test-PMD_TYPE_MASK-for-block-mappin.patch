@@ -1,0 +1,42 @@
+From 0b626b245c570c9e9ef5bf03e0541fedab334a9d Mon Sep 17 00:00:00 2001
+From: Anshuman Khandual <anshuman.khandual@arm.com>
+Date: Fri, 21 Feb 2025 10:12:20 +0530
+Subject: [PATCH] KVM: arm64: ptdump: Test PMD_TYPE_MASK for block mapping
+
+Test given page table entries against PMD_TYPE_SECT on PMD_TYPE_MASK mask
+bits for identifying block mappings in stage 2 page tables.
+
+Cc: Marc Zyngier <maz@kernel.org>
+Cc: Oliver Upton <oliver.upton@linux.dev>
+Cc: James Morse <james.morse@arm.com>
+Cc: Will Deacon <will@kernel.org>
+Cc: linux-arm-kernel@lists.infradead.org
+Cc: kvmarm@lists.linux.dev
+Cc: linux-kernel@vger.kernel.org
+Signed-off-by: Anshuman Khandual <anshuman.khandual@arm.com>
+Acked-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Ryan Roberts <ryan.roberts@arm.com>
+Link: https://lore.kernel.org/r/20250221044227.1145393-2-anshuman.khandual@arm.com
+Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+---
+ arch/arm64/kvm/ptdump.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index e4a342e903e2..098416d7e5c2 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -52,8 +52,8 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+ 		.set	= "AF",
+ 		.clear	= "  ",
+ 	}, {
+-		.mask	= PTE_TABLE_BIT | PTE_VALID,
+-		.val	= PTE_VALID,
++		.mask	= PMD_TYPE_MASK,
++		.val	= PMD_TYPE_SECT,
+ 		.set	= "BLK",
+ 		.clear	= "   ",
+ 	},
+-- 
+2.43.0
+

@@ -1,0 +1,73 @@
+From beca1b97a21d81eae9cbd267ecc44b5d2193e60a Mon Sep 17 00:00:00 2001
+From: Wei-Lin Chang <weilin.chang@arm.com>
+Date: Fri, 14 Aug 2026 23:24:58 +0100
+Subject: [PATCH] KVM: arm64: ptdump: Flush the last region
+
+Currently the stage-2 ptdump calls note_page() at each leaf entry visit.
+This simply misses the output of the last region, because note_page()
+only dumps output when it detects a change in level/prot, or when the
+walk enters a next marker section. The last region in the guest IPA
+space with the same level/prot is not dumped since there is no change
+after it.
+
+Call note_page_flush() to dump the final region. note_page_flush()
+uses ptdump_pg_state.end_address to call the final note_page(), so also
+provide the end address.
+
+Also change the second marker's start address to ULONG_MAX so we never
+cross it. This avoids dumping redundant marker names (which are NULL),
+and advancing beyond the end of the marker array.
+
+Fixes: 7c4f73548ed1 ("KVM: arm64: Register ptdump with debugfs on guest creation")
+Reported-by: Sashiko AI <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/kvmarm/20260630122758.891011F00A3A@smtp.kernel.org/
+Reviewed-by: Dev Jain <dev.jain@arm.com>
+Tested-by: Dev Jain <dev.jain@arm.com>
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+Reviewed-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Will Deacon <will@kernel.org>
+---
+ arch/arm64/kvm/ptdump.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
+index c9140e22abcf..69899797dbad 100644
+--- a/arch/arm64/kvm/ptdump.c
++++ b/arch/arm64/kvm/ptdump.c
+@@ -130,7 +130,7 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm_s2_mmu
+ 	}
+ 
+ 	st->ipa_marker[0].name		= "Guest IPA";
+-	st->ipa_marker[1].start_address = BIT(pgtable->ia_bits);
++	st->ipa_marker[1].start_address = ULONG_MAX;
+ 
+ 	st->mmu				= mmu;
+ 	return st;
+@@ -148,18 +148,21 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
+ 		.flags	= KVM_PGTABLE_WALK_LEAF,
+ 	};
+ 
++	guard(write_lock)(&kvm->mmu_lock);
+ 	st->parser_state = (struct ptdump_pg_state) {
+ 		.marker		= &st->ipa_marker[0],
++		.end_address	= BIT(mmu->pgt->ia_bits),
+ 		.level		= -1,
+ 		.pg_level	= &st->level[0],
+ 		.seq		= m,
+ 	};
+ 
+-	write_lock(&kvm->mmu_lock);
+ 	ret = kvm_pgtable_walk(mmu->pgt, 0, BIT(mmu->pgt->ia_bits), &walker);
+-	write_unlock(&kvm->mmu_lock);
++	if (ret)
++		return ret;
++	note_page_flush(&st->parser_state.ptdump);
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ static int kvm_ptdump_guest_open(struct inode *m, struct file *file)
+-- 
+2.43.0
+
