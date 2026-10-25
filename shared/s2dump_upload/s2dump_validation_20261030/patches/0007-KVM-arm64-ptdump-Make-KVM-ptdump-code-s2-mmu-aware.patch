@@ -1,4 +1,4 @@
-From 79084f3dcef27b88ea4e4a41aa07b726f786f8b4 Mon Sep 17 00:00:00 2001
+From 769478b757d849bff2a88e5b16926bfff4bf7a2b Mon Sep 17 00:00:00 2001
 From: Wei-Lin Chang <weilin.chang@arm.com>
 Date: Tue, 17 Mar 2026 18:26:37 +0000
 Subject: [PATCH 07/10] KVM: arm64: ptdump: Make KVM ptdump code s2 mmu aware
@@ -28,10 +28,10 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  1 file changed, 17 insertions(+), 16 deletions(-)
 
 diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
-index 8f5743fb8e63..bb22e7dcb2e1 100644
+index 4c0342e5d413..c5efc3d27a56 100644
 --- a/arch/arm64/kvm/ptdump.c
 +++ b/arch/arm64/kvm/ptdump.c
-@@ -17,7 +17,7 @@
+@@ -19,7 +19,7 @@
  #define MARKERS_LEN		2
  
  struct kvm_ptdump_guest_state {
@@ -40,7 +40,7 @@ index 8f5743fb8e63..bb22e7dcb2e1 100644
  	struct ptdump_pg_state	parser_state;
  	struct addr_marker	ipa_marker[MARKERS_LEN];
  	struct ptdump_pg_level	level[KVM_PGTABLE_MAX_LEVELS];
-@@ -92,10 +92,9 @@ static int kvm_ptdump_build_levels(struct ptdump_pg_level *level, u32 start_lvl)
+@@ -94,10 +94,9 @@ static int kvm_ptdump_build_levels(struct ptdump_pg_level *level, u32 start_lvl)
  	return 0;
  }
  
@@ -52,7 +52,7 @@ index 8f5743fb8e63..bb22e7dcb2e1 100644
  	struct kvm_pgtable *pgtable = mmu->pgt;
  	int ret;
  
-@@ -113,7 +112,7 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm *kvm)
+@@ -115,7 +114,7 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm *kvm)
  	st->ipa_marker[1].start_address = BIT(pgtable->ia_bits);
  	st->range[0].end		= BIT(pgtable->ia_bits);
  
@@ -61,7 +61,7 @@ index 8f5743fb8e63..bb22e7dcb2e1 100644
  	st->parser_state = (struct ptdump_pg_state) {
  		.marker		= &st->ipa_marker[0],
  		.level		= -1,
-@@ -129,8 +128,8 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
+@@ -131,8 +130,8 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
  {
  	int ret;
  	struct kvm_ptdump_guest_state *st = m->private;
@@ -72,7 +72,7 @@ index 8f5743fb8e63..bb22e7dcb2e1 100644
  	struct ptdump_pg_state *parser_state = &st->parser_state;
  	struct kvm_pgtable_walker walker = (struct kvm_pgtable_walker) {
  		.cb	= kvm_ptdump_visitor,
-@@ -149,14 +148,15 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
+@@ -151,14 +150,15 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
  
  static int kvm_ptdump_guest_open(struct inode *m, struct file *file)
  {
@@ -90,7 +90,7 @@ index 8f5743fb8e63..bb22e7dcb2e1 100644
  	if (IS_ERR(st)) {
  		ret = PTR_ERR(st);
  		goto err_with_kvm_ref;
-@@ -174,7 +174,7 @@ static int kvm_ptdump_guest_open(struct inode *m, struct file *file)
+@@ -176,7 +176,7 @@ static int kvm_ptdump_guest_open(struct inode *m, struct file *file)
  
  static int kvm_ptdump_guest_close(struct inode *m, struct file *file)
  {
@@ -99,7 +99,7 @@ index 8f5743fb8e63..bb22e7dcb2e1 100644
  	void *st = ((struct seq_file *)file->private_data)->private;
  
  	kfree(st);
-@@ -209,14 +209,15 @@ static int kvm_pgtable_levels_show(struct seq_file *m, void *unused)
+@@ -211,14 +211,15 @@ static int kvm_pgtable_levels_show(struct seq_file *m, void *unused)
  static int kvm_pgtable_debugfs_open(struct inode *m, struct file *file,
  				    int (*show)(struct seq_file *, void *))
  {
@@ -117,7 +117,7 @@ index 8f5743fb8e63..bb22e7dcb2e1 100644
  
  	ret = single_open(file, show, pgtable);
  	if (ret < 0)
-@@ -236,7 +237,7 @@ static int kvm_pgtable_levels_open(struct inode *m, struct file *file)
+@@ -238,7 +239,7 @@ static int kvm_pgtable_levels_open(struct inode *m, struct file *file)
  
  static int kvm_pgtable_debugfs_close(struct inode *m, struct file *file)
  {
@@ -126,7 +126,7 @@ index 8f5743fb8e63..bb22e7dcb2e1 100644
  
  	kvm_put_kvm(kvm);
  	return single_release(m, file);
-@@ -259,9 +260,9 @@ static const struct file_operations kvm_pgtable_levels_fops = {
+@@ -261,9 +262,9 @@ static const struct file_operations kvm_pgtable_levels_fops = {
  void kvm_s2_ptdump_create_debugfs(struct kvm *kvm)
  {
  	debugfs_create_file("stage2_page_tables", 0400, kvm->debugfs_dentry,

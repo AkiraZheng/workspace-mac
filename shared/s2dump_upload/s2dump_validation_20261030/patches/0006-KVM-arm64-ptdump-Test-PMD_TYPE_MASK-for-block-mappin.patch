@@ -1,4 +1,4 @@
-From fca7d54c17d8b4842e0bccb8c904fc20590bb537 Mon Sep 17 00:00:00 2001
+From 455f9ab6ffc0b8dd70bf1f49685b900a5c4da118 Mon Sep 17 00:00:00 2001
 From: Anshuman Khandual <anshuman.khandual@arm.com>
 Date: Fri, 21 Feb 2025 10:12:20 +0530
 Subject: [PATCH 06/10] KVM: arm64: ptdump: Test PMD_TYPE_MASK for block
@@ -36,10 +36,10 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
-index 05b82554ad71..8f5743fb8e63 100644
+index a7da64f78da3..4c0342e5d413 100644
 --- a/arch/arm64/kvm/ptdump.c
 +++ b/arch/arm64/kvm/ptdump.c
-@@ -51,8 +51,8 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+@@ -53,8 +53,8 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
  		.set	= "AF",
  		.clear	= "  ",
  	}, {

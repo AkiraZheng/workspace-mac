@@ -1,4 +1,4 @@
-From d711eb00c166866824151ee46342550090401fd1 Mon Sep 17 00:00:00 2001
+From 23697e1c25d8ea5e1fd7710505da909cd8d8d0c3 Mon Sep 17 00:00:00 2001
 From: Sebastian Ene <sebastianene@google.com>
 Date: Mon, 9 Sep 2024 12:47:21 +0000
 Subject: [PATCH 04/10] KVM: arm64: Register ptdump with debugfs on guest
@@ -41,17 +41,19 @@ inserted after kvm_s2_mmu_to_kvm() as kvm_is_nested_s2_mmu() does not
 exist; the Kconfig option and the Makefile rule were moved to nearby
 anchors; arm.c has no kvm_arch_create_vm_debugfs() in 6.6, so the
 function is newly created matching the prototype in kvm_host.h. In
-ptdump.c, KVM_PGTABLE_LAST_LEVEL does not exist in 6.6: the local
-KVM_PGTABLE_MAX_LEVELS redefinition is dropped in favour of the 4U
-definition from kvm_pgtable.h.]
+ptdump.c, KVM_PGTABLE_LAST_LEVEL does not exist in 6.6 (it comes from
+mainline 419edf48d79f): the local KVM_PGTABLE_MAX_LEVELS redefinition
+is dropped in favour of the 4U definition from kvm_pgtable.h, and
+KVM_PGTABLE_LAST_LEVEL is defined locally as
+(KVM_PGTABLE_MAX_LEVELS - 1), keeping the checks verbatim.]
 Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
 ---
  arch/arm64/include/asm/kvm_mmu.h |   7 +
  arch/arm64/kvm/Kconfig           |  17 ++
  arch/arm64/kvm/Makefile          |   1 +
  arch/arm64/kvm/arm.c             |   6 +
- arch/arm64/kvm/ptdump.c          | 267 +++++++++++++++++++++++++++++++
- 5 files changed, 298 insertions(+)
+ arch/arm64/kvm/ptdump.c          | 269 +++++++++++++++++++++++++++++++
+ 5 files changed, 300 insertions(+)
  create mode 100644 arch/arm64/kvm/ptdump.c
 
 diff --git a/arch/arm64/include/asm/kvm_mmu.h b/arch/arm64/include/asm/kvm_mmu.h
@@ -128,10 +130,10 @@ index 8c7ebba9a42f..683748db65df 100644
   * kvm_arch_destroy_vm - destroy the VM data structure
 diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
 new file mode 100644
-index 000000000000..f18e8dfc9a6b
+index 000000000000..be4eb0de59b0
 --- /dev/null
 +++ b/arch/arm64/kvm/ptdump.c
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,269 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Debug helper used to dump the stage-2 pagetables of the system and their
@@ -147,6 +149,8 @@ index 000000000000..f18e8dfc9a6b
 +#include <asm/kvm_mmu.h>
 +#include <asm/kvm_pgtable.h>
 +#include <asm/ptdump.h>
++
++#define KVM_PGTABLE_LAST_LEVEL		(KVM_PGTABLE_MAX_LEVELS - 1)
 +
 +#define MARKERS_LEN		2
 +
@@ -208,7 +212,7 @@ index 000000000000..f18e8dfc9a6b
 +	u32 i;
 +	u64 mask;
 +
-+	if (WARN_ON_ONCE(start_lvl >= KVM_PGTABLE_MAX_LEVELS - 1))
++	if (WARN_ON_ONCE(start_lvl >= KVM_PGTABLE_LAST_LEVEL))
 +		return -EINVAL;
 +
 +	mask = 0;

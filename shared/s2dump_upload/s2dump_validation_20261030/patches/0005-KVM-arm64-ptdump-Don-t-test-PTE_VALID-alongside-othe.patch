@@ -1,4 +1,4 @@
-From 01eb6914437a0415a6aaa99f8345ef8c1bf1db3f Mon Sep 17 00:00:00 2001
+From e2fa0c5aea3132b441773ac7ebd3288652f9a0dc Mon Sep 17 00:00:00 2001
 From: Wei-Lin Chang <r09922117@csie.ntu.edu.tw>
 Date: Sat, 9 Aug 2025 21:53:56 +0800
 Subject: [PATCH 05/10] KVM: arm64: ptdump: Don't test PTE_VALID alongside
@@ -40,10 +40,10 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  1 file changed, 10 insertions(+), 10 deletions(-)
 
 diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
-index f18e8dfc9a6b..05b82554ad71 100644
+index be4eb0de59b0..a7da64f78da3 100644
 --- a/arch/arm64/kvm/ptdump.c
 +++ b/arch/arm64/kvm/ptdump.c
-@@ -31,23 +31,23 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+@@ -33,23 +33,23 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
  		.set	= " ",
  		.clear	= "F",
  	}, {

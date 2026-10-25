@@ -1,4 +1,4 @@
-From 5c8cc4d0d46e8f111555a001ce0e51b85940f082 Mon Sep 17 00:00:00 2001
+From eb559f099c6769ba755b611474477b0c2d8ad378 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Sun, 25 Oct 2026 02:55:12 +0800
 Subject: [PATCH 10/10] KVM: arm64: ptdump: Dump stage-2 memory attributes
@@ -45,7 +45,7 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  1 file changed, 31 insertions(+)
 
 diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
-index bafacada9b07..b5c70b561e3c 100644
+index 95e534ae9300..10868cfcedf0 100644
 --- a/arch/arm64/kvm/ptdump.c
 +++ b/arch/arm64/kvm/ptdump.c
 @@ -12,6 +12,8 @@
@@ -56,8 +56,8 @@ index bafacada9b07..b5c70b561e3c 100644
 +#include <asm/pgtable-prot.h>
  #include <asm/ptdump.h>
  
- #define MARKERS_LEN		2
-@@ -55,6 +57,35 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
+ #define KVM_PGTABLE_LAST_LEVEL		(KVM_PGTABLE_MAX_LEVELS - 1)
+@@ -57,6 +59,35 @@ static const struct ptdump_prot_bits stage2_pte_bits[] = {
  		.set	= "BLK",
  		.clear	= "   ",
  	},

@@ -1,4 +1,4 @@
-From 4821bd1cd69bab09cf830cb3ddebb69cf31f19f7 Mon Sep 17 00:00:00 2001
+From 8a46b8f37a9013b108631587cc1896a3c6beedc1 Mon Sep 17 00:00:00 2001
 From: Wei-Lin Chang <weilin.chang@arm.com>
 Date: Fri, 14 Aug 2026 23:24:58 +0100
 Subject: [PATCH 09/10] KVM: arm64: ptdump: Flush the last region
@@ -42,15 +42,16 @@ Conflicts:
 	arch/arm64/mm/ptdump.c
 [ptdump_pg_state.end_address and note_page_flush() do not exist in 6.6
 (they come from mainline e064e7384f99 and 902caade3cfd, which are not
-backported); a minimal port of 902caade3cfd is included, adapted to the
-OLK note_page(pt_st, addr, level, val) signature while preserving the
-ULONG_MAX wraparound semantics.]
+backported); a minimal port of 902caade3cfd is included - the function
+body is verbatim upstream, and only the host-side
+ptdump_walk/ptdump_check_wx call sites are omitted, as 6.6's generic
+walk has no flush invocation.]
 Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
 ---
  arch/arm64/include/asm/ptdump.h |  4 ++++
  arch/arm64/kvm/ptdump.c         | 11 +++++++----
- arch/arm64/mm/ptdump.c          | 16 ++++++++++++++++
- 3 files changed, 27 insertions(+), 4 deletions(-)
+ arch/arm64/mm/ptdump.c          | 17 +++++++++++++++++
+ 3 files changed, 28 insertions(+), 4 deletions(-)
 
 diff --git a/arch/arm64/include/asm/ptdump.h b/arch/arm64/include/asm/ptdump.h
 index f4d46d8e13ee..cd8ead03ba82 100644
@@ -82,10 +83,10 @@ index f4d46d8e13ee..cd8ead03ba82 100644
  
  #ifdef CONFIG_DEBUG_WX
 diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
-index fc0e46b4b96c..bafacada9b07 100644
+index dc4a05319e96..95e534ae9300 100644
 --- a/arch/arm64/kvm/ptdump.c
 +++ b/arch/arm64/kvm/ptdump.c
-@@ -108,7 +108,7 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm_s2_mmu
+@@ -110,7 +110,7 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm_s2_mmu
  	}
  
  	st->ipa_marker[0].name		= "Guest IPA";
@@ -94,7 +95,7 @@ index fc0e46b4b96c..bafacada9b07 100644
  
  	st->mmu				= mmu;
  	return st;
-@@ -126,18 +126,21 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
+@@ -128,18 +128,21 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
  		.flags	= KVM_PGTABLE_WALK_LEAF,
  	};
  
@@ -120,10 +121,10 @@ index fc0e46b4b96c..bafacada9b07 100644
  
  static int kvm_ptdump_guest_open(struct inode *m, struct file *file)
 diff --git a/arch/arm64/mm/ptdump.c b/arch/arm64/mm/ptdump.c
-index b9b73258cfb0..9ca2423d590a 100644
+index b9b73258cfb0..acaafc93047f 100644
 --- a/arch/arm64/mm/ptdump.c
 +++ b/arch/arm64/mm/ptdump.c
-@@ -282,6 +282,22 @@ void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
+@@ -282,6 +282,23 @@ void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
  
  }
  
@@ -131,6 +132,7 @@ index b9b73258cfb0..9ca2423d590a 100644
 +{
 +	struct ptdump_pg_state *st = container_of(pt_st, struct ptdump_pg_state, ptdump);
 +	unsigned long end = st->end_address;
++	pte_t pte_zero = {0};
 +
 +	/*
 +	 * Address spaces that end at 1 << 64 have end_address == ULONG_MAX,
@@ -140,7 +142,7 @@ index b9b73258cfb0..9ca2423d590a 100644
 +	if (end == ULONG_MAX)
 +		end = 0;
 +
-+	note_page(pt_st, end, -1, 0);
++	note_page(pt_st, end, -1, pte_val(pte_zero));
 +}
 +
  static void arm64_ptdump_walk_pgd(struct ptdump_state *st, struct mm_struct *mm)
