@@ -1,4 +1,4 @@
-From af2dd001d60032b4ace9ff2c5a1f507ff3b875fd Mon Sep 17 00:00:00 2001
+From bb2e72aed171de69690e195e516c0ddc3ec023d8 Mon Sep 17 00:00:00 2001
 From: Sebastian Ene <sebastianene@google.com>
 Date: Mon, 9 Sep 2024 12:47:18 +0000
 Subject: [PATCH 02/10] arm64: ptdump: Expose the attribute parsing
@@ -28,18 +28,20 @@ Signed-off-by: Marc Zyngier <maz@kernel.org>
 Conflicts:
 	arch/arm64/include/asm/ptdump.h
 	arch/arm64/mm/ptdump.c
-[ptdump_pg_level keeps the OLK-6.6 member shape (const char *name;
-size_t num) instead of the upstream char name[4]; int num, which relies on
-mainline d40900fcb397; the OLK-specific arm64_ptdump_lock_key declaration
-and the ptdump_check_wx() prototype are preserved.]
+[The struct keeps the upstream 'char name[4]' member form; the OLK-6.6
+baseline uses 'const char *name' with ternary pointer initialisers in
+kernel_pg_levels, which do not compile with the array form, so the two
+folded-level initialisers are converted to #if blocks (compile-time
+equivalent). The OLK-specific arm64_ptdump_lock_key declaration and the
+ptdump_check_wx() prototype are preserved.]
 Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
 ---
- arch/arm64/include/asm/ptdump.h | 42 ++++++++++++++++++++++++-
- arch/arm64/mm/ptdump.c          | 54 +++++++--------------------------
- 2 files changed, 52 insertions(+), 44 deletions(-)
+ arch/arm64/include/asm/ptdump.h | 42 ++++++++++++++++++++-
+ arch/arm64/mm/ptdump.c          | 66 +++++++++++----------------------
+ 2 files changed, 62 insertions(+), 46 deletions(-)
 
 diff --git a/arch/arm64/include/asm/ptdump.h b/arch/arm64/include/asm/ptdump.h
-index 9841bf24ad76..af71ac653b5f 100644
+index 9841bf24ad76..1cd08731941b 100644
 --- a/arch/arm64/include/asm/ptdump.h
 +++ b/arch/arm64/include/asm/ptdump.h
 @@ -5,6 +5,8 @@
@@ -64,8 +66,8 @@ index 9841bf24ad76..af71ac653b5f 100644
 +
 +struct ptdump_pg_level {
 +	const struct ptdump_prot_bits *bits;
-+	const char *name;
-+	size_t num;
++	char name[4];
++	int num;
 +	u64 mask;
 +};
 +
@@ -107,7 +109,7 @@ index 9841bf24ad76..af71ac653b5f 100644
  
  #ifdef CONFIG_DEBUG_WX
 diff --git a/arch/arm64/mm/ptdump.c b/arch/arm64/mm/ptdump.c
-index dcf2eaa1b244..1e460dbe5baa 100644
+index dcf2eaa1b244..48eb4f6db21f 100644
 --- a/arch/arm64/mm/ptdump.c
 +++ b/arch/arm64/mm/ptdump.c
 @@ -66,32 +66,7 @@ static struct addr_marker address_markers[] = {
@@ -160,7 +162,29 @@ index dcf2eaa1b244..1e460dbe5baa 100644
  	{ /* pgd */
  		.name	= "PGD",
  		.bits	= pte_bits,
-@@ -201,7 +169,7 @@ static struct pg_level pg_level[] = {
+@@ -187,11 +155,19 @@ static struct pg_level pg_level[] = {
+ 		.bits	= pte_bits,
+ 		.num	= ARRAY_SIZE(pte_bits),
+ 	}, { /* pud */
+-		.name	= (CONFIG_PGTABLE_LEVELS > 3) ? "PUD" : "PGD",
++#if CONFIG_PGTABLE_LEVELS > 3
++		.name	= "PUD",
++#else
++		.name	= "PGD",
++#endif
+ 		.bits	= pte_bits,
+ 		.num	= ARRAY_SIZE(pte_bits),
+ 	}, { /* pmd */
+-		.name	= (CONFIG_PGTABLE_LEVELS > 2) ? "PMD" : "PGD",
++#if CONFIG_PGTABLE_LEVELS > 2
++		.name	= "PMD",
++#else
++		.name	= "PGD",
++#endif
+ 		.bits	= pte_bits,
+ 		.num	= ARRAY_SIZE(pte_bits),
+ 	}, { /* pte */
+@@ -201,7 +177,7 @@ static struct pg_level pg_level[] = {
  	},
  };
  
@@ -169,7 +193,7 @@ index dcf2eaa1b244..1e460dbe5baa 100644
  			size_t num)
  {
  	unsigned i;
-@@ -219,7 +187,7 @@ static void dump_prot(struct pg_state *st, const struct prot_bits *bits,
+@@ -219,7 +195,7 @@ static void dump_prot(struct pg_state *st, const struct prot_bits *bits,
  	}
  }
  
@@ -178,7 +202,7 @@ index dcf2eaa1b244..1e460dbe5baa 100644
  {
  	if (!st->check_wx)
  		return;
-@@ -233,7 +201,7 @@ static void note_prot_uxn(struct pg_state *st, unsigned long addr)
+@@ -233,7 +209,7 @@ static void note_prot_uxn(struct pg_state *st, unsigned long addr)
  	st->uxn_pages += (addr - st->start_address) / PAGE_SIZE;
  }
  
@@ -187,7 +211,7 @@ index dcf2eaa1b244..1e460dbe5baa 100644
  {
  	if (!st->check_wx)
  		return;
-@@ -248,10 +216,10 @@ static void note_prot_wx(struct pg_state *st, unsigned long addr)
+@@ -248,10 +224,10 @@ static void note_prot_wx(struct pg_state *st, unsigned long addr)
  	st->wx_pages += (addr - st->start_address) / PAGE_SIZE;
  }
  
@@ -201,7 +225,7 @@ index dcf2eaa1b244..1e460dbe5baa 100644
  	static const char units[] = "KMGTPE";
  	u64 prot = 0;
  
-@@ -315,12 +283,12 @@ static void arm64_ptdump_walk_pgd(struct ptdump_state *st, struct mm_struct *mm)
+@@ -315,12 +291,12 @@ static void arm64_ptdump_walk_pgd(struct ptdump_state *st, struct mm_struct *mm)
  void ptdump_walk(struct seq_file *s, struct ptdump_info *info)
  {
  	unsigned long end = ~0UL;
@@ -216,7 +240,7 @@ index dcf2eaa1b244..1e460dbe5baa 100644
  		.seq = s,
  		.marker = info->markers,
  		.level = -1,
-@@ -354,7 +322,7 @@ static struct ptdump_info kernel_ptdump_info = {
+@@ -354,7 +330,7 @@ static struct ptdump_info kernel_ptdump_info = {
  
  void ptdump_check_wx(void)
  {

@@ -1,4 +1,4 @@
-From 38b43da675d1661efe7eec2ba5d6d826261e03fb Mon Sep 17 00:00:00 2001
+From 8ae09841aec41c3d617d5ad76d9827296a39d0ce Mon Sep 17 00:00:00 2001
 From: Sebastian Ene <sebastianene@google.com>
 Date: Mon, 9 Sep 2024 12:47:19 +0000
 Subject: [PATCH 03/10] arm64: ptdump: Use the ptdump description from a local
@@ -37,7 +37,7 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  2 files changed, 9 insertions(+), 5 deletions(-)
 
 diff --git a/arch/arm64/include/asm/ptdump.h b/arch/arm64/include/asm/ptdump.h
-index af71ac653b5f..d550f6ac17e4 100644
+index 1cd08731941b..f4d46d8e13ee 100644
 --- a/arch/arm64/include/asm/ptdump.h
 +++ b/arch/arm64/include/asm/ptdump.h
 @@ -47,6 +47,7 @@ struct ptdump_pg_level {
@@ -49,7 +49,7 @@ index af71ac653b5f..d550f6ac17e4 100644
  	const struct addr_marker *marker;
  	const struct mm_struct *mm;
 diff --git a/arch/arm64/mm/ptdump.c b/arch/arm64/mm/ptdump.c
-index 1e460dbe5baa..3469b4c80969 100644
+index 48eb4f6db21f..b9b73258cfb0 100644
 --- a/arch/arm64/mm/ptdump.c
 +++ b/arch/arm64/mm/ptdump.c
 @@ -145,7 +145,7 @@ static const struct ptdump_prot_bits pte_bits[] = {
@@ -61,7 +61,7 @@ index 1e460dbe5baa..3469b4c80969 100644
  	{ /* pgd */
  		.name	= "PGD",
  		.bits	= pte_bits,
-@@ -220,6 +220,7 @@ void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
+@@ -228,6 +228,7 @@ void note_page(struct ptdump_state *pt_st, unsigned long addr, int level,
  	       u64 val)
  {
  	struct ptdump_pg_state *st = container_of(pt_st, struct ptdump_pg_state, ptdump);
@@ -69,7 +69,7 @@ index 1e460dbe5baa..3469b4c80969 100644
  	static const char units[] = "KMGTPE";
  	u64 prot = 0;
  
-@@ -291,6 +292,7 @@ void ptdump_walk(struct seq_file *s, struct ptdump_info *info)
+@@ -299,6 +300,7 @@ void ptdump_walk(struct seq_file *s, struct ptdump_info *info)
  	st = (struct ptdump_pg_state){
  		.seq = s,
  		.marker = info->markers,
@@ -77,7 +77,7 @@ index 1e460dbe5baa..3469b4c80969 100644
  		.level = -1,
  		.ptdump = {
  			.note_page = note_page,
-@@ -308,10 +310,10 @@ static void __init ptdump_initialize(void)
+@@ -316,10 +318,10 @@ static void __init ptdump_initialize(void)
  {
  	unsigned i, j;
  
@@ -92,7 +92,7 @@ index 1e460dbe5baa..3469b4c80969 100644
  }
  
  static struct ptdump_info kernel_ptdump_info = {
-@@ -328,6 +330,7 @@ void ptdump_check_wx(void)
+@@ -336,6 +338,7 @@ void ptdump_check_wx(void)
  			{ 0, NULL},
  			{ -1, NULL},
  		},

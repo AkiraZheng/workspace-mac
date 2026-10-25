@@ -1,4 +1,4 @@
-From 7181b89eeaeac542da6e465c8b922afdebb904d3 Mon Sep 17 00:00:00 2001
+From e8ef018a62068963bb5032659c91bec2f3793c67 Mon Sep 17 00:00:00 2001
 From: "Zenghui Yu (Huawei)" <zenghui.yu@linux.dev>
 Date: Sat, 28 Mar 2026 13:31:55 +0800
 Subject: [PATCH 08/10] KVM: arm64: ptdump: Initialize parser_state before
@@ -44,7 +44,7 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  1 file changed, 7 insertions(+), 13 deletions(-)
 
 diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
-index b5a949efe7cc..9124ffbd6a06 100644
+index bb22e7dcb2e1..fc0e46b4b96c 100644
 --- a/arch/arm64/kvm/ptdump.c
 +++ b/arch/arm64/kvm/ptdump.c
 @@ -21,7 +21,6 @@ struct kvm_ptdump_guest_state {
@@ -55,7 +55,7 @@ index b5a949efe7cc..9124ffbd6a06 100644
  };
  
  static const struct ptdump_prot_bits stage2_pte_bits[] = {
-@@ -113,17 +112,8 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm_s2_mmu
+@@ -110,17 +109,8 @@ static struct kvm_ptdump_guest_state *kvm_ptdump_parser_create(struct kvm_s2_mmu
  
  	st->ipa_marker[0].name		= "Guest IPA";
  	st->ipa_marker[1].start_address = BIT(pgtable->ia_bits);
@@ -73,7 +73,7 @@ index b5a949efe7cc..9124ffbd6a06 100644
  	return st;
  }
  
-@@ -133,14 +123,18 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
+@@ -130,14 +120,18 @@ static int kvm_ptdump_guest_show(struct seq_file *m, void *unused)
  	struct kvm_ptdump_guest_state *st = m->private;
  	struct kvm_s2_mmu *mmu = st->mmu;
  	struct kvm *kvm = kvm_s2_mmu_to_kvm(mmu);

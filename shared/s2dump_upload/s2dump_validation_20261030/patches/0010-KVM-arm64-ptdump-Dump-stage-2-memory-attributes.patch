@@ -1,4 +1,4 @@
-From 2be363ca6f512dd172498c3eadfea69b89f0e34d Mon Sep 17 00:00:00 2001
+From 5c8cc4d0d46e8f111555a001ce0e51b85940f082 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Sun, 25 Oct 2026 02:55:12 +0800
 Subject: [PATCH 10/10] KVM: arm64: ptdump: Dump stage-2 memory attributes
@@ -45,7 +45,7 @@ Signed-off-by: Tian Zheng <zhengtian10@huawei.com>
  1 file changed, 31 insertions(+)
 
 diff --git a/arch/arm64/kvm/ptdump.c b/arch/arm64/kvm/ptdump.c
-index d3bbfa3ac5f4..07cd11e2c7d0 100644
+index bafacada9b07..b5c70b561e3c 100644
 --- a/arch/arm64/kvm/ptdump.c
 +++ b/arch/arm64/kvm/ptdump.c
 @@ -12,6 +12,8 @@

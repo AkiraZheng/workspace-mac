@@ -41,6 +41,7 @@
 2. **登记差异（唯一）**: XN 字段渲染——主线（FEAT_XNX 演进后）打 `px ux/PXNUXN`，本系列打 `x/NX`，语义等价（详见 compare-report §4）。
 3. **T-PR-08（DEV memattr）**: 两侧同因不可达（板卡 ACPI 无 GICV resource，KVM 不支持 GICv2 emulation），与基线登记一致。
 4. **脱敏说明**: vm-bootkit 脚本与文档中的虚机登录密码已替换为 `VM_PASSWORD` 占位符（与仓库既有脱敏惯例一致，实际值见测试板环境）。
+5. **patch 序列修订 (v2, 2026-10-30)**: 0002/0005 按上游 `d40900fcb397` 形态对齐 `struct ptdump_pg_level` 的 `char name[4]` 成员——kvm/ptdump.c 的 level 名初始化恢复上游 `snprintf` 原文（消除静态字符串表），mm/ptdump.c 的折叠级别三元指针初始化改为 `#if` 编译期等价形式。dump 输出不变（回归确认中）。
 
 ## PR 描述用的 XN 声明（系列范围说明，非 commit message）
 
