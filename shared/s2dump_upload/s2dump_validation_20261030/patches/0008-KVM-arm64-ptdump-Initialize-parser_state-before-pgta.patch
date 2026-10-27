@@ -1,4 +1,4 @@
-From ecb9742d2f0ca32c3577272f87043e68267305df Mon Sep 17 00:00:00 2001
+From 3f7a04c6355cc9f19486d0f3fc658ddee4f69bda Mon Sep 17 00:00:00 2001
 From: "Zenghui Yu (Huawei)" <zenghui.yu@linux.dev>
 Date: Sat, 28 Mar 2026 13:31:55 +0800
 Subject: [PATCH 08/10] KVM: arm64: ptdump: Initialize parser_state before

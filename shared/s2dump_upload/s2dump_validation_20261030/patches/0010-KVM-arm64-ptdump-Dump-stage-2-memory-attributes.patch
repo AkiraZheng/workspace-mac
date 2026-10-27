@@ -1,4 +1,4 @@
-From eb559f099c6769ba755b611474477b0c2d8ad378 Mon Sep 17 00:00:00 2001
+From a41d5378e27d64cf05fc66d6df74775d2b100815 Mon Sep 17 00:00:00 2001
 From: Tian Zheng <zhengtian10@huawei.com>
 Date: Sun, 25 Oct 2026 02:55:12 +0800
 Subject: [PATCH 10/10] KVM: arm64: ptdump: Dump stage-2 memory attributes
@@ -23,6 +23,9 @@ The final memory attributes are affected by the FWB feature:
   the MemAttr in the stage-2 PTE.
 - With FWB disabled, the memory attributes are determined by both
   stage-1 and stage-2.
+
+The FWB state can be checked at runtime with:
+  dmesg | grep "Stage-2 Force Write-Back"
 
 KVM selects one of two fixed sets depending on whether the host
 supports ARM64_HAS_STAGE2_FWB:
